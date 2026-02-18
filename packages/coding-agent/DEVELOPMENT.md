@@ -572,9 +572,14 @@ bun run check
 # Type check and build (from packages/coding-agent)
 bun run build
 
-# Build standalone binary
+# Build standalone binary (using Bun)
 bun run build:binary
+
+# Build Node.js bundle (using esbuild)
+bun run build:bundle
 ```
+
+The `build:bundle` command creates a single `dist/omp.js` file that can run on any Node.js 20+ runtime. This is ideal for lightweight container deployments where Bun is not available.
 
 ### Testing
 

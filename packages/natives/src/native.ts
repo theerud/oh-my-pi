@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getNativesDir } from "@oh-my-pi/pi-utils/dirs";
 import packageJson from "../package.json";
@@ -34,15 +35,22 @@ const require = createRequire(import.meta.url);
 const textDecoder = new TextDecoder();
 const platformTag = `${process.platform}-${process.arch}`;
 const packageVersion = (packageJson as { version: string }).version;
-const nativeDir = path.join(import.meta.dir, "..", "native");
+
+// Safer way to get __dirname that works in Bun (including --compile) and Node.js
+const __dirname =
+	(import.meta as any).dir ||
+	(import.meta.url.startsWith("file:") ? path.dirname(fileURLToPath(import.meta.url)) : ".");
+
+const nativeDir = path.join(__dirname, "..", "native");
 const execDir = path.dirname(process.execPath);
 const versionedDir = path.join(getNativesDir(), packageVersion);
 const userDataDir =
 	process.platform === "win32"
-		? path.join(Bun.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "omp")
+		? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "omp")
 		: path.join(os.homedir(), ".local", "bin");
 const isCompiledBinary =
-	Bun.env.PI_COMPILED ||
+	process.env.PI_COMPILED === "true" ||
+	(typeof Bun !== "undefined" && Bun.env.PI_COMPILED === "true") ||
 	import.meta.url.includes("$bunfs") ||
 	import.meta.url.includes("~BUN") ||
 	import.meta.url.includes("%7EBUN");

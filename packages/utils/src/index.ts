@@ -1,5 +1,7 @@
 export * from "./abortable";
 export * from "./color";
+export * from "./dirs";
+export * from "./cli";
 export * from "./env";
 export * from "./fs-error";
 export * from "./glob";

@@ -69,6 +69,7 @@ export { loginSynthetic } from "./synthetic";
 export * from "./types";
 // Z.AI (API key)
 export { loginZai } from "./zai";
+export { OAuthCallbackFlow } from "./callback-server";
 
 const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
