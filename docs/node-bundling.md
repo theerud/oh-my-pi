@@ -13,17 +13,22 @@ While the default build (`bun run build:binary`) produces a standalone native bi
 
 ## Building the Bundle
 
-From the root of the repository or within `packages/coding-agent`:
+The preferred way to create a ready-to-run distribution is using the root-level script:
 
 ```bash
-bun --cwd packages/coding-agent run build:bundle
+bun run build:dist
 ```
 
-This will:
-1. Generate the stats dashboard client bundle.
-2. Use `esbuild` to bundle all TypeScript source files.
-3. Apply a `bun-shim.ts` to provide compatibility for Bun-specific APIs (like `Bun.file`, `Bun.spawn`, etc.).
-4. Output a shebang-enabled ESM file at `packages/coding-agent/dist/omp.js`.
+This orchestrated script will:
+1. Build all native modules (`pi_natives`).
+2. Generate the JS bundle (`omp.js`) for Node.js.
+3. Assemble a standalone `dist/omp/` folder.
+4. Automatically `npm install` external native dependencies like `better-sqlite3` inside the distribution folder.
+5. Create a portable `.tar.gz` in `dist/`.
+
+### Manual Build (Advanced)
+
+If you only want to build the JS bundle without the full packaging:
 
 ## Native Modules
 
