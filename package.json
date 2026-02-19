@@ -35,6 +35,7 @@
 		"publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
 		"release": "bun scripts/release.ts",
 		"build:dist": "bun scripts/build-dist.ts",
+		"clean": "rm -rf target dist node_modules packages/*/node_modules packages/*/dist",
 		"generate-models": "bun --cwd=packages/ai scripts/generate-models.ts"
 	},
 	"devDependencies": {
