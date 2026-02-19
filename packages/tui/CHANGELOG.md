@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [12.12.2] - 2026-02-19
+
+### Fixed
+
+- Fixed non-forced full re-renders clearing terminal scrollback history during streaming updates by limiting scrollback clears to explicit forced re-renders.
+
+## [12.12.0] - 2026-02-19
+
+### Added
+
+- Added PageUp/PageDown navigation for editor content and autocomplete selection to jump across long wrapped inputs faster.
+
+### Fixed
+
+- Fixed history-entry navigation anchoring (Up opens at top, Down opens at bottom) and preserved editor scroll context when max-height changes to keep cursor movement visible in long prompts ([#99](https://github.com/can1357/oh-my-pi/issues/99)).
+
+## [12.11.3] - 2026-02-19
+
+### Fixed
+
+- Fixed differential deleted-line rendering when content shrinks to empty so stale first-row content is cleared reliably.
+- Fixed incremental stale-row clearing to use erase-below semantics in synchronized output, reducing leftover-line artifacts after shrink operations.
+
 ## [12.9.0] - 2026-02-17
 ### Added
 

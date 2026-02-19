@@ -1,6 +1,17 @@
 # Changelog
 
 ## [Unreleased]
+
+## [12.11.0] - 2026-02-19
+
+### Added
+
+- Exported `AgentBusyError` exception class for handling concurrent agent operations
+
+### Changed
+
+- Agent now throws `AgentBusyError` instead of generic `Error` when attempting concurrent operations
+
 ## [12.8.0] - 2026-02-16
 
 ### Added

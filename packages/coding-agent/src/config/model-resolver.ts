@@ -2,86 +2,22 @@
  * Model resolution, scoping, and initial selection
  */
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
+import { type Api, DEFAULT_MODEL_PER_PROVIDER, type KnownProvider, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
 import { isValidThinkingLevel } from "../cli/args";
+import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { fuzzyMatch } from "../utils/fuzzy";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "./model-registry";
 import type { Settings } from "./settings";
 
 /** Default model IDs for each known provider */
-export const defaultModelPerProvider: Record<KnownProvider, string> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-	anthropic: "claude-sonnet-4-6",
-	openai: "gpt-5.1-codex",
-	"openai-codex": "gpt-5.3-codex",
-	google: "gemini-2.5-pro",
-	"google-gemini-cli": "gemini-2.5-pro",
-	"google-antigravity": "gemini-3-pro-high",
-	"google-vertex": "gemini-3-pro-preview",
-	"github-copilot": "gpt-4o",
-	cursor: "claude-sonnet-4-6",
-	openrouter: "openai/gpt-5.1-codex",
-	"vercel-ai-gateway": "anthropic/claude-sonnet-4-6",
-	xai: "grok-4-fast-non-reasoning",
-	groq: "openai/gpt-oss-120b",
-	cerebras: "zai-glm-4.6",
-	zai: "glm-4.6",
-	mistral: "devstral-medium-latest",
-	minimax: "MiniMax-M2.5",
-	"minimax-code": "MiniMax-M2.5",
-	"minimax-code-cn": "MiniMax-M2.5",
-	opencode: "claude-sonnet-4-6",
-	"kimi-code": "kimi-k2.5",
-	synthetic: "hf:moonshotai/Kimi-K2.5",
-};
+export const defaultModelPerProvider: Record<KnownProvider, string> = DEFAULT_MODEL_PER_PROVIDER;
 
 export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
 }
-
-/** Priority chain for auto-discovering smol/fast models */
-export const SMOL_MODEL_PRIORITY = [
-	// any spark
-	"gpt-5.3-codex-spark",
-	"gpt-5.3-spark",
-	"spark",
-	// cerebras zai
-	"cerebras/zai-glm-4.7",
-	"cerebras/zai-glm-4.6",
-	"cerebras/zai-glm",
-	// any haiku
-	"haiku-4-5",
-	"haiku-4.5",
-	"haiku",
-	// any flash
-	"flash",
-	// any mini
-	"mini",
-];
-
-/** Priority chain for auto-discovering slow/comprehensive models (reasoning, codex) */
-export const SLOW_MODEL_PRIORITY = [
-	// any codex
-	"gpt-5.3-codex",
-	"gpt-5.3",
-	"gpt-5.2-codex",
-	"gpt-5.2",
-	"gpt-5.1-codex",
-	"gpt-5.1",
-	"codex",
-	// any opus
-	"opus-4.6",
-	"opus-4-6",
-	"opus-4.5",
-	"opus-4-5",
-	"opus-4.1",
-	"opus-4-1",
-	// whatever
-	"pro",
-];
 
 /**
  * Parse a model string in "provider/modelId" format.
@@ -812,7 +748,7 @@ export async function findSmolModel(
 	}
 
 	// 2. Try priority chain
-	for (const pattern of SMOL_MODEL_PRIORITY) {
+	for (const pattern of MODEL_PRIO.smol) {
 		// Try exact match with provider prefix
 		const providerMatch = availableModels.find(m => `${m.provider}/${m.id}`.toLowerCase() === pattern);
 		if (providerMatch) return providerMatch;
@@ -855,7 +791,7 @@ export async function findSlowModel(
 	}
 
 	// 2. Try priority chain
-	for (const pattern of SLOW_MODEL_PRIORITY) {
+	for (const pattern of MODEL_PRIO.slow) {
 		// Try exact match first
 		const exactMatch = availableModels.find(m => m.id.toLowerCase() === pattern.toLowerCase());
 		if (exactMatch) return exactMatch;

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getAgentDir, getConfigRootDir } from "./dirs";
 
 /**
  * Parses a .env file synchronously and extracts key-value string pairs.
@@ -46,9 +47,11 @@ function parseEnvFile(filePath: string): Record<string, string> {
 
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
+const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
+const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
 const projectEnv = parseEnvFile(path.join(process.cwd(), ".env"));
 
-for (const file of [projectEnv, homeEnv]) {
+for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const [key, value] of Object.entries(file)) {
 		if (!Bun.env[key]) {
 			Bun.env[key] = value;
@@ -64,3 +67,18 @@ for (const file of [projectEnv, homeEnv]) {
  * overrides (project, home) have been applied, so $env always reflects the correct values.
  */
 export const $env: Record<string, string> = Bun.env as Record<string, string>;
+
+/**
+ * Resolve the first environment variable value from the given keys.
+ * @param keys - The keys to resolve.
+ * @returns The first environment variable value, or undefined if no value is found.
+ */
+export function $pickenv(...keys: string[]): string | undefined {
+	for (const key of keys) {
+		const value = Bun.env[key]?.trim();
+		if (value) {
+			return value;
+		}
+	}
+	return undefined;
+}

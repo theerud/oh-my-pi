@@ -536,6 +536,14 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"task.disabledAgents": {
+		type: "array",
+		default: [] as string[],
+	},
+	"task.agentModelOverrides": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Startup settings
@@ -645,7 +653,7 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	"providers.webSearch": {
 		type: "enum",
-		values: ["auto", "exa", "brave", "jina", "zai", "perplexity", "anthropic"] as const,
+		values: ["auto", "exa", "brave", "jina", "kimi", "zai", "perplexity", "anthropic"] as const,
 		default: "auto",
 		ui: { tab: "services", label: "Web search provider", description: "Provider for web search tool", submenu: true },
 	},

@@ -16,7 +16,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	type Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentState,
+	type AgentTool,
+	type ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -304,6 +312,7 @@ export class AgentSession {
 
 	// Handoff state
 	#handoffAbortController: AbortController | undefined = undefined;
+	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined = undefined;
 
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
@@ -579,6 +588,9 @@ export class AgentSession {
 				this.#lastAssistantMessage = event.message;
 				const assistantMsg = event.message as AssistantMessage;
 				this.#queueDeferredTtsrInjectionIfNeeded(assistantMsg);
+				if (this.#handoffAbortController) {
+					this.#skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
+				}
 				if (
 					assistantMsg.stopReason !== "error" &&
 					assistantMsg.stopReason !== "aborted" &&
@@ -636,6 +648,11 @@ export class AgentSession {
 		if (event.type === "agent_end" && this.#lastAssistantMessage) {
 			const msg = this.#lastAssistantMessage;
 			this.#lastAssistantMessage = undefined;
+
+			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
+				this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
+				return;
+			}
 
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			if (this.#isRetryableError(msg)) {
@@ -1607,9 +1624,7 @@ export class AgentSession {
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
-				throw new Error(
-					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-				);
+				throw new AgentBusyError();
 			}
 			if (options.streamingBehavior === "followUp") {
 				await this.#queueFollowUp(expandedText, options?.images);
@@ -1650,9 +1665,7 @@ export class AgentSession {
 
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
-				throw new Error(
-					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-				);
+				throw new AgentBusyError();
 			}
 			await this.sendCustomMessage(message, { deliverAs: options.streamingBehavior });
 			return;
@@ -1777,7 +1790,7 @@ export class AgentSession {
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			await this.agent.prompt(messages, agentPromptOptions);
+			await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
 			await this.#waitForRetry();
 		} finally {
 			this.#promptInFlight = false;
@@ -2289,7 +2302,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
-		this.agent.setModel(this.#applySessionModelOverrides(model));
+		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
 		this.settings.setModelRole(role, `${model.provider}/${model.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
@@ -2309,7 +2322,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
-		this.agent.setModel(this.#applySessionModelOverrides(model));
+		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
@@ -2423,7 +2436,7 @@ export class AgentSession {
 		const next = scopedModels[nextIndex];
 
 		// Apply model
-		this.agent.setModel(this.#applySessionModelOverrides(next.model));
+		this.#setModelWithProviderSessionReset(next.model);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.settings.setModelRole("default", `${next.model.provider}/${next.model.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
@@ -2451,7 +2464,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
 
-		this.agent.setModel(this.#applySessionModelOverrides(nextModel));
+		this.#setModelWithProviderSessionReset(nextModel);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.settings.setModelRole("default", `${nextModel.provider}/${nextModel.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
@@ -2597,6 +2610,7 @@ export class AgentSession {
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.sessionManager.buildSessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
 
@@ -2720,6 +2734,7 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
 			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
@@ -2799,6 +2814,8 @@ export class AgentSession {
 		if (messageCount < 2) {
 			throw new Error("Nothing to hand off (no messages yet)");
 		}
+
+		this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
 
 		this.#handoffAbortController = new AbortController();
 
@@ -3067,7 +3084,6 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		if (!targetModel) return false;
 
 		try {
-			this.#closeProviderSessionsForModelSwitch(currentModel, targetModel);
 			await this.setModelTemporary(targetModel);
 			logger.debug("Context promotion switched model on overflow", {
 				from: `${currentModel.provider}/${currentModel.id}`,
@@ -3115,6 +3131,20 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		}
 
 		return undefined;
+	}
+
+	#setModelWithProviderSessionReset(model: Model): void {
+		const currentModel = this.model;
+		if (currentModel) {
+			this.#closeProviderSessionsForModelSwitch(currentModel, model);
+		}
+		this.agent.setModel(this.#applySessionModelOverrides(model));
+	}
+
+	#closeCodexProviderSessionsForHistoryRewrite(): void {
+		const currentModel = this.model;
+		if (!currentModel || currentModel.api !== "openai-codex-responses") return;
+		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
 	}
 
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
@@ -3416,6 +3446,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
 			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
@@ -3523,7 +3554,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 	#isRetryableErrorMessage(errorMessage: string): boolean {
 		// Match: overloaded_error, rate limit, usage limit, 429, 500, 502, 503, 504, service unavailable, connection error, fetch failed, retry delay exceeded
-		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|fetch failed|retry delay/i.test(
+		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay/i.test(
 			errorMessage,
 		);
 	}
@@ -3690,6 +3721,24 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	async #waitForRetry(): Promise<void> {
 		if (this.#retryPromise) {
 			await this.#retryPromise;
+		}
+	}
+
+	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+		const deadline = Date.now() + 30_000;
+		for (;;) {
+			try {
+				await this.agent.prompt(messages, options);
+				return;
+			} catch (err) {
+				if (!(err instanceof AgentBusyError)) {
+					throw err;
+				}
+				if (Date.now() >= deadline) {
+					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
+				}
+				await this.agent.waitForIdle();
+			}
 		}
 	}
 
@@ -3980,7 +4029,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				const availableModels = this.#modelRegistry.getAvailable();
 				const match = availableModels.find(m => m.provider === provider && m.id === modelId);
 				if (match) {
-					this.agent.setModel(this.#applySessionModelOverrides(match));
+					this.#setModelWithProviderSessionReset(match);
 				}
 			}
 		}

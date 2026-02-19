@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+## [12.12.3] - 2026-02-19
+### Fixed
+
+- Fixed retry logic to recognize 'unable to connect' errors as transient failures
+
+## [12.11.3] - 2026-02-19
+
+### Fixed
+
+- Fixed OpenAI Codex streaming to fail truncated responses that end without a terminal completion event, preventing partial outputs from being treated as successful completions.
+- Fixed Codex websocket append fallback by resetting stale turn-state/model-etag session metadata when request shape diverges from appendable history.
+
+## [12.11.1] - 2026-02-19
+### Added
+
+- Added support for Claude 4.6 Opus and Sonnet models via Cursor API
+- Added support for Composer 1.5 model via Cursor API
+- Added support for GPT-5.1 Codex Mini and GPT-5.1 High models via Cursor API
+- Added support for GPT-5.2 and GPT-5.3 Codex variants (Fast, High, Low, Extra High) via Cursor API
+- Added HTTP/2 transport support for Cursor API requests (required by Cursor API)
+
+### Changed
+
+- Updated pricing for Claude 3.5 Sonnet model
+- Updated Claude 3.5 Sonnet context window from 262,144 to 131,072 tokens
+- Simplified Cursor model display names by removing '(Cursor)' suffix
+- Changed Cursor API timeout from 15 seconds to 5 seconds
+- Switched Cursor API transport from HTTP/1.1 to HTTP/2
+
+## [12.11.0] - 2026-02-19
+
+### Added
+
+- Added `priority` field to Model interface for provider-assigned model prioritization
+- Added `CatalogDiscoveryConfig` interface to standardize catalog discovery configuration across providers
+- Added type guards `isCatalogDescriptor()` and `allowsUnauthenticatedCatalogDiscovery()` for safer descriptor handling
+- Added `DEFAULT_MODEL_PER_PROVIDER` export from descriptors module for centralized default model management
+- Support for 11 new AI providers: Cloudflare AI Gateway, Hugging Face Inference, LiteLLM, Moonshot, NVIDIA, Ollama, Qianfan, Qwen Portal, Together, Venice, vLLM, and Xiaomi MiMo
+- Login flows for new providers with API key validation and OAuth token support
+- Extended `KnownProvider` type to include all newly supported providers
+- API key environment variable mappings for all new providers in service provider map
+- Model discovery and configuration for Cloudflare AI Gateway, Hugging Face, LiteLLM, Moonshot, NVIDIA, Ollama, Qianfan, Qwen Portal, Together, Venice, vLLM, and Xiaomi MiMo
+
+### Changed
+
+- Refactored OAuth credential retrieval to simplify storage lifecycle management in model generation script
+- Parallelized special model discovery sources (Antigravity, Codex) for improved generation performance
+- Reorganized model JSON structure to place `contextWindow` and `maxTokens` before `compat` field for consistency
+- Added `priority` field to OpenAI Codex models for provider-assigned model prioritization
+- Refactored provider descriptors to use helper functions (`descriptor`, `catalog`, `catalogDescriptor`) for reduced code duplication
+- Refactored models.dev provider descriptors to use helper functions (`simpleModelsDevDescriptor`, `openAiCompletionsDescriptor`, `anthropicMessagesDescriptor`) for improved maintainability
+- Unified provider descriptors into single source of truth in `descriptors.ts` for both runtime model discovery and catalog generation, improving maintainability
+- Refactored model generation script to use declarative `CatalogProviderDescriptor` interface instead of separate descriptor types, reducing code duplication
+- Reorganized models.dev provider descriptors into logical groups (Bedrock, Core, Coding Plans, Specialized) for better code organization
+- Simplified API resolution for OpenCode and GitHub Copilot providers using rule-based matching instead of inline conditionals
+- Refactored model generation script to use declarative provider descriptors instead of inline provider-specific logic, improving maintainability and reducing code duplication
+- Extracted model post-processing policies (cache pricing corrections, context window normalization) into dedicated `model-policies.ts` module for better testability and clarity
+- Removed static bundled models for Ollama and vLLM from `models.json` to rely on dynamic discovery instead, reducing static catalog size
+- Updated `OAuthProvider` type to include new provider identifiers
+- Expanded model registry (models.json) with thousands of new model entries across all new providers
+- Modified environment variable resolution to use `$pickenv` for providers with multiple possible env var names
+- Updated README documentation to list all newly supported providers and their authentication requirements
+
 ## [12.10.1] - 2026-02-18
 - Added Synthetic provider
 - Added API-key login helpers for Synthetic and Cerebras providers

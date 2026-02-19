@@ -1,38 +1,25 @@
 import {
 	type Api,
 	type AssistantMessageEventStream,
-	anthropicModelManagerOptions,
 	type Context,
-	cerebrasModelManagerOptions,
 	createModelManager,
-	cursorModelManagerOptions,
 	getBundledModels,
 	getBundledProviders,
 	getGitHubCopilotBaseUrl,
-	githubCopilotModelManagerOptions,
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
-	googleModelManagerOptions,
-	groqModelManagerOptions,
-	kimiCodeModelManagerOptions,
 	type Model,
 	type ModelManagerOptions,
-	mistralModelManagerOptions,
 	normalizeDomain,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	openaiCodexModelManagerOptions,
-	openaiModelManagerOptions,
-	opencodeModelManagerOptions,
-	openrouterModelManagerOptions,
+	PROVIDER_DESCRIPTORS,
 	registerCustomApi,
 	registerOAuthProvider,
 	type SimpleStreamOptions,
-	syntheticModelManagerOptions,
 	unregisterCustomApis,
 	unregisterOAuthProviders,
-	vercelAiGatewayModelManagerOptions,
-	xaiModelManagerOptions,
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
@@ -177,54 +164,103 @@ type ModelsConfig = Static<typeof ModelsConfigSchema>;
 type ProviderAuthMode = Static<typeof ProviderAuthSchema>;
 type ProviderDiscovery = Static<typeof ProviderDiscoverySchema>;
 
+type ProviderValidationMode = "models-config" | "runtime-register";
+
+interface ProviderValidationModel {
+	id: string;
+	api?: Api;
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
+interface ProviderValidationConfig {
+	baseUrl?: string;
+	apiKey?: string;
+	api?: Api;
+	auth?: ProviderAuthMode;
+	oauthConfigured?: boolean;
+	discovery?: ProviderDiscovery;
+	modelOverrides?: Record<string, unknown>;
+	models: ProviderValidationModel[];
+}
+
+function validateProviderConfiguration(
+	providerName: string,
+	config: ProviderValidationConfig,
+	mode: ProviderValidationMode,
+): void {
+	const hasProviderApi = !!config.api;
+	const models = config.models;
+
+	if (models.length === 0) {
+		if (mode === "models-config") {
+			const hasModelOverrides = config.modelOverrides && Object.keys(config.modelOverrides).length > 0;
+			if (!config.baseUrl && !hasModelOverrides && !config.discovery) {
+				throw new Error(
+					`Provider ${providerName}: must specify "baseUrl", "modelOverrides", "discovery", or "models".`,
+				);
+			}
+		}
+	} else {
+		if (!config.baseUrl) {
+			throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
+		}
+		const requiresAuth =
+			mode === "runtime-register"
+				? !config.apiKey && !config.oauthConfigured
+				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+		if (requiresAuth) {
+			throw new Error(
+				mode === "runtime-register"
+					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
+					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
+			);
+		}
+	}
+
+	if (mode === "models-config" && config.discovery && !config.api) {
+		throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
+	}
+
+	for (const modelDef of models) {
+		if (!hasProviderApi && !modelDef.api) {
+			throw new Error(
+				mode === "runtime-register"
+					? `Provider ${providerName}, model ${modelDef.id}: no "api" specified.`
+					: `Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
+			);
+		}
+		if (!modelDef.id) {
+			throw new Error(`Provider ${providerName}: model missing "id"`);
+		}
+		if (mode === "models-config") {
+			if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0) {
+				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
+			}
+			if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0) {
+				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
+			}
+		}
+	}
+}
+
 export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", ModelsConfigSchema).withValidation(
 	"models",
 	config => {
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
-			const hasProviderApi = !!providerConfig.api;
-			const models = providerConfig.models ?? [];
-
-			if (models.length === 0) {
-				// Override-only config: needs baseUrl, modelOverrides, or discovery
-				const hasModelOverrides =
-					providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
-				if (!providerConfig.baseUrl && !hasModelOverrides && !providerConfig.discovery) {
-					throw new Error(
-						`Provider ${providerName}: must specify "baseUrl", "modelOverrides", "discovery", or "models".`,
-					);
-				}
-			} else {
-				// Full replacement: needs baseUrl and apiKey unless auth is disabled
-				if (!providerConfig.baseUrl) {
-					throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
-				}
-				if (!providerConfig.apiKey && providerConfig.auth !== "none") {
-					throw new Error(
-						`Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
-					);
-				}
-			}
-
-			if (providerConfig.discovery && !providerConfig.api) {
-				throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
-			}
-
-			for (const modelDef of models) {
-				const hasModelApi = !!modelDef.api;
-
-				if (!hasProviderApi && !hasModelApi) {
-					throw new Error(
-						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
-					);
-				}
-
-				if (!modelDef.id) throw new Error(`Provider ${providerName}: model missing "id"`);
-				// Validate contextWindow/maxTokens only if provided (they have defaults)
-				if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0)
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
-				if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0)
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
-			}
+			validateProviderConfiguration(
+				providerName,
+				{
+					baseUrl: providerConfig.baseUrl,
+					apiKey: providerConfig.apiKey,
+					api: providerConfig.api as Api | undefined,
+					auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
+					discovery: providerConfig.discovery as ProviderDiscovery | undefined,
+					modelOverrides: providerConfig.modelOverrides,
+					models: (providerConfig.models ?? []) as ProviderValidationModel[],
+				},
+				"models-config",
+			);
 		}
 	},
 );
@@ -354,6 +390,72 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	}
 	result.compat = mergeCompat(model.compat, override.compat);
 	return result;
+}
+
+interface CustomModelDefinitionLike {
+	id: string;
+	name?: string;
+	api?: Api;
+	reasoning?: boolean;
+	input?: ("text" | "image")[];
+	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	contextWindow?: number;
+	maxTokens?: number;
+	headers?: Record<string, string>;
+	compat?: Model<Api>["compat"];
+	contextPromotionTarget?: string;
+}
+
+interface CustomModelBuildOptions {
+	useDefaults: boolean;
+}
+
+function mergeCustomModelHeaders(
+	providerHeaders: Record<string, string> | undefined,
+	modelHeaders: Record<string, string> | undefined,
+	authHeader: boolean | undefined,
+	apiKeyConfig: string | undefined,
+): Record<string, string> | undefined {
+	let headers = providerHeaders || modelHeaders ? { ...providerHeaders, ...modelHeaders } : undefined;
+	if (authHeader && apiKeyConfig) {
+		const resolvedKey = resolveApiKeyConfig(apiKeyConfig);
+		if (resolvedKey) {
+			headers = { ...headers, Authorization: `Bearer ${resolvedKey}` };
+		}
+	}
+	return headers;
+}
+
+function buildCustomModel(
+	providerName: string,
+	providerBaseUrl: string,
+	providerApi: Api | undefined,
+	providerHeaders: Record<string, string> | undefined,
+	providerApiKey: string | undefined,
+	authHeader: boolean | undefined,
+	modelDef: CustomModelDefinitionLike,
+	options: CustomModelBuildOptions,
+): Model<Api> | undefined {
+	const api = modelDef.api ?? providerApi;
+	if (!api) return undefined;
+	const withDefaults = options.useDefaults;
+	const cost = modelDef.cost ?? (withDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
+	const input = modelDef.input ?? (withDefaults ? ["text"] : undefined);
+	return {
+		id: modelDef.id,
+		name: modelDef.name ?? (withDefaults ? modelDef.id : undefined),
+		api,
+		provider: providerName,
+		baseUrl: providerBaseUrl,
+		reasoning: modelDef.reasoning ?? (withDefaults ? false : undefined),
+		input: input as ("text" | "image")[],
+		cost,
+		contextWindow: modelDef.contextWindow ?? (withDefaults ? 128000 : undefined),
+		maxTokens: modelDef.maxTokens ?? (withDefaults ? 16384 : undefined),
+		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		compat: modelDef.compat,
+		contextPromotionTarget: modelDef.contextPromotionTarget,
+	} as Model<Api>;
 }
 
 /**
@@ -620,7 +722,11 @@ export class ModelRegistry {
 	}
 
 	async #discoverBuiltInProviderModels(): Promise<Model<Api>[]> {
-		const managerOptions = await this.#collectBuiltInModelManagerOptions();
+		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
+		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
+		const managerOptions = (await this.#collectBuiltInModelManagerOptions()).filter(
+			opts => !configuredDiscoveryProviders.has(opts.providerId),
+		);
 		if (managerOptions.length === 0) {
 			return [];
 		}
@@ -629,189 +735,77 @@ export class ModelRegistry {
 	}
 
 	async #collectBuiltInModelManagerOptions(): Promise<ModelManagerOptions<Api>[]> {
-		const [
-			anthropicApiKey,
-			openaiApiKey,
-			groqApiKey,
-			cerebrasApiKey,
-			xaiApiKey,
-			mistralApiKey,
-			opencodeApiKey,
-			openrouterApiKey,
-			vercelGatewayApiKey,
-			kimiApiKey,
-			syntheticApiKey,
-			githubCopilotApiKey,
-			googleApiKey,
-			cursorApiKey,
-			googleAntigravityApiKey,
-			googleGeminiCliApiKey,
-			codexAccessToken,
-		] = await Promise.all([
-			this.getApiKeyForProvider("anthropic"),
-			this.getApiKeyForProvider("openai"),
-			this.getApiKeyForProvider("groq"),
-			this.getApiKeyForProvider("cerebras"),
-			this.getApiKeyForProvider("xai"),
-			this.getApiKeyForProvider("mistral"),
-			this.getApiKeyForProvider("opencode"),
-			this.getApiKeyForProvider("openrouter"),
-			this.getApiKeyForProvider("vercel-ai-gateway"),
-			this.getApiKeyForProvider("kimi-code"),
-			this.getApiKeyForProvider("synthetic"),
-			this.getApiKeyForProvider("github-copilot"),
-			this.getApiKeyForProvider("google"),
-			this.getApiKeyForProvider("cursor"),
-			this.getApiKeyForProvider("google-antigravity"),
-			this.getApiKeyForProvider("google-gemini-cli"),
-			this.getApiKeyForProvider("openai-codex"),
+		const specialProviderDescriptors: Array<{
+			providerId: string;
+			resolveKey: (value: string | undefined) => string | undefined;
+			createOptions: (key: string) => ModelManagerOptions<Api>;
+		}> = [
+			{
+				providerId: "google-antigravity",
+				resolveKey: extractGoogleOAuthToken,
+				createOptions: oauthToken =>
+					googleAntigravityModelManagerOptions({
+						oauthToken,
+						endpoint: this.getProviderBaseUrl("google-antigravity"),
+					}),
+			},
+			{
+				providerId: "google-gemini-cli",
+				resolveKey: extractGoogleOAuthToken,
+				createOptions: oauthToken =>
+					googleGeminiCliModelManagerOptions({
+						oauthToken,
+						endpoint: this.getProviderBaseUrl("google-gemini-cli"),
+					}),
+			},
+			{
+				providerId: "openai-codex",
+				resolveKey: value => value,
+				createOptions: accessToken => {
+					const accountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", accessToken);
+					return openaiCodexModelManagerOptions({
+						accessToken,
+						accountId,
+					});
+				},
+			},
+		];
+		const [standardProviderKeys, specialKeys] = await Promise.all([
+			Promise.all(PROVIDER_DESCRIPTORS.map(descriptor => this.getApiKeyForProvider(descriptor.providerId))),
+			Promise.all(specialProviderDescriptors.map(descriptor => this.getApiKeyForProvider(descriptor.providerId))),
 		]);
-
 		const options: ModelManagerOptions<Api>[] = [];
-		if (isAuthenticated(anthropicApiKey)) {
-			options.push(
-				anthropicModelManagerOptions({
-					apiKey: anthropicApiKey,
-					baseUrl: this.getProviderBaseUrl("anthropic"),
-				}),
-			);
-		}
-		if (isAuthenticated(openaiApiKey)) {
-			options.push(
-				openaiModelManagerOptions({
-					apiKey: openaiApiKey,
-					baseUrl: this.getProviderBaseUrl("openai"),
-				}),
-			);
-		}
-		if (isAuthenticated(groqApiKey)) {
-			options.push(
-				groqModelManagerOptions({
-					apiKey: groqApiKey,
-					baseUrl: this.getProviderBaseUrl("groq"),
-				}),
-			);
-		}
-		if (isAuthenticated(cerebrasApiKey)) {
-			options.push(
-				cerebrasModelManagerOptions({
-					apiKey: cerebrasApiKey,
-					baseUrl: this.getProviderBaseUrl("cerebras"),
-				}),
-			);
-		}
-		if (isAuthenticated(xaiApiKey)) {
-			options.push(
-				xaiModelManagerOptions({
-					apiKey: xaiApiKey,
-					baseUrl: this.getProviderBaseUrl("xai"),
-				}),
-			);
-		}
-		if (isAuthenticated(mistralApiKey)) {
-			options.push(
-				mistralModelManagerOptions({
-					apiKey: mistralApiKey,
-					baseUrl: this.getProviderBaseUrl("mistral"),
-				}),
-			);
-		}
-		if (isAuthenticated(opencodeApiKey)) {
-			options.push(
-				opencodeModelManagerOptions({
-					apiKey: opencodeApiKey,
-					baseUrl: this.getProviderBaseUrl("opencode"),
-				}),
-			);
-		}
-		if (isAuthenticated(openrouterApiKey)) {
-			options.push(
-				openrouterModelManagerOptions({
-					apiKey: openrouterApiKey,
-					baseUrl: this.getProviderBaseUrl("openrouter"),
-				}),
-			);
-		}
-		if (isAuthenticated(vercelGatewayApiKey)) {
-			options.push(
-				vercelAiGatewayModelManagerOptions({
-					apiKey: vercelGatewayApiKey,
-					baseUrl: this.getProviderBaseUrl("vercel-ai-gateway"),
-				}),
-			);
-		}
-		if (isAuthenticated(kimiApiKey)) {
-			options.push(
-				kimiCodeModelManagerOptions({
-					apiKey: kimiApiKey,
-					baseUrl: this.getProviderBaseUrl("kimi-code"),
-				}),
-			);
-		}
-		if (isAuthenticated(syntheticApiKey)) {
-			options.push(
-				syntheticModelManagerOptions({
-					apiKey: syntheticApiKey,
-					baseUrl: this.getProviderBaseUrl("synthetic"),
-				}),
-			);
-		}
-		if (isAuthenticated(githubCopilotApiKey)) {
-			options.push(
-				githubCopilotModelManagerOptions({
-					apiKey: githubCopilotApiKey,
-					baseUrl: this.getProviderBaseUrl("github-copilot"),
-				}),
-			);
-		}
-		if (isAuthenticated(googleApiKey)) options.push(googleModelManagerOptions({ apiKey: googleApiKey }));
-		if (isAuthenticated(cursorApiKey)) {
-			options.push(
-				cursorModelManagerOptions({
-					apiKey: cursorApiKey,
-					baseUrl: this.getProviderBaseUrl("cursor"),
-				}),
-			);
+		for (let i = 0; i < PROVIDER_DESCRIPTORS.length; i++) {
+			const descriptor = PROVIDER_DESCRIPTORS[i];
+			const apiKey = standardProviderKeys[i];
+			if (isAuthenticated(apiKey) || descriptor.allowUnauthenticated) {
+				options.push(
+					descriptor.createModelManagerOptions({
+						apiKey: isAuthenticated(apiKey) ? apiKey : undefined,
+						baseUrl: this.getProviderBaseUrl(descriptor.providerId),
+					}),
+				);
+			}
 		}
 
-		const antigravityToken = extractGoogleOAuthToken(googleAntigravityApiKey);
-		if (isAuthenticated(antigravityToken)) {
-			options.push(
-				googleAntigravityModelManagerOptions({
-					oauthToken: antigravityToken,
-					endpoint: this.getProviderBaseUrl("google-antigravity"),
-				}),
-			);
+		for (let i = 0; i < specialProviderDescriptors.length; i++) {
+			const descriptor = specialProviderDescriptors[i];
+			const key = descriptor.resolveKey(specialKeys[i]);
+			if (!isAuthenticated(key)) {
+				continue;
+			}
+			options.push(descriptor.createOptions(key));
 		}
-
-		const geminiCliToken = extractGoogleOAuthToken(googleGeminiCliApiKey);
-		if (isAuthenticated(geminiCliToken)) {
-			options.push(
-				googleGeminiCliModelManagerOptions({
-					oauthToken: geminiCliToken,
-					endpoint: this.getProviderBaseUrl("google-gemini-cli"),
-				}),
-			);
-		}
-
-		if (isAuthenticated(codexAccessToken)) {
-			const codexAccountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", codexAccessToken);
-			options.push(
-				openaiCodexModelManagerOptions({
-					accessToken: codexAccessToken,
-					accountId: codexAccountId,
-				}),
-			);
-		}
-
 		return options;
 	}
 
 	async #discoverWithModelManager(options: ModelManagerOptions<Api>): Promise<Model<Api>[]> {
 		try {
 			const manager = createModelManager(options);
-			const result = await manager.refresh("online");
-			return result.models;
+			const result = await manager.refresh();
+			return result.models.map(model =>
+				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
+			);
 		} catch (error) {
 			logger.warn("model discovery failed for provider", {
 				provider: options.providerId,
@@ -905,51 +899,24 @@ export class ModelRegistry {
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
-
-			// Store API key config for fallback resolver
 			if (providerConfig.apiKey) {
 				this.#customProviderApiKeys.set(providerName, providerConfig.apiKey);
 			}
-
 			for (const modelDef of modelDefs) {
-				const api = modelDef.api || providerConfig.api;
-				if (!api) continue;
-
-				// Merge headers: provider headers are base, model headers override
-				let headers =
-					providerConfig.headers || modelDef.headers
-						? { ...providerConfig.headers, ...modelDef.headers }
-						: undefined;
-
-				// If authHeader is true, add Authorization header with resolved API key
-				if (providerConfig.authHeader && providerConfig.apiKey) {
-					const resolvedKey = resolveApiKeyConfig(providerConfig.apiKey);
-					if (resolvedKey) {
-						headers = { ...headers, Authorization: `Bearer ${resolvedKey}` };
-					}
-				}
-
-				// baseUrl is validated to exist for providers with models
-				// Apply defaults for optional fields
-				const defaultCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-				models.push({
-					id: modelDef.id,
-					name: modelDef.name ?? modelDef.id,
-					api: api as Api,
-					provider: providerName,
-					baseUrl: providerConfig.baseUrl!,
-					reasoning: modelDef.reasoning ?? false,
-					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
-					cost: modelDef.cost ?? defaultCost,
-					contextWindow: modelDef.contextWindow ?? 128000,
-					maxTokens: modelDef.maxTokens ?? 16384,
-					headers,
-					compat: modelDef.compat,
-					contextPromotionTarget: modelDef.contextPromotionTarget,
-				} as Model<Api>);
+				const model = buildCustomModel(
+					providerName,
+					providerConfig.baseUrl!,
+					providerConfig.api as Api | undefined,
+					providerConfig.headers,
+					providerConfig.apiKey,
+					providerConfig.authHeader,
+					modelDef,
+					{ useDefaults: true },
+				);
+				if (!model) continue;
+				models.push(model);
 			}
 		}
-
 		return models;
 	}
 
@@ -1045,20 +1012,17 @@ export class ModelRegistry {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
 
-		if (config.models && config.models.length > 0) {
-			if (!config.baseUrl) {
-				throw new Error(`Provider ${providerName}: "baseUrl" is required when defining models.`);
-			}
-			if (!config.apiKey && !config.oauth) {
-				throw new Error(`Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`);
-			}
-			for (const modelDef of config.models) {
-				const api = modelDef.api || config.api;
-				if (!api) {
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
-				}
-			}
-		}
+		validateProviderConfiguration(
+			providerName,
+			{
+				baseUrl: config.baseUrl,
+				apiKey: config.apiKey,
+				api: config.api,
+				oauthConfigured: Boolean(config.oauth),
+				models: (config.models ?? []) as ProviderValidationModel[],
+			},
+			"runtime-register",
+		);
 
 		if (config.streamSimple && config.api) {
 			const streamSimple = config.streamSimple;
@@ -1085,33 +1049,20 @@ export class ModelRegistry {
 		if (config.models && config.models.length > 0) {
 			const nextModels = this.#models.filter(m => m.provider !== providerName);
 			for (const modelDef of config.models) {
-				const api = modelDef.api || config.api;
-				if (!api) {
+				const model = buildCustomModel(
+					providerName,
+					config.baseUrl!,
+					config.api,
+					config.headers,
+					config.apiKey,
+					config.authHeader,
+					modelDef,
+					{ useDefaults: false },
+				);
+				if (!model) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
 				}
-				let headers = config.headers || modelDef.headers ? { ...config.headers, ...modelDef.headers } : undefined;
-				if (config.authHeader && config.apiKey) {
-					const resolvedKey = resolveApiKeyConfig(config.apiKey);
-					if (resolvedKey) {
-						headers = { ...headers, Authorization: `Bearer ${resolvedKey}` };
-					}
-				}
-
-				nextModels.push({
-					id: modelDef.id,
-					name: modelDef.name,
-					api,
-					provider: providerName,
-					baseUrl: config.baseUrl!,
-					reasoning: modelDef.reasoning,
-					input: modelDef.input as ("text" | "image")[],
-					cost: modelDef.cost,
-					contextWindow: modelDef.contextWindow,
-					maxTokens: modelDef.maxTokens,
-					headers,
-					compat: modelDef.compat,
-					contextPromotionTarget: modelDef.contextPromotionTarget,
-				} as Model<Api>);
+				nextModels.push(model);
 			}
 
 			if (config.oauth?.modifyModels) {

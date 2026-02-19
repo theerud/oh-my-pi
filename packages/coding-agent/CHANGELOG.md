@@ -2,6 +2,80 @@
 
 ## [Unreleased]
 
+## [12.12.1] - 2026-02-19
+
+### Added
+
+- Added Kimi (Moonshot) as a web search provider with OAuth and API key support ([#110](https://github.com/can1357/oh-my-pi/pull/110) by [@oglassdev](https://github.com/oglassdev))
+
+### Changed
+
+- Changed web search auto-resolve priority to prefer Perplexity first
+
+### Fixed
+
+- Fixed Mermaid pre-render failures from repeatedly re-triggering background renders (freeze loop) and restored resilient rendering when diagram conversion/callbacks fail ([#109](https://github.com/can1357/oh-my-pi/issues/109)).
+
+## [12.12.0] - 2026-02-19
+
+### Added
+
+- Display streaming text preview during agent specification generation to show real-time progress
+- Added `onRequestRender` callback to agent dashboard for triggering UI updates during async operations
+- Added agent creation flow (press N in dashboard) to generate custom agents from natural language descriptions
+- Added ability to save generated agents to project or user scope with automatic identifier and system prompt generation
+- Added scope toggle (Tab) during agent creation to choose between project-level and user-level agent storage
+- Added agent regeneration (R key) to refine generated specifications without restarting the creation flow
+- Added model suggestions in model override editor to help users discover available models
+- Added success notices to confirm agent creation and model override updates
+
+### Changed
+
+- Updated agent creation flow to show review screen before generation completes, improving UX feedback
+- Changed generation status hint to display "Generating..." while specification is being created
+- Improved system prompt preview formatting with text wrapping and line truncation indicators
+
+### Fixed
+
+- Fixed interactive-mode editor height to stay bounded and resize-aware, preventing off-screen cursor drift during long prompt/history navigation ([#99](https://github.com/can1357/oh-my-pi/issues/99)).
+
+## [12.11.3] - 2026-02-19
+
+### Fixed
+
+- Fixed model selector search initialization to apply the latest live query after asynchronous model loading.
+- Fixed Codex provider session lifecycle on model switches and history rewrites to clear stale session metadata before continuing the conversation.
+
+## [12.11.0] - 2026-02-19
+
+### Added
+
+- Support for Synthetic model provider in web search command
+- Model sorting by priority field and version number in model selector for improved model ranking
+- Support for Synthetic model provider with API key authentication
+- Support for Hugging Face model provider with API key authentication
+- Support for NVIDIA model provider with API key authentication
+- Support for Ollama model provider with optional API key authentication
+- Support for Cloudflare AI Gateway model provider with API key authentication
+- Support for Qwen Portal model provider with API key authentication
+- Support for LiteLLM model provider with API key authentication
+- Support for Moonshot model provider with API key authentication
+- Support for Qianfan model provider with API key authentication
+- Support for Together model provider with API key authentication
+- Support for Venice model provider with API key authentication
+- Support for vLLM model provider with API key authentication
+- Support for Xiaomi model provider with API key authentication
+
+### Changed
+
+- Refactored custom model building logic into reusable `buildCustomModel` function for consistency across provider configurations
+- Replaced generic error with AgentBusyError when attempting to send messages while agent is processing
+- Added automatic retry logic with idle waiting when agent is busy during prompt operations, with 30-second timeout
+
+### Fixed
+
+- Fixed model discovery to use default refresh mode instead of explicit 'online' parameter
+
 ## [12.10.1] - 2026-02-18
 
 ### Added

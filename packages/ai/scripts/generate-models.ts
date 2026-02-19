@@ -1,937 +1,98 @@
 #!/usr/bin/env bun
 
-import { join } from "node:path";
+import * as path from "node:path";
 import { $env } from "@oh-my-pi/pi-utils";
+import { createModelManager } from "../src/model-manager";
+import {
+	type CatalogDiscoveryConfig,
+	type CatalogProviderDescriptor,
+	isCatalogDescriptor,
+	allowsUnauthenticatedCatalogDiscovery,
+	PROVIDER_DESCRIPTORS,
+} from "../src/provider-models/descriptors";
+import { MODELS_DEV_PROVIDER_DESCRIPTORS, mapModelsDevToModels } from "../src/provider-models/openai-compat";
+import {
+	CLOUDFLARE_FALLBACK_MODEL,
+	applyGeneratedModelPolicies,
+	linkSparkPromotionTargets,
+} from "../src/provider-models/model-policies";
+import { JWT_CLAIM_PATH } from "../src/providers/openai-codex/constants";
 import { CliAuthStorage } from "../src/storage";
-import { getOAuthApiKey } from "../src/utils/oauth";
+import type { Model } from "../src/types";
 import { fetchAntigravityDiscoveryModels } from "../src/utils/discovery/antigravity";
 import { fetchCodexModels } from "../src/utils/discovery/codex";
-import { fetchCursorUsableModels } from "../src/utils/discovery/cursor";
-import { JWT_CLAIM_PATH } from "../src/providers/openai-codex/constants";
-import type { Api, KnownProvider, Model } from "../src/types";
+import { getOAuthApiKey } from "../src/utils/oauth";
+import type { OAuthCredentials, OAuthProvider } from "../src/utils/oauth/types";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 
-const packageRoot = join(import.meta.dir, "..");
+const packageRoot = path.join(import.meta.dir, "..");
 
-interface ModelsDevModel {
-	id: string;
-	name: string;
-	tool_call?: boolean;
-	reasoning?: boolean;
-	limit?: {
-		context?: number;
-		output?: number;
-	};
-	cost?: {
-		input?: number;
-		output?: number;
-		cache_read?: number;
-		cache_write?: number;
-	};
-	modalities?: {
-		input?: string[];
-	};
-	provider?: {
-		npm?: string;
-	};
-}
-
-interface AiGatewayModel {
-	id: string;
-	name?: string;
-	context_window?: number;
-	max_tokens?: number;
-	tags?: string[];
-	pricing?: {
-		input?: string | number;
-		output?: string | number;
-		input_cache_read?: string | number;
-		input_cache_write?: string | number;
-	};
-}
-
-const COPILOT_STATIC_HEADERS = {
-	"User-Agent": "GitHubCopilotChat/0.35.0",
-	"Editor-Version": "vscode/1.107.0",
-	"Editor-Plugin-Version": "copilot-chat/0.35.0",
-	"Copilot-Integration-Id": "vscode-chat",
-} as const;
-
-const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
-const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
-
-async function fetchOpenRouterModels(): Promise<Model[]> {
-	try {
-		console.log("Fetching models from OpenRouter API...");
-		const response = await fetch("https://openrouter.ai/api/v1/models");
-		const data = await response.json();
-
-		const models: Model[] = [];
-
-		for (const model of data.data) {
-			// Only include models that support tools
-			if (!model.supported_parameters?.includes("tools")) continue;
-
-			// Parse provider from model ID
-			let provider: KnownProvider = "openrouter";
-			let modelKey = model.id;
-
-			modelKey = model.id; // Keep full ID for OpenRouter
-
-			// Parse input modalities
-			const input: ("text" | "image")[] = ["text"];
-			if (model.architecture?.modality?.includes("image")) {
-				input.push("image");
-			}
-
-			// Convert pricing from $/token to $/million tokens
-			const inputCost = parseFloat(model.pricing?.prompt || "0") * 1_000_000;
-			const outputCost = parseFloat(model.pricing?.completion || "0") * 1_000_000;
-			const cacheReadCost = parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
-			const cacheWriteCost = parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
-			// Check if model supports tool_choice parameter
-			const supportsToolChoice = model.supported_parameters?.includes("tool_choice") ?? false;
-
-			const normalizedModel: Model = {
-				id: modelKey,
-				name: model.name,
-				api: "openai-completions",
-				baseUrl: "https://openrouter.ai/api/v1",
-				provider,
-				reasoning: model.supported_parameters?.includes("reasoning") || false,
-				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
-				contextWindow: model.context_length || 4096,
-				maxTokens: model.top_provider?.max_completion_tokens || 4096,
-				// Only add compat if tool_choice is not supported (default is true)
-				...(supportsToolChoice ? {} : { compat: { supportsToolChoice: false } }),
-			};
-			models.push(normalizedModel);
+async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
+	for (const envVar of catalog.envVars) {
+		const value = $env[envVar as keyof typeof $env];
+		if (typeof value === "string" && value.length > 0) {
+			return value;
 		}
-
-		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
-		return models;
-	} catch (error) {
-		console.error("Failed to fetch OpenRouter models:", error);
-		return [];
 	}
-}
 
-async function fetchAiGatewayModels(): Promise<Model[]> {
 	try {
-		console.log("Fetching models from Vercel AI Gateway API...");
-		const response = await fetch(`${AI_GATEWAY_MODELS_URL}/models`);
-		const data = await response.json();
-		const models: Model[] = [];
-
-		const toNumber = (value: string | number | undefined): number => {
-			if (typeof value === "number") {
-				return Number.isFinite(value) ? value : 0;
+		const storage = await CliAuthStorage.create();
+		try {
+			const storedApiKey = storage.getApiKey(providerId);
+			if (storedApiKey) {
+				return storedApiKey;
 			}
-			const parsed = parseFloat(value ?? "0");
-			return Number.isFinite(parsed) ? parsed : 0;
-		};
-
-		const items = Array.isArray(data.data) ? (data.data as AiGatewayModel[]) : [];
-		for (const model of items) {
-			const tags = Array.isArray(model.tags) ? model.tags : [];
-			// Only include models that support tools
-			if (!tags.includes("tool-use")) continue;
-
-			const input: ("text" | "image")[] = ["text"];
-			if (tags.includes("vision")) {
-				input.push("image");
+			if (catalog.oauthProvider) {
+				const storedOAuth = storage.getOAuth(catalog.oauthProvider);
+				if (storedOAuth) {
+					const result = await getOAuthApiKey(catalog.oauthProvider, { [catalog.oauthProvider]: storedOAuth });
+					if (result) {
+						storage.saveOAuth(catalog.oauthProvider, result.newCredentials);
+						return result.apiKey;
+					}
+				}
 			}
-
-			const inputCost = toNumber(model.pricing?.input) * 1_000_000;
-			const outputCost = toNumber(model.pricing?.output) * 1_000_000;
-			const cacheReadCost = toNumber(model.pricing?.input_cache_read) * 1_000_000;
-			const cacheWriteCost = toNumber(model.pricing?.input_cache_write) * 1_000_000;
-
-			models.push({
-				id: model.id,
-				name: model.name || model.id,
-				api: "anthropic-messages",
-				baseUrl: AI_GATEWAY_BASE_URL,
-				provider: "vercel-ai-gateway",
-				reasoning: tags.includes("reasoning"),
-				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
-				contextWindow: model.context_window || 4096,
-				maxTokens: model.max_tokens || 4096,
-			});
+		} finally {
+			storage.close();
 		}
-
-		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Fetched ${models.length} tool-capable models from Vercel AI Gateway`);
-		return models;
-	} catch (error) {
-		console.error("Failed to fetch Vercel AI Gateway models:", error);
-		return [];
+	} catch {
+		// Ignore missing/unreadable auth storage.
 	}
+
+	return undefined;
 }
 
-const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
-const KIMI_CODE_DEFAULT_MAX_TOKENS = 32000;
-const KIMI_CODE_HEADERS = {
-	"User-Agent": "KimiCLI/1.0",
-	"X-Msh-Platform": "kimi_cli",
-} as const;
+async function fetchProviderModelsFromCatalog(descriptor: CatalogProviderDescriptor): Promise<Model[]> {
+	const apiKey = await resolveProviderApiKey(descriptor.providerId, descriptor.catalogDiscovery);
 
-interface KimiModelInfo {
-	id: string;
-	display_name?: string;
-	context_length?: number;
-	supports_reasoning?: boolean;
-	supports_image_in?: boolean;
-	supports_video_in?: boolean;
-}
-
-
-async function fetchKimiCodeModels(): Promise<Model<"openai-completions">[]> {
-	const apiKey = $env.KIMI_API_KEY;
-	if (!apiKey) {
-		console.log("KIMI_API_KEY not set, will use previous models");
+	if (!apiKey && !allowsUnauthenticatedCatalogDiscovery(descriptor)) {
+		console.log(`No ${descriptor.catalogDiscovery.label} credentials found (env or agent.db), using fallback models`);
 		return [];
 	}
 
 	try {
-		console.log("Fetching models from Kimi Code API...");
-		const response = await fetch(`${KIMI_CODE_BASE_URL}/models`, {
-			headers: { Authorization: `Bearer ${apiKey}` },
-		});
-
-		if (!response.ok) {
-			console.warn(`Kimi Code API returned ${response.status}, will use previous models`);
+		console.log(`Fetching models from ${descriptor.catalogDiscovery.label} model manager...`);
+		const manager = createModelManager(descriptor.createModelManagerOptions({ apiKey }));
+		const result = await manager.refresh("online");
+		const models = result.models.filter(model => model.provider === descriptor.providerId);
+		if (models.length === 0) {
+			console.warn(`${descriptor.catalogDiscovery.label} discovery returned no models, using fallback models`);
 			return [];
 		}
-
-		const data = await response.json();
-		const items = Array.isArray(data.data) ? (data.data as KimiModelInfo[]) : [];
-		const models: Model<"openai-completions">[] = [];
-
-		for (const model of items) {
-			if (!model.id) continue;
-
-			const hasThinking = model.supports_reasoning || model.id.toLowerCase().includes("thinking");
-			const hasImage = model.supports_image_in || model.id.toLowerCase().includes("k2.5");
-
-			const input: ("text" | "image")[] = ["text"];
-			if (hasImage) input.push("image");
-
-			const name =
-				model.display_name ||
-				model.id
-					.split("-")
-					.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-					.join(" ");
-
-			models.push({
-				id: model.id,
-				name,
-				api: "openai-completions",
-				provider: "kimi-code",
-				baseUrl: KIMI_CODE_BASE_URL,
-				headers: { ...KIMI_CODE_HEADERS },
-				reasoning: hasThinking,
-				input,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: model.context_length || 262144,
-				maxTokens: KIMI_CODE_DEFAULT_MAX_TOKENS,
-				compat: {
-					thinkingFormat: "zai",
-					reasoningContentField: "reasoning_content",
-					supportsDeveloperRole: false,
-				},
-			});
-		}
-
-		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Fetched ${models.length} models from Kimi Code API`);
+		console.log(`Fetched ${models.length} models from ${descriptor.catalogDiscovery.label} model manager`);
 		return models;
 	} catch (error) {
-		console.error("Failed to fetch Kimi Code models:", error);
+		console.error(`Failed to fetch ${descriptor.catalogDiscovery.label} models:`, error);
 		return [];
 	}
 }
-
-const SYNTHETIC_BASE_URL = "https://api.synthetic.new/openai/v1";
-
-interface SyntheticModelInfo {
-	id: string;
-	name?: string;
-	context_length?: number;
-	supports_reasoning?: boolean;
-	supports_vision?: boolean;
-}
-
-async function fetchSyntheticModels(): Promise<Model<"openai-completions">[]> {
-	// Synthetic.new /models endpoint requires authentication.
-	// Prefer SYNTHETIC_API_KEY, then fall back to agent.db (/login synthetic).
-	let apiKey = $env.SYNTHETIC_API_KEY;
-	if (!apiKey) {
-		try {
-			const storage = await CliAuthStorage.create();
-			try {
-				const storedApiKey = storage.getApiKey("synthetic");
-				if (storedApiKey) apiKey = storedApiKey;
-			} finally {
-				storage.close();
-			}
-		} catch {
-			// Ignore missing/unreadable auth storage; fallback models will be used.
-		}
-	}
-	if (apiKey) {
-		try {
-			console.log("Fetching models from Synthetic.new API...");
-			const response = await fetch(`${SYNTHETIC_BASE_URL}/models`, {
-				headers: { Authorization: `Bearer ${apiKey}` },
-			});
-
-			if (!response.ok) {
-				console.warn(`Synthetic.new API returned ${response.status}, using fallback models`);
-				return getSyntheticFallbackModels();
-			}
-
-			const data = await response.json();
-			const items = Array.isArray(data.data) ? (data.data as SyntheticModelInfo[]) : [];
-			const models: Model<"openai-completions">[] = [];
-
-			for (const model of items) {
-				if (!model.id) continue;
-
-				// Derive capabilities from model info
-				const hasThinking = model.supports_reasoning || false;
-				const hasImage = model.supports_vision || false;
-
-				const input: ("text" | "image")[] = ["text"];
-				if (hasImage) input.push("image");
-
-				models.push({
-					id: model.id,
-					name: model.name || model.id,
-					api: "openai-completions",
-					provider: "synthetic",
-					baseUrl: SYNTHETIC_BASE_URL,
-					reasoning: hasThinking,
-					input,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: model.context_length || 200000,
-					maxTokens: 8192,
-				});
-			}
-
-			if (models.length > 0) {
-				console.log(`Fetched ${models.length} models from Synthetic.new API`);
-				return models;
-			}
-		} catch (error) {
-			console.error("Failed to fetch Synthetic.new models:", error);
-		}
-	}
-
-	console.log("No Synthetic credentials found (env or agent.db), using fallback models");
-	return getSyntheticFallbackModels();
-}
-
-function getSyntheticFallbackModels(): Model<"openai-completions">[] {
-	return [
-		{
-			id: "hf:moonshotai/Kimi-K2.5",
-			name: "moonshotai/Kimi-K2.5",
-			api: "openai-completions",
-			provider: "synthetic",
-			baseUrl: SYNTHETIC_BASE_URL,
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 262144,
-			maxTokens: 8192,
-		},
-	];
-}
-
-const CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
-
-interface CerebrasModelInfo {
-	id: string;
-	name?: string;
-	context_length?: number;
-	max_completion_tokens?: number;
-	max_tokens?: number;
-	reasoning?: boolean;
-	modalities?: {
-		input?: string[];
-	};
-}
-
-async function fetchCerebrasModels(): Promise<Model<"openai-completions">[]> {
-	// Cerebras /models endpoint requires authentication.
-	// Prefer CEREBRAS_API_KEY, then fall back to agent.db (/login cerebras).
-	let apiKey = $env.CEREBRAS_API_KEY;
-	if (!apiKey) {
-		try {
-			const storage = await CliAuthStorage.create();
-			try {
-				const storedApiKey = storage.getApiKey("cerebras");
-				if (storedApiKey) apiKey = storedApiKey;
-			} finally {
-				storage.close();
-			}
-		} catch {
-			// Ignore missing/unreadable auth storage; existing models will be used.
-		}
-	}
-
-	if (!apiKey) {
-		console.log("No Cerebras credentials found (env or agent.db), will use previous models");
-		return [];
-	}
-
-	try {
-		console.log("Fetching models from Cerebras API...");
-		const response = await fetch(`${CEREBRAS_BASE_URL}/models`, {
-			headers: { Authorization: `Bearer ${apiKey}` },
-		});
-
-		if (!response.ok) {
-			console.warn(`Cerebras API returned ${response.status}, will use previous models`);
-			return [];
-		}
-
-		const data = await response.json();
-		const items = Array.isArray(data.data) ? (data.data as CerebrasModelInfo[]) : [];
-		const models: Model<"openai-completions">[] = [];
-
-		for (const model of items) {
-			if (!model.id) continue;
-
-			const supportsImage = model.modalities?.input?.includes("image") ?? false;
-			const reasoning = model.reasoning === true || model.id.toLowerCase().includes("reasoning");
-
-			models.push({
-				id: model.id,
-				name: model.name || model.id,
-				api: "openai-completions",
-				provider: "cerebras",
-				baseUrl: CEREBRAS_BASE_URL,
-				reasoning,
-				input: supportsImage ? ["text", "image"] : ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: model.context_length || 131072,
-				maxTokens: model.max_completion_tokens || model.max_tokens || 32768,
-			});
-		}
-
-		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Fetched ${models.length} models from Cerebras API`);
-		return models;
-	} catch (error) {
-		console.error("Failed to fetch Cerebras models:", error);
-		return [];
-	}
-}
-
 
 async function loadModelsDevData(): Promise<Model[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
 		const data = await response.json();
-
-		const models: Model[] = [];
-
-		// Process Amazon Bedrock models
-		if (data["amazon-bedrock"]?.models) {
-			for (const [modelId, model] of Object.entries(data["amazon-bedrock"].models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				let id = modelId;
-
-				if (id.startsWith("ai21.jamba")) {
-					// These models doesn't support tool use in streaming mode
-					continue;
-				}
-
-				if (id.startsWith("amazon.titan-text-express") || id.startsWith("mistral.mistral-7b-instruct-v0")) {
-					// These models doesn't support system messages
-					continue;
-				}
-
-				// Some Amazon Bedrock models require cross-region inference profiles to work.
-				// To use cross-region inference, we need to add a region prefix to the models.
-				// See https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html#inference-profiles-support-system
-				// TODO: Remove Claude models once https://github.com/anomalyco/models.dev/pull/607 is merged, and follow-up with other models.
-
-				// Models with global cross-region inference profiles
-				if (
-					id.startsWith("anthropic.claude-haiku-4-5") ||
-					id.startsWith("anthropic.claude-sonnet-4") ||
-					id.startsWith("anthropic.claude-opus-4-5") ||
-					id.startsWith("amazon.nova-2-lite") ||
-					id.startsWith("cohere.embed-v4") ||
-					id.startsWith("twelvelabs.pegasus-1-2")
-				) {
-					id = "global." + id;
-				}
-
-				// Models with US cross-region inference profiles
-				if (
-					id.startsWith("amazon.nova-lite") ||
-					id.startsWith("amazon.nova-micro") ||
-					id.startsWith("amazon.nova-premier") ||
-					id.startsWith("amazon.nova-pro") ||
-					id.startsWith("anthropic.claude-3-7-sonnet") ||
-					id.startsWith("anthropic.claude-opus-4-1") ||
-					id.startsWith("anthropic.claude-opus-4-20250514") ||
-					id.startsWith("deepseek.r1") ||
-					id.startsWith("meta.llama3-2") ||
-					id.startsWith("meta.llama3-3") ||
-					id.startsWith("meta.llama4")
-				) {
-					id = "us." + id;
-				}
-
-				const bedrockModel = {
-					id,
-					name: m.name || id,
-					api: "bedrock-converse-stream" as const,
-					provider: "amazon-bedrock" as const,
-					baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
-					reasoning: m.reasoning === true,
-					input: (m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				};
-				models.push(bedrockModel);
-
-				// Add EU cross-region inference variants for Claude models
-				if (modelId.startsWith("anthropic.claude-")) {
-					models.push({
-						...bedrockModel,
-						id: "eu." + modelId,
-						name: (m.name || modelId) + " (EU)",
-					});
-				}
-			}
-		}
-
-		// Process Anthropic models
-		if (data.anthropic?.models) {
-			for (const [modelId, model] of Object.entries(data.anthropic.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				// Skip deprecated Anthropic models (old naming convention)
-				if (
-					modelId.startsWith("claude-3-5-haiku") ||
-					modelId.startsWith("claude-3-7-sonnet") ||
-					modelId === "claude-3-opus-20240229" ||
-					modelId === "claude-3-sonnet-20240229"
-				) {
-					continue;
-				}
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "anthropic-messages",
-					provider: "anthropic",
-					baseUrl: "https://api.anthropic.com",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process Google models
-		if (data.google?.models) {
-			for (const [modelId, model] of Object.entries(data.google.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "google-generative-ai",
-					provider: "google",
-					baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process OpenAI models
-		if (data.openai?.models) {
-			for (const [modelId, model] of Object.entries(data.openai.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-responses",
-					provider: "openai",
-					baseUrl: "https://api.openai.com/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process Groq models
-		if (data.groq?.models) {
-			for (const [modelId, model] of Object.entries(data.groq.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider: "groq",
-					baseUrl: "https://api.groq.com/openai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process Cerebras models
-		if (data.cerebras?.models) {
-			for (const [modelId, model] of Object.entries(data.cerebras.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider: "cerebras",
-					baseUrl: "https://api.cerebras.ai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process xAi models
-		if (data.xai?.models) {
-			for (const [modelId, model] of Object.entries(data.xai.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider: "xai",
-					baseUrl: "https://api.x.ai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process zAi models
-		if (data["zai-coding-plan"]?.models) {
-			for (const [modelId, model] of Object.entries(data["zai-coding-plan"].models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-				const supportsImage = m.modalities?.input?.includes("image");
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "anthropic-messages",
-					provider: "zai",
-					baseUrl: "https://api.z.ai/api/anthropic",
-					reasoning: m.reasoning === true,
-					input: supportsImage ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process MiniMax Coding Plan models
-
-		// Process MiniMax Coding Plan models
-		// MiniMax Coding Plan uses OpenAI-compatible API with separate API key
-		const minimaxCodeVariants = [
-			{ key: "minimax-coding-plan", provider: "minimax-code", baseUrl: "https://api.minimax.io/v1" },
-			{ key: "minimax-cn-coding-plan", provider: "minimax-code-cn", baseUrl: "https://api.minimaxi.com/v1" },
-		] as const;
-
-		for (const { key, provider, baseUrl } of minimaxCodeVariants) {
-			if (data[key]?.models) {
-				for (const [modelId, model] of Object.entries(data[key].models)) {
-					const m = model as ModelsDevModel;
-					if (m.tool_call !== true) continue;
-					const supportsImage = m.modalities?.input?.includes("image");
-
-					models.push({
-						id: modelId,
-						name: m.name || modelId,
-						api: "openai-completions",
-						provider,
-						baseUrl,
-						reasoning: m.reasoning === true,
-						input: supportsImage ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
-						compat: {
-							supportsDeveloperRole: false,
-							thinkingFormat: "zai",
-							reasoningContentField: "reasoning_content",
-						},
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
-					});
-				}
-			}
-		}
-
-		// Process Mistral models
-		if (data.mistral?.models) {
-			for (const [modelId, model] of Object.entries(data.mistral.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider: "mistral",
-					baseUrl: "https://api.mistral.ai/v1",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process OpenCode Zen models
-		// API mapping based on provider.npm field:
-		// - @ai-sdk/openai → openai-responses
-		// - @ai-sdk/anthropic → anthropic-messages
-		// - @ai-sdk/google → google-generative-ai
-		// - null/undefined/@ai-sdk/openai-compatible → openai-completions
-		if (data.opencode?.models) {
-			for (const [modelId, model] of Object.entries(data.opencode.models)) {
-				const m = model as ModelsDevModel & { status?: string };
-				if (m.tool_call !== true) continue;
-				if (m.status === "deprecated") continue;
-
-				const npm = m.provider?.npm;
-				let api: Api;
-				let baseUrl: string;
-
-				if (npm === "@ai-sdk/openai") {
-					api = "openai-responses";
-					baseUrl = "https://opencode.ai/zen/v1";
-				} else if (npm === "@ai-sdk/anthropic") {
-					api = "anthropic-messages";
-					// Anthropic SDK appends /v1/messages to baseURL
-					baseUrl = "https://opencode.ai/zen";
-				} else if (npm === "@ai-sdk/google") {
-					api = "google-generative-ai";
-					baseUrl = "https://opencode.ai/zen/v1";
-				} else {
-					// null, undefined, or @ai-sdk/openai-compatible
-					api = "openai-completions";
-					baseUrl = "https://opencode.ai/zen/v1";
-				}
-
-				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api,
-					provider: "opencode",
-					baseUrl,
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
-			}
-		}
-
-		// Process GitHub Copilot models
-		if (data["github-copilot"]?.models) {
-			for (const [modelId, model] of Object.entries(data["github-copilot"].models)) {
-				const m = model as ModelsDevModel & { status?: string };
-				if (m.tool_call !== true) continue;
-				if (m.status === "deprecated") continue;
-
-				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
-				const api: Api = isCopilotClaude4
-					? "anthropic-messages"
-					: needsResponsesApi
-						? "openai-responses"
-						: "openai-completions";
-
-				const copilotModel: Model = {
-					id: modelId,
-					name: m.name || modelId,
-					api,
-					provider: "github-copilot",
-					baseUrl: "https://api.individual.githubcopilot.com",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 128000,
-					maxTokens: m.limit?.output || 8192,
-					headers: { ...COPILOT_STATIC_HEADERS },
-					// compat only applies to openai-completions
-					...(api === "openai-completions"
-						? {
-								compat: {
-									supportsStore: false,
-									supportsDeveloperRole: false,
-									supportsReasoningEffort: false,
-								},
-							}
-						: {}),
-				};
-
-				models.push(copilotModel);
-			}
-		}
-
-		// Process MiniMax models
-		const minimaxVariants = [
-			{ key: "minimax", provider: "minimax", baseUrl: "https://api.minimax.io/anthropic" },
-			{ key: "minimax-cn", provider: "minimax-cn", baseUrl: "https://api.minimaxi.com/anthropic" },
-		] as const;
-
-		for (const { key, provider, baseUrl } of minimaxVariants) {
-			if (data[key]?.models) {
-				for (const [modelId, model] of Object.entries(data[key].models)) {
-					const m = model as ModelsDevModel;
-					if (m.tool_call !== true) continue;
-
-					models.push({
-						id: modelId,
-						name: m.name || modelId,
-						api: "anthropic-messages",
-						provider,
-						// MiniMax's Anthropic-compatible API - SDK appends /v1/messages
-						baseUrl,
-						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
-					});
-				}
-			}
-		}
-
+		const models = mapModelsDevToModels(data as Record<string, unknown>, MODELS_DEV_PROVIDER_DESCRIPTORS);
 		models.sort((a, b) => a.id.localeCompare(b.id));
 		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
 		return models;
@@ -942,25 +103,24 @@ async function loadModelsDevData(): Promise<Model[]> {
 }
 
 const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-/**
- * Try to get a fresh Antigravity access token from agent.db credentials.
- */
-async function getAntigravityToken(): Promise<{ token: string; storage: CliAuthStorage } | null> {
+
+async function getOAuthCredentialsFromStorage(provider: OAuthProvider): Promise<OAuthCredentials | null> {
 	try {
 		const storage = await CliAuthStorage.create();
-		const creds = storage.getOAuth("google-antigravity");
-		if (!creds) {
+		try {
+			const creds = storage.getOAuth(provider);
+			if (!creds) {
+				return null;
+			}
+			const result = await getOAuthApiKey(provider, { [provider]: creds });
+			if (!result) {
+				return null;
+			}
+			storage.saveOAuth(provider, result.newCredentials);
+			return result.newCredentials;
+		} finally {
 			storage.close();
-			return null;
 		}
-		const result = await getOAuthApiKey("google-antigravity", { "google-antigravity": creds });
-		if (!result) {
-			storage.close();
-			return null;
-		}
-		// Save refreshed credentials back
-		storage.saveOAuth("google-antigravity", result.newCredentials);
-		return { token: result.newCredentials.access, storage };
 	} catch {
 		return null;
 	}
@@ -971,15 +131,15 @@ async function getAntigravityToken(): Promise<{ token: string; storage: CliAuthS
  * Returns empty array if no auth is available (previous models used as fallback).
  */
 async function fetchAntigravityModels(): Promise<Model<"google-gemini-cli">[]> {
-	const auth = await getAntigravityToken();
-	if (!auth) {
+	const credentials = await getOAuthCredentialsFromStorage("google-antigravity");
+	if (!credentials) {
 		console.log("No Antigravity credentials found, will use previous models");
 		return [];
 	}
 	try {
 		console.log("Fetching models from Antigravity API...");
 		const discovered = await fetchAntigravityDiscoveryModels({
-			token: auth.token,
+			token: credentials.access,
 			endpoint: ANTIGRAVITY_ENDPOINT,
 		});
 		if (discovered === null) {
@@ -995,8 +155,6 @@ async function fetchAntigravityModels(): Promise<Model<"google-gemini-cli">[]> {
 	} catch (error) {
 		console.error("Failed to fetch Antigravity models:", error);
 		return [];
-	} finally {
-		auth.storage.close();
 	}
 }
 
@@ -1016,171 +174,80 @@ function extractCodexAccountId(accessToken: string): string | null {
 	}
 }
 
-/**
- * Try to get Codex (ChatGPT) OAuth credentials from agent.db.
- */
-async function getCodexCredentials(): Promise<{ accessToken: string; accountId?: string; storage: CliAuthStorage } | null> {
+async function fetchCodexDiscoveryModels(): Promise<Model<"openai-codex-responses">[]> {
+	const credentials = await getOAuthCredentialsFromStorage("openai-codex");
+	if (!credentials) {
+		return [];
+	}
 	try {
-		const storage = await CliAuthStorage.create();
-		const creds = storage.getOAuth("openai-codex");
-		if (!creds) {
-			storage.close();
-			return null;
-		}
-
-		const result = await getOAuthApiKey("openai-codex", { "openai-codex": creds });
-		if (!result) {
-			storage.close();
-			return null;
-		}
-
-		storage.saveOAuth("openai-codex", result.newCredentials);
-		const accessToken = result.newCredentials.access;
-		const accountId = result.newCredentials.accountId ?? extractCodexAccountId(accessToken);
-		return {
+		console.log("Fetching models from Codex API...");
+		const accessToken = credentials.access;
+		const accountId = credentials.accountId ?? extractCodexAccountId(accessToken);
+		const codexDiscovery = await fetchCodexModels({
 			accessToken,
 			accountId: accountId ?? undefined,
-			storage,
-		};
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Try to get Cursor API key from agent.db.
- */
-async function getCursorApiKey(): Promise<{ apiKey: string; storage: CliAuthStorage } | null> {
-	try {
-		const storage = await CliAuthStorage.create();
-		const creds = storage.getOAuth("cursor");
-		if (!creds) {
-			storage.close();
-			return null;
+		});
+		if (codexDiscovery === null) {
+			console.warn("Codex API fetch failed");
+			return [];
 		}
-
-		const result = await getOAuthApiKey("cursor", { cursor: creds });
-		if (!result) {
-			storage.close();
-			return null;
+		if (codexDiscovery.models.length > 0) {
+			console.log(`Fetched ${codexDiscovery.models.length} models from Codex API`);
+			return codexDiscovery.models;
 		}
-
-		storage.saveOAuth("cursor", result.newCredentials);
-		return { apiKey: result.newCredentials.access, storage };
-	} catch {
-		return null;
+		return [];
+	} catch (error) {
+		console.error("Failed to fetch Codex models:", error);
+		return [];
 	}
 }
 
 async function generateModels() {
 	// Fetch models from dynamic sources
 	const modelsDevModels = await loadModelsDevData();
-	const openRouterModels = await fetchOpenRouterModels();
-	const aiGatewayModels = await fetchAiGatewayModels();
-	const kimiCodeModels = await fetchKimiCodeModels();
-	const syntheticNewModels = await fetchSyntheticModels();
-	const cerebrasModels = await fetchCerebrasModels();
+	const catalogProviderModels = (
+		await Promise.all(PROVIDER_DESCRIPTORS.filter(isCatalogDescriptor).map(descriptor => fetchProviderModelsFromCatalog(descriptor)))
+	).flat();
 
 	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...kimiCodeModels, ...syntheticNewModels, ...cerebrasModels];
+	const allModels = [...modelsDevModels, ...catalogProviderModels];
 
-	// Fix incorrect cache pricing for Claude Opus 4.5 from models.dev
-	// models.dev has 3x the correct pricing (1.5/18.75 instead of 0.5/6.25)
-	const opus45 = allModels.find((m) => m.provider === "anthropic" && m.id === "claude-opus-4-5");
-	if (opus45) {
-		opus45.cost.cacheRead = 0.5;
-		opus45.cost.cacheWrite = 6.25;
+	if (!allModels.some((model) => model.provider === "cloudflare-ai-gateway")) {
+		allModels.push(CLOUDFLARE_FALLBACK_MODEL);
 	}
 
-	// Temporary overrides until upstream model metadata is corrected.
-	for (const candidate of allModels) {
-		if (candidate.provider === "amazon-bedrock" && candidate.id.includes("anthropic.claude-opus-4-6-v1")) {
-			candidate.cost.cacheRead = 0.5;
-			candidate.cost.cacheWrite = 6.25;
-		}
-		// Opus 4.6 / Sonnet 4.6 1M context is beta; all providers should use 200K
-		if (candidate.id.includes("opus-4-6") || candidate.id.includes("opus-4.6") || candidate.id.includes("sonnet-4-6") || candidate.id.includes("sonnet-4.6")) {
-			candidate.contextWindow = 200000;
-		}
-		// opencode lists Claude Sonnet 4/4.5 with 1M context, actual limit is 200K
-		if (candidate.provider === "opencode" && (candidate.id === "claude-sonnet-4-5" || candidate.id === "claude-sonnet-4")) {
-			candidate.contextWindow = 200000;
+	const specialDiscoverySources = [
+		{ label: "Antigravity", fetch: fetchAntigravityModels },
+		{ label: "Codex", fetch: fetchCodexDiscoveryModels },
+	] as const;
+	const specialDiscoveries = await Promise.all(
+		specialDiscoverySources.map(async source => ({
+			label: source.label,
+			models: await source.fetch(),
+		})),
+	);
+	for (const discovery of specialDiscoveries) {
+		if (discovery.models.length > 0) {
+			console.log(`Added ${discovery.models.length} models from ${discovery.label} discovery`);
+			allModels.push(...discovery.models);
 		}
 	}
 
-	// Antigravity models (Gemini 3, Claude, GPT-OSS via Google Cloud)
-	const antigravityModels = await fetchAntigravityModels();
-	allModels.push(...antigravityModels);
-
-	// OpenAI Codex (ChatGPT OAuth) models
-	const codexAuth = await getCodexCredentials();
-	if (codexAuth) {
-		try {
-			console.log("Fetching models from Codex API...");
-			const codexDiscovery = await fetchCodexModels({
-				accessToken: codexAuth.accessToken,
-				accountId: codexAuth.accountId,
-			});
-			if (codexDiscovery === null) {
-				console.warn("Codex API fetch failed");
-			} else if (codexDiscovery.models.length > 0) {
-				console.log(`Fetched ${codexDiscovery.models.length} models from Codex API`);
-				allModels.push(...codexDiscovery.models);
-			}
-		} catch (error) {
-			console.error("Failed to fetch Codex models:", error);
-		} finally {
-			codexAuth.storage.close();
-		}
-	}
-
-	// Cursor Agent models
-	const cursorAuth = await getCursorApiKey();
-	if (cursorAuth) {
-		try {
-			console.log("Fetching models from Cursor API...");
-			const discoveredCursor = await fetchCursorUsableModels({
-				apiKey: cursorAuth.apiKey,
-			});
-			if (discoveredCursor === null) {
-				console.warn("Cursor API fetch failed");
-			} else if (discoveredCursor.length > 0) {
-				console.log(`Fetched ${discoveredCursor.length} models from Cursor API`);
-				allModels.push(...discoveredCursor);
-			}
-		} catch (error) {
-			console.error("Failed to fetch Cursor models:", error);
-		} finally {
-			cursorAuth.storage.close();
-		}
-	}
-
-	// Normalize Codex models to input-token window (272K). The 400K figure includes output budget.
-	for (const candidate of allModels) {
-		if (candidate.id.includes("codex") && !candidate.id.includes("codex-spark")) {
-			candidate.contextWindow = 272000;
-		}
-	}
-
-	for (const candidate of allModels) {
-		if (!candidate.id.endsWith("-spark")) continue;
-		const baseId = candidate.id.slice(0, -"-spark".length);
-		const fallback = allModels.find(
-			model => model.provider === candidate.provider && model.api === candidate.api && model.id === baseId,
-		);
-		if (!fallback) continue;
-		candidate.contextPromotionTarget = `${fallback.provider}/${fallback.id}`;
-	}
+	applyGeneratedModelPolicies(allModels);
+	linkSparkPromotionTargets(allModels);
 
 	// Merge previous models.json entries as fallback for any provider/model
 	// not fetched dynamically. This replaces all hardcoded fallback lists —
 	// static-only providers (vertex, gemini-cli), auth-gated providers when
 	// credentials are unavailable, and ad-hoc model additions all persist
 	// through the existing models.json seed.
+	// Discovery-only providers (local inference servers) — never bundle static models.
+	const discoveryOnlyProviders = new Set(["ollama", "vllm"]);
 	const fetchedKeys = new Set(allModels.map((m) => `${m.provider}/${m.id}`));
+
 	for (const models of Object.values(prevModelsJson as Record<string, Record<string, Model>>)) {
 		for (const model of Object.values(models)) {
-			if (!fetchedKeys.has(`${model.provider}/${model.id}`)) {
+			if (!fetchedKeys.has(`${model.provider}/${model.id}`) && !discoveryOnlyProviders.has(model.provider)) {
 				allModels.push(model);
 			}
 		}
@@ -1189,11 +256,12 @@ async function generateModels() {
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};
 	for (const model of allModels) {
+		if (discoveryOnlyProviders.has(model.provider)) continue;
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};
 		}
 		// Use model ID as key to automatically deduplicate
-		// Only add if not already present (models.dev takes priority over OpenRouter)
+		// Only add if not already present (models.dev takes priority over endpoint discovery)
 		if (!providers[model.provider][model.id]) {
 			providers[model.provider][model.id] = model;
 		}
@@ -1202,6 +270,7 @@ async function generateModels() {
 	// Sort models within each provider by ID
 	for (const provider of Object.keys(providers)) {
 		const models = Object.values(providers[provider]);
+
 		models.sort((a, b) => a.id.localeCompare(b.id));
 		// Rebuild the object with sorted keys
 		providers[provider] = {};
@@ -1210,16 +279,17 @@ async function generateModels() {
 		}
 	}
 
-    // Generate JSON file
-    const MODELS = providers;
-    await Bun.write(join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, '\t'));
-    console.log("Generated src/models.json");
+	// Generate JSON file
+	const MODELS = providers;
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "	"));
+	console.log("Generated src/models.json");
 
 	// Print statistics
 	const totalModels = allModels.length;
 	const reasoningModels = allModels.filter((m) => m.reasoning).length;
 
-	console.log(`\nModel Statistics:`);
+	console.log(`
+Model Statistics:`);
 	console.log(`  Total tool-capable models: ${totalModels}`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
