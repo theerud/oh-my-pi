@@ -17,7 +17,7 @@ const pkgMap = {
 };
 
 /**
- * esbuild plugin to handle Bun's "with { type: 'text' }" imports and workspace resolution.
+ * esbuild plugin to handle Bun's "with { type: 'text' }" and "with { type: 'json' }" imports.
  */
 const bunTextPlugin = {
   name: 'bun-text',
@@ -45,32 +45,38 @@ const bunTextPlugin = {
         return null;
     });
 
-    // Handle relative imports within the project to resolve .ts files
-    build.onResolve({ filter: /^\./ }, args => {
-        if (!args.resolveDir.startsWith(root)) return null;
-        
-        const absolutePath = path.resolve(args.resolveDir, args.path);
-        
-        // Try .ts FIRST
-        if (fs.existsSync(`${absolutePath}.ts`)) return { path: `${absolutePath}.ts` };
-        if (fs.existsSync(`${absolutePath}.tsx`)) return { path: `${absolutePath}.tsx` };
+    // Intercept .md, .py, .txt, .html, .css, .jsonl, .sql
+    build.onResolve({ filter: /\.(md|py|txt|html|css|jsonl|sql)$/ }, args => {
+      return { path: path.resolve(args.resolveDir, args.path), namespace: 'bun-text' };
+    });
 
-        // Then try as a directory
+    // UNIFY ALL IMPORTS to avoid double bundling.
+    build.onResolve({ filter: /^\./ }, args => {
+        let absolutePath = path.resolve(args.resolveDir, args.path);
+        
+        if (args.path.endsWith('.js')) {
+            const tsPath = absolutePath.slice(0, -3) + '.ts';
+            if (fs.existsSync(tsPath)) return { path: tsPath };
+        }
+
+        if (fs.existsSync(absolutePath)) {
+            if (fs.statSync(absolutePath).isFile()) return { path: absolutePath };
+        }
+
+        for (const ext of ['.ts', '.tsx', '.json']) {
+            if (fs.existsSync(absolutePath + ext)) return { path: absolutePath + ext };
+        }
+
         try {
             if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isDirectory()) {
-                const indexTs = path.join(absolutePath, 'index.ts');
-                if (fs.existsSync(indexTs)) return { path: indexTs };
-                const indexTsx = path.join(absolutePath, 'index.tsx');
-                if (fs.existsSync(indexTsx)) return { path: indexTsx };
+                for (const ext of ['.ts', '.tsx', '.json']) {
+                    const index = path.join(absolutePath, 'index' + ext);
+                    if (fs.existsSync(index)) return { path: index };
+                }
             }
         } catch {}
 
         return null;
-    });
-
-    // Intercept .md, .py, .txt, .html, .css, .jsonl
-    build.onResolve({ filter: /\.(md|py|txt|html|css|jsonl)$/ }, args => {
-      return { path: path.resolve(args.resolveDir, args.path), namespace: 'bun-text' };
     });
 
     build.onLoad({ filter: /.*/, namespace: 'bun-text' }, async args => {
@@ -91,14 +97,14 @@ const bunTextPlugin = {
             contents = contents.slice(contents.indexOf('\n') + 1);
         }
 
-        // Strip 'with { type: "text" }'
-        contents = contents.replace(/(\s+)with\s*{\s*type:\s*["'](text|json)["']\s*}/g, '$1');
+        // Strip 'with { type: "text" }' and 'with { type: "json" }'
+        contents = contents.replace(/\s+with\s*\{\s*type:\s*["'](text|json)["']\s*\}/g, '');
         
         // Fix better-sqlite3 named import issue
         if (contents.includes('bun:sqlite')) {
              contents = contents.replace(/import\s*{\s*([^}]+)\s*}\s*from\s*["']bun:sqlite["'];?/g, (match, imports) => {
                  const runtimeImports = imports.split(',').map(s => s.trim()).filter(s => !s.startsWith('type ')).join(', ');
-                 return `import __betterSqlite3 from "bun:sqlite"; const { ${runtimeImports} } = __betterSqlite3;`;
+                 return `import __betterSqlite3 from "bun:sqlite"; const { ${runtimeImports} } = typeof __betterSqlite3 === 'function' ? { Database: __betterSqlite3 } : (__betterSqlite3.default ? { Database: __betterSqlite3.default } : __betterSqlite3);`;
              });
         }
 
@@ -140,6 +146,9 @@ async function build() {
         'fsevents',
         'better-sqlite3',
       ],
+      loader: {
+        '.json': 'json',
+      },
       plugins: [bunTextPlugin],
       sourcemap: true,
       minify: false,
