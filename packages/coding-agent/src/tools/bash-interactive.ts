@@ -9,8 +9,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import type { Terminal as XtermTerminalType } from "@xterm/headless";
-import xterm from "@xterm/headless";
+import { Terminal } from "@xterm/headless";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
 import { getStateIcon } from "../tui";
@@ -27,7 +26,7 @@ function normalizeCaptureChunk(chunk: string): string {
 	return sanitizeText(normalized);
 }
 
-const XtermTerminal = xterm.Terminal;
+const XtermTerminal = Terminal;
 
 function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
 	const kitty = parseKittySequence(data);

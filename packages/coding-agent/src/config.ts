@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { CONFIG_DIR_NAME, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import type { TSchema } from "@sinclair/typebox";
@@ -32,8 +33,11 @@ export function getPackageDir(): string {
 		return envDir;
 	}
 
-	let dir = import.meta.dir;
-	while (dir !== path.dirname(dir)) {
+	let dir =
+		(import.meta as any).dir ||
+		(import.meta.url.startsWith("file:") ? path.dirname(fileURLToPath(import.meta.url)) : ".");
+
+	while (dir && dir !== path.dirname(dir)) {
 		if (fs.existsSync(path.join(dir, "package.json"))) {
 			return dir;
 		}

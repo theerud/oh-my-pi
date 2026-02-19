@@ -42,6 +42,7 @@ const __dirname =
 	(import.meta.url.startsWith("file:") ? path.dirname(fileURLToPath(import.meta.url)) : ".");
 
 const nativeDir = path.join(__dirname, "..", "native");
+const nativeDirLocal = path.join(__dirname, "native");
 const execDir = path.dirname(process.execPath);
 const versionedDir = path.join(getNativesDir(), packageVersion);
 const userDataDir =
@@ -61,9 +62,14 @@ const selectedVariant = resolveCpuVariant(variantOverride);
 const addonFilenames = getAddonFilenames(platformTag, selectedVariant);
 const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
-const debugCandidates = [path.join(nativeDir, "pi_natives.dev.node"), path.join(execDir, "pi_natives.dev.node")];
+const debugCandidates = [
+	path.join(nativeDir, "pi_natives.dev.node"),
+	path.join(nativeDirLocal, "pi_natives.dev.node"),
+	path.join(execDir, "pi_natives.dev.node"),
+];
 const baseReleaseCandidates = addonFilenames.flatMap(filename => [
 	path.join(nativeDir, filename),
+	path.join(nativeDirLocal, filename),
 	path.join(execDir, filename),
 ]);
 const compiledCandidates = addonFilenames.flatMap(filename => [
@@ -265,7 +271,11 @@ function loadNative(): NativeBindings {
 			"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build:native";
 	}
 
-	throw new Error(`Failed to load pi_natives native addon for ${addonLabel}.\n\nTried:\n${details}\n\n${helpMessage}`);
+	throw new Error(
+		`Failed to load pi_natives native addon for ${addonLabel}.\n\n` +
+			`__dirname: ${__dirname}\n` +
+			`Tried:\n${details}\n\n${helpMessage}`,
+	);
 }
 function validateNative(bindings: NativeBindings, source: string): void {
 	const missing: string[] = [];
