@@ -95,6 +95,7 @@ export type KnownProvider =
 	| "litellm"
 	| "moonshot"
 	| "nvidia"
+	| "nanogpt"
 	| "ollama"
 	| "qianfan"
 	| "qwen-portal"
@@ -224,6 +225,7 @@ export interface ToolCall {
 	name: string;
 	arguments: Record<string, any>;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
+	intent?: string; // Harness-level intent metadata extracted from traced tool arguments
 }
 
 export interface Usage {

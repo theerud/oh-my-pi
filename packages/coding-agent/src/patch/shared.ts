@@ -86,10 +86,10 @@ interface EditRenderArgs {
 }
 
 type HashlineEditPreview =
-	| { set_line: { anchor: string; new_text: string } }
-	| { replace_lines: { start_anchor: string; end_anchor: string; new_text: string } }
-	| { insert_after: { anchor: string; text: string } }
-	| { replace: { old_text: string; new_text: string; all?: boolean } };
+	| { target: string; new_content: string[] }
+	| { first: string; last: string; new_content: string[] }
+	| { before?: string; after?: string; inserted_lines: string[] }
+	| { old_text: string; new_text: string; all?: boolean };
 
 /** Extended context for edit tool rendering */
 export interface EditRenderContext {
@@ -168,41 +168,38 @@ function formatStreamingHashlineEdits(edits: unknown[], uiTheme: Theme, ui: Tool
 				dst: "",
 			};
 		}
-		if ("set_line" in editRecord) {
-			const setLine = asRecord(editRecord.set_line);
+		if ("target" in editRecord) {
+			const target = typeof editRecord.target === "string" ? editRecord.target : "…";
+			const newContent = editRecord.new_content;
 			return {
-				srcLabel: `• set_line ${typeof setLine?.anchor === "string" ? setLine.anchor : "…"}`,
-				dst: typeof setLine?.new_text === "string" ? setLine.new_text : "",
+				srcLabel: `• line ${target}`,
+				dst: Array.isArray(newContent) ? (newContent as string[]).join("\n") : "",
 			};
 		}
-		if ("replace_lines" in editRecord) {
-			const replaceLines = asRecord(editRecord.replace_lines);
-			const start = typeof replaceLines?.start_anchor === "string" ? replaceLines.start_anchor : "…";
-			const end = typeof replaceLines?.end_anchor === "string" ? replaceLines.end_anchor : "…";
+		if ("first" in editRecord || "last" in editRecord) {
+			const first = typeof editRecord.first === "string" ? editRecord.first : "…";
+			const last = typeof editRecord.last === "string" ? editRecord.last : "…";
+			const newContent = editRecord.new_content;
 			return {
-				srcLabel: `• replace_lines ${start}..${end}`,
-				dst: typeof replaceLines?.new_text === "string" ? replaceLines.new_text : "",
+				srcLabel: `• range ${first}..${last}`,
+				dst: Array.isArray(newContent) ? (newContent as string[]).join("\n") : "",
 			};
 		}
-		if ("replace" in editRecord) {
-			const replace = asRecord(editRecord.replace);
-			const all = typeof replace?.all === "boolean" ? replace.all : false;
+		if ("old_text" in editRecord || "new_text" in editRecord) {
+			const all = typeof editRecord.all === "boolean" ? editRecord.all : false;
 			return {
 				srcLabel: `• replace old_text→new_text${all ? " (all)" : ""}`,
-				dst: typeof replace?.new_text === "string" ? replace.new_text : "",
+				dst: typeof editRecord.new_text === "string" ? editRecord.new_text : "",
 			};
 		}
-		if ("insert_after" in editRecord) {
-			const insertAfter = asRecord(editRecord.insert_after);
-			const anchor = typeof insertAfter?.anchor === "string" ? insertAfter.anchor : "…";
-			const text =
-				typeof insertAfter?.text === "string"
-					? insertAfter.text
-					: typeof insertAfter?.content === "string"
-						? insertAfter.content
-						: "";
+		if ("inserted_lines" in editRecord || "before" in editRecord || "after" in editRecord) {
+			const after = typeof editRecord.after === "string" ? editRecord.after : undefined;
+			const before = typeof editRecord.before === "string" ? editRecord.before : undefined;
+			const insertedLines = editRecord.inserted_lines;
+			const text = Array.isArray(insertedLines) ? (insertedLines as string[]).join("\n") : "";
+			const refs = [after, before].filter(Boolean).join("..") || "…";
 			return {
-				srcLabel: `• insert_after ${anchor}..`,
+				srcLabel: `• insert ${refs}`,
 				dst: text,
 			};
 		}

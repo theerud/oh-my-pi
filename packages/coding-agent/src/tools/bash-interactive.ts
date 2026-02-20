@@ -94,6 +94,10 @@ class BashInteractiveOverlayComponent implements Component {
 	#session: PtySession | null = null;
 	#lastCols = 0;
 	#lastRows = 0;
+	#writeQueue: string[] = [];
+	#writeOffset = 0;
+	#flushResolvers: Array<() => void> = [];
+	#writing = false;
 
 	constructor(
 		private readonly command: string,
@@ -116,7 +120,47 @@ class BashInteractiveOverlayComponent implements Component {
 	}
 
 	appendOutput(chunk: string): void {
-		this.#terminal.write(chunk);
+		this.#writeQueue.push(chunk);
+		this.#drainQueue();
+	}
+
+	#drainQueue(): void {
+		if (this.#writing) return;
+		if (this.#writeOffset >= this.#writeQueue.length) {
+			this.#resolveFlushWaiters();
+			return;
+		}
+		this.#writing = true;
+		const data = this.#writeQueue[this.#writeOffset]!;
+		this.#terminal.write(data, () => {
+			this.#writing = false;
+			this.#writeOffset += 1;
+			if (this.#writeOffset >= this.#writeQueue.length) {
+				this.#writeQueue = [];
+				this.#writeOffset = 0;
+				this.#resolveFlushWaiters();
+			}
+			this.#drainQueue();
+		});
+	}
+
+	#resolveFlushWaiters(): void {
+		if (this.#writing || this.#writeOffset < this.#writeQueue.length) return;
+		if (this.#flushResolvers.length === 0) return;
+		const resolvers = this.#flushResolvers;
+		this.#flushResolvers = [];
+		for (const resolve of resolvers) {
+			resolve();
+		}
+	}
+
+	flushOutput(): Promise<void> {
+		if (!this.#writing && this.#writeOffset >= this.#writeQueue.length) {
+			return Promise.resolve();
+		}
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#flushResolvers.push(resolve);
+		return promise;
 	}
 
 	setSession(session: PtySession): void {
@@ -257,6 +301,7 @@ export async function runInteractiveBashPty(
 				component.setComplete({ exitCode: run.exitCode, cancelled: run.cancelled, timedOut: run.timedOut });
 				tui.requestRender();
 				void (async () => {
+					await component.flushOutput();
 					await pendingChunks;
 					const summary = await sink.dump();
 					done({
@@ -348,12 +393,7 @@ export async function runInteractiveBashPty(
 					},
 					(err, chunk) => {
 						if (err || !chunk) return;
-						try {
-							component.appendOutput(chunk);
-						} catch {
-							const normalizedChunk = normalizeCaptureChunk(chunk);
-							component.appendOutput(normalizedChunk);
-						}
+						component.appendOutput(chunk);
 						const normalizedChunk = normalizeCaptureChunk(chunk);
 						pendingChunks = pendingChunks.then(() => sink.push(normalizedChunk)).catch(() => {});
 						tui.requestRender();
