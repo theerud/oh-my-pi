@@ -179,7 +179,7 @@ export const SETTINGS_SCHEMA = {
 	defaultThinkingLevel: {
 		type: "enum",
 		values: ["off", "minimal", "low", "medium", "high", "xhigh"] as const,
-		default: "off",
+		default: "high",
 		ui: {
 			tab: "agent",
 			label: "Thinking level",
@@ -504,7 +504,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tools.intentTracing": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tools",
 			label: "Intent tracing",

@@ -17,7 +17,7 @@ import { CachedOutputBlock } from "../tui/output-block";
 import type { ToolSession } from ".";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
-import { applyHeadTail, normalizeBashCommand } from "./bash-normalize";
+import { applyHeadTail } from "./bash-normalize";
 import { expandInternalUrls } from "./bash-skill-urls";
 import type { OutputMeta } from "./output-meta";
 import { allocateOutputArtifact, createTailBuffer } from "./output-utils";
@@ -75,13 +75,11 @@ export class BashTool implements AgentTool<typeof bashSchema, BashToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
-		// Normalize command: strip head/tail pipes and 2>&1
-		const normalized = normalizeBashCommand(rawCommand);
-		let command = normalized.command;
+		let command = rawCommand;
 
-		// Merge explicit params with extracted ones (explicit takes precedence)
-		const headLines = head ?? normalized.headLines;
-		const tailLines = tail ?? normalized.tailLines;
+		// Only apply explicit head/tail params from tool input.
+		const headLines = head;
+		const tailLines = tail;
 
 		// Check interception if enabled and available tools are known
 		if (this.session.settings.get("bashInterceptor.enabled")) {
@@ -140,6 +138,7 @@ export class BashTool implements AgentTool<typeof bashSchema, BashToolDetails> {
 				})
 			: await executeBash(command, {
 					cwd: commandCwd,
+					sessionKey: this.session.getSessionId?.() ?? undefined,
 					timeout: timeoutMs,
 					signal,
 					env: extraEnv,
@@ -237,7 +236,7 @@ function formatBashCommand(args: BashRenderArgs, _uiTheme: Theme): string {
 export const BASH_PREVIEW_LINES = 10;
 
 export const bashToolRenderer = {
-	renderCall(args: BashRenderArgs, uiTheme: Theme): Component {
+	renderCall(args: BashRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const cmdText = formatBashCommand(args, uiTheme);
 		const text = renderStatusLine({ icon: "pending", title: "Bash", description: cmdText }, uiTheme);
 		return new Text(text, 0, 0);

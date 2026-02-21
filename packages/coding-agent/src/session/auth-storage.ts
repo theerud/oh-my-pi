@@ -547,13 +547,14 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Removes credential at index (used when OAuth refresh fails).
-	 * Cleans up provider entry if last credential removed.
+	 * Disables credential at index (used when OAuth refresh fails).
+	 * The credential remains in the database but is excluded from active queries.
+	 * Cleans up provider entry if last credential disabled.
 	 */
 	#removeCredentialAt(provider: string, index: number): void {
 		const entries = this.#getStoredCredentials(provider);
 		if (index < 0 || index >= entries.length) return;
-		this.storage.deleteAuthCredential(entries[index].id);
+		this.storage.disableAuthCredential(entries[index].id);
 		const updated = entries.filter((_value, idx) => idx !== index);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
@@ -1339,7 +1340,7 @@ export class AuthStorage {
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
 			const isDefinitiveFailure =
 				/invalid_grant|invalid_token|revoked|unauthorized|expired.*refresh|refresh.*expired/i.test(errorMsg) ||
-				(/401|403/.test(errorMsg) && !/timeout|network|fetch failed|ECONNREFUSED/i.test(errorMsg));
+				(/\b(401|403)\b/.test(errorMsg) && !/timeout|network|fetch failed|ECONNREFUSED/i.test(errorMsg));
 
 			logger.warn("OAuth token refresh failed", {
 				provider,
@@ -1361,6 +1362,38 @@ export class AuthStorage {
 		}
 
 		return undefined;
+	}
+
+	/**
+	 * Peek at API key for a provider without refreshing OAuth tokens.
+	 * Used for model discovery where we only need to know if credentials exist
+	 * and get a best-effort token. The actual refresh happens lazily when the
+	 * provider is used for an API call.
+	 */
+	async peekApiKey(provider: string): Promise<string | undefined> {
+		const runtimeKey = this.#runtimeOverrides.get(provider);
+		if (runtimeKey) {
+			return runtimeKey;
+		}
+
+		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
+		if (apiKeySelection) {
+			return resolveConfigValue(apiKeySelection.credential.key);
+		}
+
+		// Return current OAuth access token only if it is not already expired.
+		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
+		if (oauthSelection) {
+			const expiresAt = oauthSelection.credential.expires;
+			if (Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+				return oauthSelection.credential.access;
+			}
+		}
+
+		const envKey = getEnvApiKey(provider);
+		if (envKey) return envKey;
+
+		return this.#fallbackResolver?.(provider) ?? undefined;
 	}
 
 	/**

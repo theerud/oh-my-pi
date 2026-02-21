@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [12.17.2] - 2026-02-21
+### Added
+
+- Exported `getAntigravityUserAgent()` function for constructing Antigravity User-Agent headers
+
+### Changed
+
+- Updated default Antigravity version from 1.15.8 to 1.18.3
+- Unified User-Agent header generation across Antigravity API calls to use centralized `getAntigravityUserAgent()` function
+
+## [12.17.1] - 2026-02-21
+### Added
+
+- Added new export paths for provider models via `./provider-models` and `./provider-models/*`
+- Added new export paths for Cursor and OpenAI Codex providers via `./providers/cursor/gen/*` and `./providers/openai-codex/*`
+- Added new export paths for usage utilities via `./usage/*`
+- Added new export paths for discovery and OAuth utilities via `./utils/discovery` and `./utils/oauth` with subpath exports
+
+### Changed
+
+- Simplified main export path to use wildcard pattern `./src/*.ts` for broader module access
+- Updated `models.json` export to include TypeScript declaration file at `./src/models.json.d.ts`
+- Reorganized package.json field ordering for improved readability
+
+## [12.17.0] - 2026-02-21
+### Fixed
+- Cursor provider: bind `execHandlers` when passing handler methods to the exec protocol so handlers receive correct `this` context (fixes "undefined is not an object (evaluating 'this.options')" when using exec tools such as web search with Cursor)
+
+## [12.16.0] - 2026-02-21
+### Added
+
+- Exported `readModelCache` and `writeModelCache` functions for direct SQLite-backed model cache access
+- Added `<turn_aborted>` guidance marker as synthetic user message when assistant messages are aborted or errored, informing the model that tools may have partially executed
+- Added support for Sonnet 4.6 models in adaptive thinking detection
+
+### Changed
+
+- Updated model cache schema version to support improved global model fallback resolution
+- Improved GitHub Copilot model resolution to prefer provider-specific model definitions over global references when context window is larger, ensuring optimal model capabilities
+- Migrated model cache from per-provider JSON files to unified SQLite database (models.db) for atomic cross-process access
+- Renamed `cachePath` option to `cacheDbPath` in ModelManagerOptions to reflect database-backed storage
+- Improved non-authoritative cache handling with 5-minute retry backoff instead of retrying on every startup
+- Modified handling of aborted/errored assistant messages to preserve tool call structure instead of converting to text summaries, with synthetic 'aborted' tool results injected
+- Updated tool call tracking to use status map (Resolved/Aborted) instead of separate sets for better handling of duplicate and aborted tool results
+
+## [12.15.0] - 2026-02-20
+### Fixed
+
+- Improved error messages for OAuth token refresh failures by including detailed error information from the provider
+- Separated rate limit and usage limit error handling to provide distinct user-friendly messages for ChatGPT rate limits vs subscription usage limits
+
+### Changed
+
+- Increased SDK retry attempts to 5 for OpenAI, Azure OpenAI, and Anthropic clients (was SDK default of 2)
+- Changed 429 retry strategy for OpenAI Codex and Google Gemini CLI to use a 5-minute time budget when the server provides a retry delay, instead of a fixed attempt cap
+
 ## [12.14.0] - 2026-02-19
 ### Added
 

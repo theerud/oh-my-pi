@@ -19,6 +19,7 @@ import type {
 	ToolCall,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump, withHttpStatus } from "../utils/http-inspector";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import {
 	convertMessages,
@@ -69,12 +70,16 @@ const GEMINI_CLI_HEADERS = {
 };
 
 // Headers for Antigravity (sandbox endpoint) - requires specific User-Agent
-const DEFAULT_ANTIGRAVITY_VERSION = "1.15.8";
+const DEFAULT_ANTIGRAVITY_VERSION = "1.18.3";
+
+export function getAntigravityUserAgent() {
+	const version = process.env.PI_AI_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION;
+	return `antigravity/${version} darwin/arm64`;
+}
 
 function getAntigravityHeaders() {
-	const version = process.env.PI_AI_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION;
 	return {
-		"User-Agent": `antigravity/${version} darwin/arm64`,
+		"User-Agent": getAntigravityUserAgent(),
 		"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
 		"Client-Metadata": JSON.stringify({
 			ideType: "IDE_UNSPECIFIED",
@@ -99,6 +104,7 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const MAX_EMPTY_STREAM_RETRIES = 2;
 const EMPTY_STREAM_BASE_DELAY_MS = 500;
+const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 
 /**
@@ -315,6 +321,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
 			// apiKey is JSON-encoded: { token, projectId }
@@ -355,13 +362,22 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				...(options?.headers ?? {}),
 			};
 			const requestBodyJson = JSON.stringify(requestBody);
+			rawRequestDump = {
+				provider: model.provider,
+				api: output.api,
+				model: model.id,
+				method: "POST",
+				body: requestBody,
+				headers: requestHeaders,
+			};
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 			let requestUrl: string | undefined;
+			let rateLimitTimeSpent = 0;
 
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			for (let attempt = 0; ; attempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -382,13 +398,25 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 					const errorText = await response.text();
 
-					// Check if retryable
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						// Use server-provided delay or exponential backoff
+					// Handle 429 rate limits with time budget
+					if (response.status === 429) {
+						const serverDelay = extractRetryDelay(errorText, response);
+						if (serverDelay && rateLimitTimeSpent + serverDelay <= RATE_LIMIT_BUDGET_MS) {
+							rateLimitTimeSpent += serverDelay;
+							await abortableSleep(serverDelay, options?.signal);
+							continue;
+						}
+						// Fallback: use exponential backoff if no server delay, up to MAX_RETRIES
+						if (!serverDelay && attempt < MAX_RETRIES) {
+							await abortableSleep(BASE_DELAY_MS * 2 ** attempt, options?.signal);
+							continue;
+						}
+					} else if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
+						// Non-429 retryable errors use standard attempt cap
 						const serverDelay = extractRetryDelay(errorText, response);
 						const delayMs = serverDelay ?? BASE_DELAY_MS * 2 ** attempt;
 
-						// Check if server delay exceeds max allowed (default: 60s)
+						// Check if server delay exceeds max allowed (default: 60s) for non-429 errors
 						const maxDelayMs = options?.maxRetryDelayMs ?? 60000;
 						if (maxDelayMs > 0 && serverDelay && serverDelay > maxDelayMs) {
 							const delaySeconds = Math.ceil(serverDelay / 1000);
@@ -401,8 +429,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						continue;
 					}
 
-					// Not retryable or max retries exceeded
-					throw new Error(`Cloud Code Assist API error (${response.status}): ${extractErrorMessage(errorText)}`);
+					// Not retryable or budget exceeded
+					throw withHttpStatus(
+						new Error(`Cloud Code Assist API error (${response.status}): ${extractErrorMessage(errorText)}`),
+						response.status,
+					);
 				} catch (error) {
 					// Check for abort - fetch throws AbortError, our code throws "Request was aborted"
 					if (error instanceof Error) {
@@ -679,7 +710,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 					if (!currentResponse.ok) {
 						const retryErrorText = await currentResponse.text();
-						throw new Error(`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`);
+						throw withHttpStatus(
+							new Error(`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`),
+							currentResponse.status,
+						);
 					}
 				}
 
@@ -717,7 +751,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				}
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			output.errorMessage = await appendRawHttpRequestDumpFor400(
+				error instanceof Error ? error.message : JSON.stringify(error),
+				error,
+				rawRequestDump,
+			);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

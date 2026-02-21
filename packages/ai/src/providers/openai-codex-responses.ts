@@ -28,6 +28,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
@@ -312,6 +313,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		};
 		let websocketState: CodexWebSocketSessionState | undefined;
 		let usingWebsocket = false;
+		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -368,6 +370,14 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			const reasoningEffort = transformedBody.reasoning?.effort ?? null;
 			const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
+			rawRequestDump = {
+				provider: model.provider,
+				api: output.api,
+				model: model.id,
+				method: "POST",
+				url,
+				body: transformedBody,
+			};
 			const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 			const sessionKey = getCodexWebSocketSessionKey(options?.sessionId, model, accountId, baseUrl);
 			const publicSessionKey = getCodexPublicSessionKey(options?.sessionId, model, baseUrl);
@@ -795,7 +805,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				resetCodexSessionMetadata(websocketState);
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatErrorMessageWithRetryAfter(error);
+			output.errorMessage = await appendRawHttpRequestDumpFor400(
+				formatErrorMessageWithRetryAfter(error),
+				error,
+				rawRequestDump,
+			);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -1302,7 +1316,8 @@ async function openCodexSseEventStream(
 	if (!response.ok) {
 		const info = await parseCodexError(response);
 		const error = new Error(info.friendlyMessage || info.message);
-		(error as { headers?: Headers }).headers = response.headers;
+		(error as { headers?: Headers; status?: number }).headers = response.headers;
+		(error as { headers?: Headers; status?: number }).status = response.status;
 		throw error;
 	}
 	if (!response.body) {
@@ -1377,16 +1392,20 @@ function logCodexDebug(message: string, details?: Record<string, unknown>): void
 	console.error(`[codex] ${message}`);
 }
 
-function getRetryDelayMs(response: Response | null, attempt: number, errorBody?: string): number {
+function getRetryDelayMs(
+	response: Response | null,
+	attempt: number,
+	errorBody?: string,
+): { delay: number; serverProvided: boolean } {
 	const retryAfter = response?.headers?.get("retry-after") || null;
 	if (retryAfter) {
 		const seconds = Number(retryAfter);
 		if (Number.isFinite(seconds)) {
-			return Math.max(0, seconds * 1000);
+			return { delay: Math.max(0, seconds * 1000), serverProvided: true };
 		}
 		const parsedDate = Date.parse(retryAfter);
 		if (!Number.isNaN(parsedDate)) {
-			return Math.max(0, parsedDate - Date.now());
+			return { delay: Math.max(0, parsedDate - Date.now()), serverProvided: true };
 		}
 	}
 	// Parse retry delay from error body (e.g., "Please try again in 225ms" or "Please try again in 1.5s")
@@ -1394,28 +1413,41 @@ function getRetryDelayMs(response: Response | null, attempt: number, errorBody?:
 		const msMatch = /try again in\s+(\d+(?:\.\d+)?)\s*ms/i.exec(errorBody);
 		if (msMatch) {
 			const ms = Number(msMatch[1]);
-			if (Number.isFinite(ms)) return Math.max(ms, 100);
+			if (Number.isFinite(ms)) return { delay: Math.max(ms, 100), serverProvided: true };
 		}
 		const sMatch = /try again in\s+(\d+(?:\.\d+)?)\s*s(?:ec)?/i.exec(errorBody);
 		if (sMatch) {
 			const s = Number(sMatch[1]);
-			if (Number.isFinite(s)) return Math.max(s * 1000, 100);
+			if (Number.isFinite(s)) return { delay: Math.max(s * 1000, 100), serverProvided: true };
 		}
 	}
-	return CODEX_RETRY_DELAY_MS * (attempt + 1);
+	return { delay: CODEX_RETRY_DELAY_MS * (attempt + 1), serverProvided: false };
 }
+/** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
+const CODEX_RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
+
 async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
 	let attempt = 0;
+	let rateLimitTimeSpent = 0;
 	while (true) {
 		try {
 			const response = await fetch(url, { ...init, signal: signal ?? init.signal });
-			if (!CODEX_RETRYABLE_STATUS.has(response.status) || attempt >= CODEX_MAX_RETRIES) {
+			if (!CODEX_RETRYABLE_STATUS.has(response.status)) {
 				return response;
 			}
 			if (signal?.aborted) return response;
 			// Read error body for retry delay parsing
 			const errorBody = await response.text();
-			const delay = getRetryDelayMs(response, attempt, errorBody);
+			const { delay, serverProvided } = getRetryDelayMs(response, attempt, errorBody);
+			// For 429s with a server-provided delay, use a time budget instead of attempt count
+			if (response.status === 429 && serverProvided) {
+				if (rateLimitTimeSpent + delay > CODEX_RATE_LIMIT_BUDGET_MS) {
+					return response;
+				}
+				rateLimitTimeSpent += delay;
+			} else if (attempt >= CODEX_MAX_RETRIES) {
+				return response;
+			}
 			await abortableSleep(delay, signal);
 		} catch (error) {
 			if (attempt >= CODEX_MAX_RETRIES || signal?.aborted) {
@@ -1486,7 +1518,23 @@ function getAccountId(accessToken: string): string {
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
 	const messages: ResponseInput = [];
 
-	const transformedMessages = transformMessages(context.messages, model);
+	const normalizeToolCallId = (id: string): string => {
+		if (!id.includes("|")) return id;
+		const [callId, itemId] = id.split("|");
+		const sanitizedCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		let sanitizedItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		// OpenAI Responses API requires item id to start with "fc"
+		if (!sanitizedItemId.startsWith("fc")) {
+			sanitizedItemId = `fc_${sanitizedItemId}`;
+		}
+		// Truncate to 64 chars and strip trailing underscores (OpenAI Codex rejects them)
+		let normalizedCallId = sanitizedCallId.length > 64 ? sanitizedCallId.slice(0, 64) : sanitizedCallId;
+		let normalizedItemId = sanitizedItemId.length > 64 ? sanitizedItemId.slice(0, 64) : sanitizedItemId;
+		normalizedCallId = normalizedCallId.replace(/_+$/, "");
+		normalizedItemId = normalizedItemId.replace(/_+$/, "");
+		return `${normalizedCallId}|${normalizedItemId}`;
+	};
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {

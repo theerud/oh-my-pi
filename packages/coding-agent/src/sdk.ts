@@ -551,7 +551,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Use provided or create AuthStorage and ModelRegistry
 	const authStorage = options.authStorage ?? (await discoverAuthStorage(agentDir));
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage);
-	await modelRegistry.refresh();
+	if (!options.modelRegistry) {
+		await modelRegistry.refresh();
+	}
 	time("discoverModels");
 
 	const settings = options.settings ?? (await Settings.init({ cwd, agentDir }));
@@ -804,6 +806,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 			// Always filter Exa - we have native integration
 			filterExa: true,
+			// Filter browser MCP servers when builtin browser tool is active
+			filterBrowser: (settings.get("browser.enabled") as boolean) ?? false,
 			cacheStorage: settings.getStorage(),
 			authStorage,
 		});

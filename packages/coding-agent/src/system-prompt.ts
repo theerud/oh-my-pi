@@ -1,8 +1,11 @@
 /**
  * System prompt construction and project context loading
  */
+
+import * as fs from "node:fs";
 import * as os from "node:os";
-import { $env, hasFsCode, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { $env, hasFsCode, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getGpuCachePath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
@@ -49,47 +52,39 @@ async function loadPreloadedSkillContents(preloadedSkills: Skill[]): Promise<Pre
  * Returns structured git data or null if not in a git repo.
  */
 export async function loadGitContext(cwd: string): Promise<GitContext | null> {
-	const runGit = async (args: string[], timeoutMs = 1500): Promise<string | null> => {
+	const timeout = 3000;
+	const abortSignal = AbortSignal.timeout(timeout);
+
+	const git = async (...args: string[]): Promise<string | null> => {
 		const proc = Bun.spawn(["git", ...args], {
 			cwd,
 			stdout: "pipe",
 			stderr: "ignore",
+			timeout: timeout,
+			killSignal: "SIGKILL",
 		});
-		const stdoutPromise = proc.stdout ? new Response(proc.stdout).text() : Promise.resolve("");
-		const race = await Promise.race([
-			proc.exited.then(() => "exited" as const),
-			Bun.sleep(timeoutMs).then(() => "timeout" as const),
-		]);
-
-		if (race === "timeout") {
-			proc.kill();
-			await stdoutPromise.catch(() => null);
-			logger.debug("Git context command timed out", { cwd, args, timeoutMs });
-			return null;
-		}
-
-		const exitCode = await proc.exited;
-		const stdout = await stdoutPromise.catch(() => "");
-		if (exitCode !== 0) return null;
-
-		const trimmed = stdout.trim();
-		return trimmed.length > 0 ? trimmed : "";
+		return untilAborted(abortSignal, async () => {
+			const exitCode = await proc.exited;
+			const stdout = await proc.stdout.text();
+			return exitCode === 0 ? stdout.trim() : null;
+		});
 	};
+
 	// Check if inside a git repo
-	const isGitRepo = await runGit(["rev-parse", "--is-inside-work-tree"]);
+	const isGitRepo = await git("rev-parse", "--is-inside-work-tree");
 	if (isGitRepo !== "true") return null;
-	const currentBranch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"]);
+	const currentBranch = await git("rev-parse", "--abbrev-ref", "HEAD");
 	if (!currentBranch) return null;
 	let mainBranch = "main";
-	const mainExists = await runGit(["rev-parse", "--verify", "main"]);
+	const mainExists = await git("rev-parse", "--verify", "main");
 	if (mainExists === null) {
-		const masterExists = await runGit(["rev-parse", "--verify", "master"]);
+		const masterExists = await git("rev-parse", "--verify", "master");
 		if (masterExists !== null) mainBranch = "master";
 	}
 
 	const [status, commits] = await Promise.all([
-		runGit(["status", "--porcelain", "--untracked-files=no"], 2000),
-		runGit(["log", "--oneline", "-5"]),
+		git("status", "--porcelain", "--untracked-files=no"),
+		git("log", "--oneline", "-5"),
 	]);
 	return {
 		isRepo: true,
@@ -117,8 +112,11 @@ function parseWmicTable(output: string, header: string): string | null {
 	return filtered[0] ?? null;
 }
 
-const AGENTS_MD_PATTERN = "**/AGENTS.md";
+const AGENTS_MD_MIN_DEPTH = 1;
+const AGENTS_MD_MAX_DEPTH = 4;
 const AGENTS_MD_LIMIT = 200;
+const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
+const AGENTS_MD_EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 
 interface AgentsMdSearch {
 	scopePath: string;
@@ -131,27 +129,75 @@ function normalizePath(value: string): string {
 	return value.replace(/\\/g, "/");
 }
 
-function listAgentsMdFiles(root: string, limit: number): string[] {
+function shouldSkipAgentsDir(name: string): boolean {
+	if (AGENTS_MD_EXCLUDED_DIRS.has(name)) return true;
+	return name.startsWith(".");
+}
+
+async function collectAgentsMdFiles(
+	root: string,
+	dir: string,
+	depth: number,
+	limit: number,
+	discovered: Set<string>,
+): Promise<void> {
+	if (depth > AGENTS_MD_MAX_DEPTH || discovered.size >= limit) {
+		return;
+	}
+
+	let entries: fs.Dirent[];
 	try {
-		const entries = Array.from(
-			new Bun.Glob(AGENTS_MD_PATTERN).scanSync({ cwd: root, onlyFiles: true, dot: false, absolute: false }),
-		);
-		const normalized = entries
-			.map(entry => normalizePath(entry))
-			.filter(entry => entry.length > 0 && !entry.includes("node_modules"))
-			.sort();
-		return normalized.length > limit ? normalized.slice(0, limit) : normalized;
+		entries = await fs.promises.readdir(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+
+	if (depth >= AGENTS_MD_MIN_DEPTH) {
+		const hasAgentsMd = entries.some(entry => entry.isFile() && entry.name === "AGENTS.md");
+		if (hasAgentsMd) {
+			const relPath = normalizePath(path.relative(root, path.join(dir, "AGENTS.md")));
+			if (relPath.length > 0) {
+				discovered.add(relPath);
+			}
+			if (discovered.size >= limit) {
+				return;
+			}
+		}
+	}
+
+	if (depth === AGENTS_MD_MAX_DEPTH) {
+		return;
+	}
+
+	const childDirs = entries
+		.filter(entry => entry.isDirectory() && !shouldSkipAgentsDir(entry.name))
+		.map(entry => entry.name)
+		.sort();
+
+	await Promise.all(
+		childDirs.map(async child => {
+			if (discovered.size >= limit) return;
+			await collectAgentsMdFiles(root, path.join(dir, child), depth + 1, limit, discovered);
+		}),
+	);
+}
+
+async function listAgentsMdFiles(root: string, limit: number): Promise<string[]> {
+	try {
+		const discovered = new Set<string>();
+		await collectAgentsMdFiles(root, root, 0, limit, discovered);
+		return Array.from(discovered).sort().slice(0, limit);
 	} catch {
 		return [];
 	}
 }
 
-function buildAgentsMdSearch(cwd: string): AgentsMdSearch {
-	const files = listAgentsMdFiles(cwd, AGENTS_MD_LIMIT);
+async function buildAgentsMdSearch(cwd: string): Promise<AgentsMdSearch> {
+	const files = await listAgentsMdFiles(cwd, AGENTS_MD_LIMIT);
 	return {
 		scopePath: ".",
 		limit: AGENTS_MD_LIMIT,
-		pattern: AGENTS_MD_PATTERN,
+		pattern: `AGENTS.md depth ${AGENTS_MD_MIN_DEPTH}-${AGENTS_MD_MAX_DEPTH}`,
 		files,
 	};
 }
@@ -463,12 +509,114 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rules,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
-	const resolvedCustomPrompt = await resolvePromptInput(customPrompt, "system prompt");
-	const resolvedAppendPrompt = await resolvePromptInput(appendSystemPrompt, "append system prompt");
+	const preloadedSkills = providedPreloadedSkills;
 
-	// Load SYSTEM.md customization (prepended to prompt)
-	const systemPromptCustomization = await loadSystemPromptFiles({ cwd: resolvedCwd });
-	debugStartup("system-prompt:loadSystemPromptFiles:done");
+	const prepPromise = (async () => {
+		const systemPromptCustomizationPromise = (async () => {
+			const customization = await loadSystemPromptFiles({ cwd: resolvedCwd });
+			debugStartup("system-prompt:loadSystemPromptFiles:done");
+			return customization;
+		})();
+		const contextFilesPromise = providedContextFiles
+			? Promise.resolve(providedContextFiles)
+			: loadProjectContextFiles({ cwd: resolvedCwd });
+		const agentsMdSearchPromise = buildAgentsMdSearch(resolvedCwd);
+		const skillsPromise: Promise<Skill[]> =
+			providedSkills !== undefined
+				? Promise.resolve(providedSkills)
+				: skillsSettings?.enabled !== false
+					? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
+					: Promise.resolve([]);
+		const preloadedSkillContentsPromise = (async () => {
+			debugStartup("system-prompt:loadPreloadedSkills:start");
+			const loaded = preloadedSkills ? await loadPreloadedSkillContents(preloadedSkills) : [];
+			debugStartup("system-prompt:loadPreloadedSkills:done");
+			return loaded;
+		})();
+		const gitPromise = (async () => {
+			debugStartup("system-prompt:loadGitContext:start");
+			const loaded = await loadGitContext(resolvedCwd);
+			debugStartup("system-prompt:loadGitContext:done");
+			return loaded;
+		})();
+
+		const [
+			resolvedCustomPrompt,
+			resolvedAppendPrompt,
+			systemPromptCustomization,
+			contextFiles,
+			agentsMdSearch,
+			skills,
+			preloadedSkillContents,
+			git,
+		] = await Promise.all([
+			resolvePromptInput(customPrompt, "system prompt"),
+			resolvePromptInput(appendSystemPrompt, "append system prompt"),
+			systemPromptCustomizationPromise,
+			contextFilesPromise,
+			agentsMdSearchPromise,
+			skillsPromise,
+			preloadedSkillContentsPromise,
+			gitPromise,
+		]);
+
+		return {
+			resolvedCustomPrompt,
+			resolvedAppendPrompt,
+			systemPromptCustomization,
+			contextFiles,
+			agentsMdSearch,
+			skills,
+			preloadedSkillContents,
+			git,
+		};
+	})();
+
+	const prepResult = await Promise.race([
+		prepPromise
+			.then(value => ({ type: "ready" as const, value }))
+			.catch(error => ({ type: "error" as const, error })),
+		Bun.sleep(SYSTEM_PROMPT_PREP_TIMEOUT_MS).then(() => ({ type: "timeout" as const })),
+	]);
+
+	let resolvedCustomPrompt: string | undefined;
+	let resolvedAppendPrompt: string | undefined;
+	let systemPromptCustomization: string | null = null;
+	let contextFiles: Array<{ path: string; content: string; depth?: number }> = providedContextFiles ?? [];
+	let agentsMdSearch: AgentsMdSearch = {
+		scopePath: ".",
+		limit: AGENTS_MD_LIMIT,
+		pattern: `AGENTS.md depth ${AGENTS_MD_MIN_DEPTH}-${AGENTS_MD_MAX_DEPTH}`,
+		files: [],
+	};
+	let skills: Skill[] = providedSkills ?? [];
+	let preloadedSkillContents: PreloadedSkill[] = [];
+	let git: GitContext | null = null;
+
+	if (prepResult.type === "timeout") {
+		logger.warn("System prompt preparation timed out; using minimal startup context", {
+			cwd: resolvedCwd,
+			timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS,
+		});
+		process.stderr.write(
+			`Warning: system prompt preparation timed out after ${SYSTEM_PROMPT_PREP_TIMEOUT_MS}ms; using minimal startup context.\n`,
+		);
+	} else if (prepResult.type === "error") {
+		logger.warn("System prompt preparation failed; using minimal startup context", {
+			cwd: resolvedCwd,
+			error: String(prepResult.error),
+		});
+		process.stderr.write("Warning: system prompt preparation failed; using minimal startup context.\n");
+	} else {
+		resolvedCustomPrompt = prepResult.value.resolvedCustomPrompt;
+		resolvedAppendPrompt = prepResult.value.resolvedAppendPrompt;
+		systemPromptCustomization = prepResult.value.systemPromptCustomization;
+		contextFiles = prepResult.value.contextFiles;
+		agentsMdSearch = prepResult.value.agentsMdSearch;
+		skills = prepResult.value.skills;
+		preloadedSkillContents = prepResult.value.preloadedSkillContents;
+		git = prepResult.value.git;
+	}
 
 	const now = new Date();
 	const date = now.toLocaleDateString("en-CA", {
@@ -486,10 +634,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		second: "2-digit",
 		timeZoneName: "short",
 	});
-
-	// Resolve context files: use provided or discover
-	const contextFiles = providedContextFiles ?? (await loadProjectContextFiles({ cwd: resolvedCwd }));
-	const agentsMdSearch = buildAgentsMdSearch(resolvedCwd);
 
 	// Build tool descriptions array
 	// Priority: toolNames (explicit list) > tools (Map) > defaults
@@ -512,19 +656,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		name,
 		description: tools?.get(name)?.description ?? "",
 	}));
-	// Resolve skills: use provided or discover
-	const skills =
-		providedSkills ??
-		(skillsSettings?.enabled !== false ? (await loadSkills({ ...skillsSettings, cwd: resolvedCwd })).skills : []);
-	const preloadedSkills = providedPreloadedSkills;
-	debugStartup("system-prompt:loadPreloadedSkills:start");
-	const preloadedSkillContents = preloadedSkills ? await loadPreloadedSkillContents(preloadedSkills) : [];
-	debugStartup("system-prompt:loadPreloadedSkills:done");
-
-	// Get git context
-	debugStartup("system-prompt:loadGitContext:start");
-	const git = await loadGitContext(resolvedCwd);
-	debugStartup("system-prompt:loadGitContext:done");
 
 	// Filter skills to only include those with read tool
 	const hasRead = tools?.has("read");

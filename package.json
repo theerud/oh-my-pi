@@ -31,16 +31,18 @@
 		"version:major": "npm version major -ws --no-git-tag-version && bun scripts/sync-versions.ts && rm -rf node_modules packages/*/node_modules bun.lock && bun install",
 		"version:set": "npm version -ws",
 		"prepublishOnly": "bun run check",
+		"prepare": "bun --cwd=packages/coding-agent run generate-docs-index",
 		"publish": "bun run prepublishOnly && npm publish -ws --access public",
 		"publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
 		"release": "bun scripts/release.ts",
 		"build:dist": "bun scripts/build-dist.ts",
 		"clean": "rm -rf target dist node_modules packages/*/node_modules packages/*/dist",
 		"generate-models": "bun --cwd=packages/ai scripts/generate-models.ts",
-		"generate-docs-index": "bun --cwd=packages/coding-agent run generate-docs-index"
+		"generate-docs-index": "bun --cwd=packages/coding-agent run generate-docs-index",
+		"sync-exports": "bun scripts/sync-exports.ts"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.2",
+		"@biomejs/biome": "^2",
 		"@bufbuild/protoc-gen-es": "^2.11.0",
 		"@types/better-sqlite3": "7.6.13",
 		"@types/bun": "^1.3.9",

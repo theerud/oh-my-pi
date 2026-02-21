@@ -445,7 +445,7 @@ function formatOutputInline(data: unknown, theme: Theme, maxWidth = 80): string 
 /**
  * Render the tool call arguments.
  */
-export function renderCall(args: TaskParams, theme: Theme): Component {
+export function renderCall(args: TaskParams, _options: RenderResultOptions, theme: Theme): Component {
 	const lines: string[] = [];
 	lines.push(renderStatusLine({ icon: "pending", title: "Task", description: args.agent }, theme));
 
@@ -535,8 +535,9 @@ function renderAgentProgress(
 	if (progress.status === "running") {
 		if (progress.currentTool) {
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", progress.currentTool)}`;
-			if (progress.currentToolArgs) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(progress.currentToolArgs, 40))}`;
+			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
+			if (toolDetail) {
+				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
 			}
 			if (progress.currentToolStartMs) {
 				const elapsed = Date.now() - progress.currentToolStartMs;
@@ -549,8 +550,9 @@ function renderAgentProgress(
 			// Show most recent completed tool when idle between tools
 			const recent = progress.recentTools[0];
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", recent.tool)}`;
-			if (recent.args) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(recent.args, 40))}`;
+			const toolDetail = progress.lastIntent ?? recent.args;
+			if (toolDetail) {
+				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
 			}
 			lines.push(toolLine);
 		}

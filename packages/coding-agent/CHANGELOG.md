@@ -2,6 +2,86 @@
 
 ## [Unreleased]
 
+## [12.17.2] - 2026-02-21
+### Changed
+
+- Modified bash command normalization to only apply explicit head/tail parameters from tool input, removing automatic extraction from command pipes
+- Updated shell snapshot creation to use explicit timeout and kill signal configuration for more reliable process termination
+
+### Fixed
+
+- Fixed persistent shell session state not being reset after command abort or hard timeout, preventing stale environment variables from affecting subsequent commands
+- Fixed hard timeout handling to properly interrupt long-running commands that exceed the grace period beyond the configured timeout
+
+## [12.17.1] - 2026-02-21
+### Added
+
+- Added `filterBrowser` option to filter out browser automation MCP servers when builtin browser tool is enabled
+- Added `isBrowserMCPServer()` function to detect browser automation MCP servers by name, URL, or command patterns
+- Added `filterBrowserMCPServers()` function to remove browser MCP servers from loaded configurations
+- Added `BrowserFilterResult` type for browser MCP server filtering results
+
+## [12.17.0] - 2026-02-21
+### Added
+
+- Added timeout protection (5 seconds) for system prompt preparation with graceful fallback to minimal context on timeout
+
+### Changed
+
+- Replaced glob-based AGENTS.md discovery with depth-limited directory traversal (depth 1-4) for improved performance and control
+- Refactored system prompt preparation to parallelize file loading operations with a 5-second timeout to prevent startup hangs
+- Unified `renderCall` signatures to `(args, options, theme)` across all tool renderers and extension types
+
+## [12.16.0] - 2026-02-21
+
+### Added
+
+- Added `peekApiKey` method to AuthStorage for non-blocking API key retrieval during model discovery without triggering OAuth token refresh
+- Exported `finalizeSubprocessOutput` function to handle subprocess output finalization with submit_result validation
+- Exported `SubmitResultItem` interface for type-safe submit_result tool data extraction
+- Added automatic reminders when subagent stops without calling submit_result tool (up to 3 reminders before aborting)
+- Added system warnings when subagent calls submit_result with null/undefined data or exits without calling submit_result after reminders
+
+### Changed
+
+- Changed model refresh behavior to support configurable strategies: uses 'online' mode when listing models and 'online-if-uncached' mode otherwise for improved performance
+- Changed default thinking level from 'off' to 'high' for improved reasoning and planning
+- Changed model discovery to use non-blocking API key peek instead of full key retrieval, improving performance by avoiding unnecessary OAuth token refreshes
+- Simplified submit_result termination logic to immediately abort on successful tool execution instead of waiting for message_end event
+- Updated submit_result tool to only terminate on successful execution (when isError is false), allowing retries on tool errors
+- Refactored subprocess output finalization logic into dedicated `finalizeSubprocessOutput` function for better testability and maintainability
+- Improved handling of missing submit_result calls by automatically aborting with exit code 1 after 3 reminder prompts
+
+### Fixed
+
+- Fixed submit_result retry behavior to properly handle tool execution errors and allow the subagent to retry before aborting
+- Fixed submit_result tool extraction to properly validate status field and only accept 'success' or 'aborted' results
+
+## [12.15.1] - 2026-02-20
+
+### Changed
+
+- Replaced nerd font pie-chart spinner with clock-outline icons for smoother looping
+- Moved status icon to front of code-cell headers in formatHeader
+
+### Fixed
+
+- Fixed ReadToolGroupComponent to show status icon before title instead of trailing
+- Fixed bash-interactive status badge to dim only bracket characters, not the enclosed text
+
+## [12.15.0] - 2026-02-20
+
+### Added
+
+- Added `includeDisabled` parameter to `listAuthCredentials()` to optionally retrieve disabled credentials
+- Added `disableAuthCredential()` method for soft-deleting auth credentials while preserving database records
+
+### Changed
+
+- Updated browser tool prompt to bias towards `observe` over `screenshot` by default
+- Changed auth credential removal to use soft-delete (disable) instead of hard-delete when OAuth refresh fails, keeping credentials in database for audit purposes
+- Changed default value of `tools.intentTracing` setting from false to true
+
 ## [12.14.1] - 2026-02-19
 
 ### Fixed

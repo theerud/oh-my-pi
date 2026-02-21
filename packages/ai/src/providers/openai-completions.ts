@@ -28,6 +28,7 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
@@ -150,12 +151,21 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const client = await createClient(model, context, apiKey, options?.headers);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
+			rawRequestDump = {
+				provider: model.provider,
+				api: output.api,
+				model: model.id,
+				method: "POST",
+				url: `${model.baseUrl ?? "https://api.openai.com/v1"}/chat/completions`,
+				body: params,
+			};
 			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
 
@@ -434,7 +444,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 		} catch (error) {
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatErrorMessageWithRetryAfter(error);
+			output.errorMessage = await appendRawHttpRequestDumpFor400(
+				formatErrorMessageWithRetryAfter(error),
+				error,
+				rawRequestDump,
+			);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -480,6 +494,7 @@ async function createClient(
 		apiKey,
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
+		maxRetries: 5,
 		defaultHeaders: headers,
 	});
 }
@@ -603,7 +618,23 @@ export function convertMessages(
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
-	const transformedMessages = transformMessages(context.messages, model);
+	const normalizeToolCallId = (id: string): string => {
+		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
+
+		// Handle pipe-separated IDs from OpenAI Responses API
+		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
+		// These come from providers like github-copilot, openai-codex, opencode
+		// Extract just the call_id part and normalize it
+		if (id.includes("|")) {
+			const [callId] = id.split("|");
+			// Sanitize to allowed chars and truncate to 40 chars (OpenAI limit)
+			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+		}
+
+		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
+		return id;
+	};
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;

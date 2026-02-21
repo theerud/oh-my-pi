@@ -30,6 +30,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
@@ -103,6 +104,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
 			// Create Azure OpenAI client
@@ -110,6 +112,14 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const client = createClient(model, apiKey, options);
 			const params = buildParams(model, context, options, deploymentName);
 			options?.onPayload?.(params);
+			rawRequestDump = {
+				provider: model.provider,
+				api: output.api,
+				model: model.id,
+				method: "POST",
+				url: `${resolveAzureConfig(model, options).baseUrl}/responses`,
+				body: params,
+			};
 			const openaiStream = await client.responses.create(
 				params,
 				options?.signal ? { signal: options.signal } : undefined,
@@ -351,7 +361,11 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 		} catch (error) {
 			for (const block of output.content) delete (block as { index?: number }).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatErrorMessageWithRetryAfter(error);
+			output.errorMessage = await appendRawHttpRequestDumpFor400(
+				formatErrorMessageWithRetryAfter(error),
+				error,
+				rawRequestDump,
+			);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -424,6 +438,7 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		apiKey,
 		apiVersion,
 		dangerouslyAllowBrowser: true,
+		maxRetries: 5,
 		defaultHeaders: headers,
 		baseURL: baseUrl,
 	});
@@ -507,7 +522,23 @@ function convertMessages(
 	const messages: ResponseInput = [];
 	const knownCallIds = new Set<string>();
 
-	const transformedMessages = transformMessages(context.messages, model);
+	const normalizeToolCallId = (id: string): string => {
+		if (!id.includes("|")) return id;
+		const [callId, itemId] = id.split("|");
+		const sanitizedCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		let sanitizedItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		// OpenAI Responses API requires item id to start with "fc"
+		if (!sanitizedItemId.startsWith("fc")) {
+			sanitizedItemId = `fc_${sanitizedItemId}`;
+		}
+		// Truncate to 64 chars and strip trailing underscores (OpenAI Codex rejects them)
+		let normalizedCallId = sanitizedCallId.length > 64 ? sanitizedCallId.slice(0, 64) : sanitizedCallId;
+		let normalizedItemId = sanitizedItemId.length > 64 ? sanitizedItemId.slice(0, 64) : sanitizedItemId;
+		normalizedCallId = normalizedCallId.replace(/_+$/, "");
+		normalizedItemId = normalizedItemId.replace(/_+$/, "");
+		return `${normalizedCallId}|${normalizedItemId}`;
+	};
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	if (context.systemPrompt) {
 		const role = model.reasoning ? "developer" : "system";
