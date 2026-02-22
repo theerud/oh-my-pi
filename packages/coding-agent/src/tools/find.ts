@@ -11,6 +11,7 @@ import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import findDescription from "../prompts/tools/find.md" with { type: "text" };
+import { type TruncationResult, truncateHead } from "../session/streaming-output";
 import {
 	Ellipsis,
 	Hasher,
@@ -22,12 +23,11 @@ import {
 } from "../tui";
 import type { ToolSession } from ".";
 import { applyListLimit } from "./list-limit";
-import type { OutputMeta } from "./output-meta";
+import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { type TruncationResult, truncateHead } from "./truncate";
 
 const findSchema = Type.Object({
 	pattern: Type.String({ description: "Glob pattern, e.g. '*.ts', 'src/**/*.json', 'lib/*.tsx'" }),
@@ -506,7 +506,7 @@ export const findToolRenderer = {
 		if (limits?.resultLimit) truncationReasons.push(`limit ${limits.resultLimit.reached} results`);
 		if (truncation) truncationReasons.push(truncation.truncatedBy === "lines" ? "line limit" : "size limit");
 		const artifactId = truncation && "artifactId" in truncation ? truncation.artifactId : undefined;
-		if (artifactId) truncationReasons.push(`full output: artifact://${artifactId}`);
+		if (artifactId) truncationReasons.push(formatFullOutputReference(artifactId));
 
 		const extraLines: string[] = [];
 		if (truncationReasons.length > 0) {

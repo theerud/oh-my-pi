@@ -9,18 +9,16 @@ import { loadCapability } from "../discovery";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import sshDescriptionBase from "../prompts/tools/ssh.md" with { type: "text" };
+import { allocateOutputArtifact, DEFAULT_MAX_BYTES, TailBuffer } from "../session/streaming-output";
 import type { SSHHostInfo } from "../ssh/connection-manager";
 import { ensureHostInfo, getHostInfoForHost } from "../ssh/connection-manager";
 import { executeSSH } from "../ssh/ssh-executor";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import type { ToolSession } from ".";
-import type { OutputMeta } from "./output-meta";
-import { allocateOutputArtifact, createTailBuffer } from "./output-utils";
-import { formatBytes, wrapBrackets } from "./render-utils";
+import { formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { DEFAULT_MAX_BYTES } from "./truncate";
 
 const sshSchema = Type.Object({
 	host: Type.String({ description: "Host name from managed SSH config or discovered ssh.json files" }),
@@ -159,8 +157,8 @@ export class SshTool implements AgentTool<typeof sshSchema, SSHToolDetails> {
 		const timeoutSec = Math.max(1, Math.min(3600, rawTimeout));
 		const timeoutMs = timeoutSec * 1000;
 
-		const tailBuffer = createTailBuffer(DEFAULT_MAX_BYTES);
-		const { artifactPath, artifactId } = await allocateOutputArtifact(this.session, "ssh");
+		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+		const { path: artifactPath, id: artifactId } = await allocateOutputArtifact(this.session, "ssh");
 
 		const result = await executeSSH(hostConfig, remoteCommand, {
 			timeout: timeoutMs,
@@ -253,7 +251,6 @@ export const sshToolRenderer = {
 			uiTheme,
 		);
 		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
-		const truncation = details?.meta?.truncation;
 		const outputBlock = new CachedOutputBlock();
 
 		return {
@@ -292,19 +289,9 @@ export const sshToolRenderer = {
 					}
 				}
 
-				if (truncation) {
-					const warnings: string[] = [];
-					if (truncation.artifactId) {
-						warnings.push(`Full output: artifact://${truncation.artifactId}`);
-					}
-					if (truncation.truncatedBy === "lines") {
-						warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
-					} else {
-						warnings.push(
-							`Truncated: ${truncation.outputLines} lines shown (${formatBytes(truncation.outputBytes)} limit)`,
-						);
-					}
-					outputLines.push(uiTheme.fg("warning", wrapBrackets(warnings.join(". "), uiTheme)));
+				if (details?.meta?.truncation) {
+					const warning = formatStyledTruncationWarning(details.meta, uiTheme);
+					if (warning) outputLines.push(warning);
 				}
 
 				return outputBlock.render(

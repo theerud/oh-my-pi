@@ -13,7 +13,6 @@ import type { ArtifactManager } from "../session/artifacts";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { EventBus } from "../utils/event-bus";
-import { time } from "../utils/timings";
 import { SearchTool } from "../web/search";
 import { AskTool } from "./ask";
 import { BashTool } from "./bash";
@@ -49,23 +48,9 @@ export {
 	warmupLspServers,
 } from "../lsp";
 export { EditTool, type EditToolDetails } from "../patch";
+export * from "../session/streaming-output";
 export { BUNDLED_AGENTS, TaskTool } from "../task";
-export {
-	companySearchTools,
-	exaSearchTools,
-	getSearchTools,
-	type SearchProvider,
-	type SearchResponse,
-	SearchTool,
-	type SearchToolsOptions,
-	setPreferredSearchProvider,
-	webSearchCodeContextTool,
-	webSearchCompanyTool,
-	webSearchCrawlTool,
-	webSearchCustomTool,
-	webSearchDeepTool,
-	webSearchLinkedinTool,
-} from "../web/search";
+export * from "../web/search";
 export { AskTool, type AskToolDetails } from "./ask";
 export { BashTool, type BashToolDetails, type BashToolInput, type BashToolOptions } from "./bash";
 export { BrowserTool, type BrowserToolDetails } from "./browser";
@@ -82,16 +67,6 @@ export { reportFindingTool, type SubmitReviewDetails } from "./review";
 export { loadSshTool, type SSHToolDetails, SshTool } from "./ssh";
 export { SubmitResultTool } from "./submit-result";
 export { type TodoItem, TodoWriteTool, type TodoWriteToolDetails } from "./todo-write";
-export {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type TruncationOptions,
-	type TruncationResult,
-	truncateHead,
-	truncateLine,
-	truncateTail,
-} from "./truncate";
 export { WriteTool, type WriteToolDetails, type WriteToolInput } from "./write";
 
 /** Tool type (AgentTool from pi-ai) */
@@ -133,8 +108,8 @@ export interface ToolSession {
 	getSessionFile: () => string | null;
 	/** Get session ID */
 	getSessionId?: () => string | null;
-	/** Cached artifact manager (allocated per ToolSession) */
-	artifactManager?: ArtifactManager;
+	/** Get artifact manager (allocated per ToolSession) */
+	getArtifactManager?: () => ArtifactManager | null;
 	/** Get artifacts directory for artifact:// URLs and $ARTIFACTS env var */
 	getArtifactsDir?: () => string | null;
 	/** Get session spawns */
@@ -225,7 +200,6 @@ function getPythonModeFromEnv(): PythonToolMode | null {
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
-	time("createTools:start");
 	const includeSubmitResult = session.requireSubmitResultTool === true;
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = toolNames && toolNames.length > 0 ? [...new Set(toolNames)] : undefined;
@@ -242,8 +216,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const isTestEnv = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
 	const skipPythonWarm = isTestEnv || $env.PI_PYTHON_SKIP_CHECK === "1";
 	if (shouldCheckPython) {
-		const availability = await checkPythonKernelAvailability(session.cwd);
-		time("createTools:pythonCheck");
+		const availability = await logger.timeAsync(
+			"createTools:pythonCheck",
+			checkPythonKernelAvailability,
+			session.cwd,
+		);
 		pythonAvailable = availability.ok;
 		if (!availability.ok) {
 			logger.warn("Python kernel unavailable, falling back to bash", {
@@ -253,8 +230,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const warmSessionId = sessionFile ? `session:${sessionFile}:cwd:${session.cwd}` : `cwd:${session.cwd}`;
 			try {
-				await warmPythonEnvironment(session.cwd, warmSessionId, session.settings.get("python.sharedGateway"));
-				time("createTools:warmPython");
+				await logger.timeAsync(
+					"createTools:warmPython",
+					warmPythonEnvironment,
+					session.cwd,
+					warmSessionId,
+					session.settings.get("python.sharedGateway"),
+				);
 			} catch (err) {
 				logger.warn("Failed to warm Python environment", {
 					error: err instanceof Error ? err.message : String(err),
@@ -310,30 +292,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...(includeSubmitResult ? ([["submit_result", HIDDEN_TOOLS.submit_result]] as const) : []),
 					...([["exit_plan_mode", HIDDEN_TOOLS.exit_plan_mode]] as const),
 				];
-	time("createTools:beforeFactories");
-	const slowTools: Array<{ name: string; ms: number }> = [];
+
 	const results = await Promise.all(
 		entries.map(async ([name, factory]) => {
-			const start = Bun.nanoseconds();
-			const tool = await factory(session);
-			const elapsed = (Bun.nanoseconds() - start) / 1e6;
-			if (elapsed > 5) {
-				slowTools.push({ name, ms: Math.round(elapsed) });
+			if (filteredRequestedTools && !filteredRequestedTools.includes(name)) {
+				return null;
 			}
-			return { name, tool };
+			const tool = await logger.timeAsync(`createTools:${name}`, factory, session);
+			return tool ? wrapToolWithMetaNotice(tool) : null;
 		}),
 	);
-	time("createTools:afterFactories");
-	if (slowTools.length > 0 && $env.PI_TIMING === "1") {
-		logger.debug("Tool factory timings", { slowTools });
-	}
-	const tools = results.filter(r => r.tool !== null).map(r => r.tool as Tool);
-	const wrappedTools = tools.map(wrapToolWithMetaNotice);
-
-	if (filteredRequestedTools !== undefined) {
-		const allowed = new Set(filteredRequestedTools);
-		return wrappedTools.filter(tool => allowed.has(tool.name));
-	}
-
-	return wrappedTools;
+	return results.filter((r): r is Tool => r !== null);
 }

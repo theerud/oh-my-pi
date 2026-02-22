@@ -2,6 +2,90 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for GitLab Duo authentication provider
+- Exported truncation utilities and streaming output types from `session/streaming-output` module for public use
+- Added `TailBuffer` class for efficient ring-style buffering with lazy joining and windowed truncation
+- Added `truncateTailBytes` and `truncateHeadBytes` functions for UTF-8-aware byte-level truncation
+- Added `formatTailTruncationNotice` and `formatHeadTruncationNotice` functions for consistent truncation notice formatting
+- Added `allocateOutputArtifact` function to allocate artifact paths for tool output spilling
+- Added `getArtifactManager()` method to `ToolSession` for lazy artifact manager access
+
+### Changed
+
+- Refactored byte truncation to use unified `truncateBytesWindowed` function supporting both head and tail modes, reducing code duplication
+- Optimized `truncateHead` and `truncateTail` to avoid full Buffer allocation by processing content incrementally with character-level scanning
+- Improved `TailBuffer.append()` to handle large incoming chunks more efficiently by detecting when a single chunk dominates the tail budget
+- Enhanced `OutputSink.push()` to avoid creating giant intermediate strings when spilling to files by windowing large chunks before concatenation
+- Refactored newline counting to use a constant `NL` for consistency across the module
+- Re-exported `AuthCredentialStore` and `StoredAuthCredential` after migrating credential primitives to shared modules
+- Extracted output/truncation formatting helpers (`formatFullOutputReference`, `formatStyledArtifactReference`, `formatTruncationMetaNotice`, `formatStyledTruncationWarning`, `formatTitle`, `formatErrorMessage`, `formatMeta`, `shortenPath`, `formatHeadTruncationNotice`) into standalone utility functions
+- Moved `getDomain` from fetch internals into render utilities for shared use
+- Moved `parseCommandArgs` and `substituteArgs` from prompt-templates and slash-commands to new `utils/command-args` module
+- Moved `expandPath` from discovery/helpers to new `tools/path-utils` module
+- Moved JTD type definitions and type guards from jtd-to-json-schema and jtd-to-typescript to shared `tools/jtd-utils` module
+- Refactored truncation warning formatting in bash, python, and ssh tool renderers to use centralized `formatStyledTruncationWarning` function
+- Refactored tool UI rendering to use standalone formatting functions instead of `ToolUIKit` class
+- Moved `normalizeUnicode` function from validation.ts to `patch/normalize` module
+- Updated `AuthStorage.create()` to accept options parameter with `configValueResolver`
+- Simplified truncation notice generation in multiple tool renderers by using shared formatting utilities
+- Moved truncation logic from `tools/truncate.ts` to `session/streaming-output.ts` for better architectural separation
+- Renamed `formatSize()` to `formatBytes()` across codebase for consistency
+- Refactored `OutputSink` to use windowed byte truncation for memory efficiency when spilling to files
+- Changed `ToolSession.artifactManager` from cached property to `getArtifactManager()` method for lazy initialization
+- Updated `allocateOutputArtifact` return type to use `{ path, id }` instead of `{ artifactPath, artifactId }`
+- Optimized newline counting to use native `indexOf` for V8-optimized string scanning
+- Improved UTF-8 boundary detection in byte truncation with dedicated helper functions
+
+### Removed
+
+- Removed `ToolUIKit` class from render-utils (replaced with standalone formatting functions)
+- Removed `normalizeUnicodeSpaces` and `expandPath` from discovery/helpers (moved to path-utils)
+- Removed duplicate JTD type definitions from jtd-to-json-schema and jtd-to-typescript (now in jtd-utils)
+- Removed `AnthropicAuthConfig` and related types from web/search/types (moved to @oh-my-pi/pi-ai)
+- Removed `getDomain` function from fetch.ts (moved to render-utils)
+- Removed inline truncation warning formatting logic from bash, python, ssh, and read tool renderers
+- Deleted `tools/truncate.ts` module (functionality moved to `session/streaming-output.ts`)
+- Deleted `tools/output-utils.ts` module (functionality moved to `session/streaming-output.ts`)
+- Removed `formatSize` export from public API (renamed to `formatBytes`)
+- Removed individual truncation function exports from `tools/index.ts` (now exported via `session/streaming-output`)
+
+### Fixed
+
+- Fixed truncation notice formatting consistency across all tool renderers by centralizing logic
+- Fixed UTF-8 boundary handling in byte truncation to prevent invalid character sequences
+- Fixed memory efficiency in `OutputSink` by using windowed truncation instead of full-buffer encoding
+- Fixed line counting to handle chunk boundaries correctly across multiple `push()` calls
+
+## [12.18.1] - 2026-02-21
+### Added
+
+- Added Buffer.toBase64() polyfill for Bun compatibility to enable base64 encoding of buffers
+
+## [12.18.0] - 2026-02-21
+
+### Added
+
+- Added `overlay` option to custom UI hooks to display components as bottom-centered overlays instead of replacing the editor
+- Added automatic chat transcript rebuild when returning from custom or debug UI to prevent message duplication
+
+### Changed
+
+- Changed custom UI hook cleanup to conditionally restore editor state only when not using overlay mode
+- Extracted environment variable configuration for non-interactive bash execution into reusable `NO_PAGER_ENV` constant
+- Replaced custom timing instrumentation with logger.timeAsync() and logger.time() from pi-utils for consistent startup profiling
+- Removed PI_DEBUG_STARTUP environment variable in favor of logger.debug() for conditional debug output
+- Consolidated timing calls throughout initialization pipeline to use unified logger-based timing system
+
+### Removed
+
+- Deleted utils/timings.ts module - timing functionality now provided by pi-utils logger
+
+### Fixed
+
+- Fixed potential race condition in bash interactive component where output could be appended after the component was closed
+
 ## [12.17.2] - 2026-02-21
 ### Changed
 

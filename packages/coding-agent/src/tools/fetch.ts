@@ -10,6 +10,7 @@ import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import fetchDescription from "../prompts/tools/fetch.md" with { type: "text" };
+import { allocateOutputArtifact, DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { ensureTool } from "../utils/tools-manager";
@@ -19,12 +20,10 @@ import { finalizeOutput, loadPage, MAX_OUTPUT_CHARS } from "../web/scrapers/type
 import { convertWithMarkitdown, fetchBinary } from "../web/scrapers/utils";
 import type { ToolSession } from ".";
 import { applyListLimit } from "./list-limit";
-import type { OutputMeta } from "./output-meta";
-import { allocateOutputArtifact } from "./output-utils";
-import { formatExpandHint } from "./render-utils";
+import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
+import { formatExpandHint, getDomain } from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { DEFAULT_MAX_BYTES, truncateHead } from "./truncate";
 
 // =============================================================================
 // Types and Constants
@@ -900,10 +899,10 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 		};
 
 		if (needsArtifact) {
-			const { artifactPath, artifactId: allocatedId } = await allocateOutputArtifact(this.session, "fetch");
+			const { path: artifactPath, id } = await allocateOutputArtifact(this.session, "fetch");
 			if (artifactPath) {
 				await Bun.write(artifactPath, buildOutput(result.content));
-				artifactId = allocatedId;
+				artifactId = id;
 			}
 		}
 
@@ -947,16 +946,6 @@ function truncate(text: string, maxLen: number, ellipsis: string): string {
 	if (text.length <= maxLen) return text;
 	const sliceLen = Math.max(0, maxLen - ellipsis.length);
 	return `${text.slice(0, sliceLen)}${ellipsis}`;
-}
-
-/** Extract domain from URL */
-function getDomain(url: string): string {
-	try {
-		const u = new URL(url);
-		return u.hostname.replace(/^www\./, "");
-	} catch {
-		return url;
-	}
 }
 
 /** Count non-empty lines */
@@ -1029,9 +1018,7 @@ export function renderFetchResult(
 	metadataLines.push(`${uiTheme.fg("muted", "Chars:")} ${charCount}`);
 	if (truncated) {
 		metadataLines.push(uiTheme.fg("warning", `${uiTheme.status.warning} Output truncated`));
-		if (truncation?.artifactId) {
-			metadataLines.push(uiTheme.fg("warning", `Full output: artifact://${truncation.artifactId}`));
-		}
+		if (truncation?.artifactId) metadataLines.push(formatStyledArtifactReference(truncation.artifactId, uiTheme));
 	}
 	if (hasNotes) {
 		metadataLines.push(`${uiTheme.fg("muted", "Notes:")} ${details.notes.join("; ")}`);

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [12.18.0] - 2026-02-21
+### Changed
+
+- Replaced custom `TextDecoder` usage with native `toString('utf-8')` for buffer decoding
+- Replaced custom debug logging with structured `logger.time()` calls for startup performance tracking
+
 ## [12.17.1] - 2026-02-21
 
 ### Added

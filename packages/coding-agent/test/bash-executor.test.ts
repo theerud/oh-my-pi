@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { _resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/truncate";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 
 function makeTempDir(): string {
@@ -153,6 +153,7 @@ describe("executeBash", () => {
 		const aborted = await abortPromise;
 		expect(aborted.cancelled).toBe(true);
 
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
 		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
 			cwd: tempDir,
 			timeout: 5000,

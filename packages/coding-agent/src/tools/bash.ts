@@ -12,6 +12,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import type { Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
+import { allocateOutputArtifact, DEFAULT_MAX_BYTES, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import type { ToolSession } from ".";
@@ -19,13 +20,11 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import { checkBashInterception } from "./bash-interceptor";
 import { applyHeadTail } from "./bash-normalize";
 import { expandInternalUrls } from "./bash-skill-urls";
-import type { OutputMeta } from "./output-meta";
-import { allocateOutputArtifact, createTailBuffer } from "./output-utils";
+import { formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { formatBytes, replaceTabs, wrapBrackets } from "./render-utils";
+import { replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { DEFAULT_MAX_BYTES } from "./truncate";
 
 export const BASH_DEFAULT_PREVIEW_LINES = 10;
 
@@ -114,12 +113,12 @@ export class BashTool implements AgentTool<typeof bashSchema, BashToolDetails> {
 		const timeoutMs = timeoutSec * 1000;
 
 		// Track output for streaming updates (tail only)
-		const tailBuffer = createTailBuffer(DEFAULT_MAX_BYTES);
+		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 
 		// Set up artifacts environment and allocation
 		const artifactsDir = this.session.getArtifactsDir?.();
 		const extraEnv = artifactsDir ? { ARTIFACTS: artifactsDir } : undefined;
-		const { artifactPath, artifactId } = await allocateOutputArtifact(this.session, "bash");
+		const { path: artifactPath, id: artifactId } = await allocateOutputArtifact(this.session, "bash");
 
 		const usePty =
 			this.session.settings.get("bash.virtualTerminal") === "on" &&
@@ -256,7 +255,6 @@ export const bashToolRenderer = {
 		const isError = result.isError === true;
 		const header = renderStatusLine({ icon: isError ? "error" : "success", title: "Bash" }, uiTheme);
 		const details = result.details;
-		const truncation = details?.meta?.truncation;
 		const outputBlock = new CachedOutputBlock();
 
 		return {
@@ -281,21 +279,8 @@ export const bashToolRenderer = {
 							)
 						: undefined;
 				let warningLine: string | undefined;
-				if (truncation && !showingFullOutput) {
-					const warnings: string[] = [];
-					if (truncation?.artifactId) {
-						warnings.push(`Full output: artifact://${truncation.artifactId}`);
-					}
-					if (truncation.truncatedBy === "lines") {
-						warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
-					} else {
-						warnings.push(
-							`Truncated: ${truncation.outputLines} lines shown (${formatBytes(truncation.outputBytes)} limit)`,
-						);
-					}
-					if (warnings.length > 0) {
-						warningLine = uiTheme.fg("warning", wrapBrackets(warnings.join(". "), uiTheme));
-					}
+				if (details?.meta?.truncation && !showingFullOutput) {
+					warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
 				}
 
 				const outputLines: string[] = [];

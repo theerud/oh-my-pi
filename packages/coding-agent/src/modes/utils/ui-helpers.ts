@@ -17,7 +17,7 @@ import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import type { SessionContext } from "../../session/session-manager";
-import { formatSize } from "../../tools/truncate";
+import { formatBytes } from "../../tools/render-utils";
 
 type TextBlock = { type: "text"; text: string };
 
@@ -130,7 +130,7 @@ export class UiHelpers {
 				for (const file of message.files) {
 					let suffix: string;
 					if (file.skippedReason === "tooLarge") {
-						const size = typeof file.byteSize === "number" ? formatSize(file.byteSize) : "unknown size";
+						const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
 						suffix = `(skipped: ${size})`;
 					} else {
 						suffix = file.image
@@ -278,6 +278,13 @@ export class UiHelpers {
 	}
 
 	renderInitialMessages(): void {
+		// This path is used to rebuild the visible chat transcript (e.g. after custom/debug UI).
+		// Clear existing rendered chat first to avoid duplicating the full session in the container.
+		this.ctx.chatContainer.clear();
+		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.pendingBashComponents = [];
+		this.ctx.pendingPythonComponents = [];
+
 		// Get aligned messages and entries from session context
 		const context = this.ctx.sessionManager.buildSessionContext();
 		this.ctx.renderSessionContext(context, {

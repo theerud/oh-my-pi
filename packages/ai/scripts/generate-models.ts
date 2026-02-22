@@ -17,10 +17,11 @@ import {
 	linkSparkPromotionTargets,
 } from "../src/provider-models/model-policies";
 import { JWT_CLAIM_PATH } from "../src/providers/openai-codex/constants";
-import { CliAuthStorage } from "../src/storage";
+import { AuthCredentialStore } from "../src/auth-storage";
 import type { Model } from "../src/types";
 import { fetchAntigravityDiscoveryModels } from "../src/utils/discovery/antigravity";
 import { fetchCodexModels } from "../src/utils/discovery/codex";
+import { getGitLabDuoModels } from "../src/providers/gitlab-duo";
 import { getOAuthApiKey } from "../src/utils/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../src/utils/oauth/types";
 import prevModelsJson from "../src/models.json" with { type: "json" };
@@ -36,7 +37,7 @@ async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscove
 	}
 
 	try {
-		const storage = await CliAuthStorage.create();
+		const storage = await AuthCredentialStore.open();
 		try {
 			const storedApiKey = storage.getApiKey(providerId);
 			if (storedApiKey) {
@@ -147,7 +148,7 @@ const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 
 async function getOAuthCredentialsFromStorage(provider: OAuthProvider): Promise<OAuthCredentials | null> {
 	try {
-		const storage = await CliAuthStorage.create();
+		const storage = await AuthCredentialStore.open();
 		try {
 			const creds = storage.getOAuth(provider);
 			if (!creds) {
@@ -249,9 +250,12 @@ async function generateModels() {
 	const catalogProviderModels = (
 		await Promise.all(PROVIDER_DESCRIPTORS.filter(isCatalogDescriptor).map(descriptor => fetchProviderModelsFromCatalog(descriptor)))
 	).flat();
-
+	const gitLabDuoModels = getGitLabDuoModels();
 	// Combine models (models.dev has priority)
-	let allModels = applyGlobalModelsDevFallback([...modelsDevModels, ...catalogProviderModels], modelsDevModels);
+	let allModels = applyGlobalModelsDevFallback(
+		[...modelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		modelsDevModels,
+	);
 
 	if (!allModels.some((model) => model.provider === "cloudflare-ai-gateway")) {
 		allModels.push(CLOUDFLARE_FALLBACK_MODEL);
