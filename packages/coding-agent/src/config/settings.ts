@@ -13,7 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent, logger, procmgr } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, procmgr, setDefaultTabWidth } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { YAML } from "bun";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -438,6 +438,7 @@ export class Settings {
 
 		// Build merged view
 		this.#rebuildMerged();
+		this.#fireAllHooks();
 		return this;
 	}
 
@@ -610,6 +611,16 @@ export class Settings {
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 	}
 
+	#fireAllHooks(): void {
+		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
+			const hook = SETTING_HOOKS[key];
+			if (hook) {
+				const value = this.get(key);
+				hook(value, value);
+			}
+		}
+	}
+
 	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
 		const result = { ...base };
 		for (const key of Object.keys(overrides)) {
@@ -664,6 +675,11 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			setColorBlindMode(value).catch(err => {
 				logger.warn("Settings: colorBlindMode hook failed", { enabled: value, error: String(err) });
 			});
+		}
+	},
+	"display.tabWidth": value => {
+		if (typeof value === "number") {
+			setDefaultTabWidth(value);
 		}
 	},
 };

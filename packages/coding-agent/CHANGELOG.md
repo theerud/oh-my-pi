@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [13.2.0] - 2026-02-23
+### Breaking Changes
+
+- Made `description` field required in CustomTool interface
+
+## [13.1.2] - 2026-02-23
+### Breaking Changes
+
+- Removed `timeout` parameter from await tool—tool now waits indefinitely until jobs complete or the call is aborted
+- Renamed `job_ids` parameter to `jobs` in await tool schema
+- Removed `timedOut` field from await tool result details
+
 ## [13.1.1] - 2026-02-23
 
 ### Fixed
