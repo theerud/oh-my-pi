@@ -22,6 +22,7 @@ import {
 	truncateDiffByHunk,
 } from "../tools/render-utils";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, truncateToWidth } from "../tui";
+import type { HashlineToolEdit } from "./index";
 import type { DiffError, DiffResult, Operation } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -58,7 +59,7 @@ export interface EditToolDetails {
 	/** Operation type (patch mode only) */
 	op?: Operation;
 	/** New path after move/rename (patch mode only) */
-	rename?: string;
+	move?: string;
 	/** Structured output metadata */
 	meta?: OutputMeta;
 }
@@ -83,14 +84,8 @@ interface EditRenderArgs {
 	 */
 	previewDiff?: string;
 	// Hashline mode fields
-	edits?: HashlineEditPreview[];
+	edits?: Partial<HashlineToolEdit>[];
 }
-
-type HashlineEditPreview =
-	| { target: string; new_content: string[] }
-	| { first: string; last: string; new_content: string[] }
-	| { before?: string; after?: string; inserted_lines: string[] }
-	| { old_text: string; new_text: string; all?: boolean };
 
 /** Extended context for edit tool rendering */
 export interface EditRenderContext {
@@ -122,7 +117,7 @@ function formatStreamingDiff(diff: string, rawPath: string, uiTheme: Theme, labe
 	return text;
 }
 
-function formatStreamingHashlineEdits(edits: unknown[], uiTheme: Theme): string {
+function formatStreamingHashlineEdits(edits: Partial<HashlineToolEdit>[], uiTheme: Theme): string {
 	const MAX_EDITS = 4;
 	const MAX_DST_LINES = 8;
 	let text = "\n\n";
@@ -157,57 +152,25 @@ function formatStreamingHashlineEdits(edits: unknown[], uiTheme: Theme): string 
 	}
 
 	return text.trimEnd();
-	function formatHashlineEdit(edit: unknown): { srcLabel: string; dst: string } {
-		const asRecord = (value: unknown): Record<string, unknown> | undefined => {
-			if (typeof value === "object" && value !== null) return value as Record<string, unknown>;
-			return undefined;
-		};
-		const editRecord = asRecord(edit);
-		if (!editRecord) {
-			return {
-				srcLabel: "• (incomplete edit)",
-				dst: "",
-			};
+	function formatHashlineEdit(edit: Partial<HashlineToolEdit>): { srcLabel: string; dst: string } {
+		if (typeof edit !== "object" || !edit) {
+			return { srcLabel: "• (incomplete edit)", dst: "" };
 		}
-		if ("target" in editRecord) {
-			const target = typeof editRecord.target === "string" ? editRecord.target : "…";
-			const newContent = editRecord.new_content;
-			return {
-				srcLabel: `• line ${target}`,
-				dst: Array.isArray(newContent) ? (newContent as string[]).join("\n") : "",
-			};
+
+		const contentLines = Array.isArray(edit.lines) ? (edit.lines as string[]).join("\n") : "";
+
+		const op = typeof edit.op === "string" ? edit.op : "?";
+		const pos = typeof edit.pos === "string" ? edit.pos : undefined;
+		const end = typeof edit.end === "string" ? edit.end : undefined;
+
+		if (pos && end && pos !== end) {
+			return { srcLabel: `• ${op} ${pos}…${end}`, dst: contentLines };
 		}
-		if ("first" in editRecord || "last" in editRecord) {
-			const first = typeof editRecord.first === "string" ? editRecord.first : "…";
-			const last = typeof editRecord.last === "string" ? editRecord.last : "…";
-			const newContent = editRecord.new_content;
-			return {
-				srcLabel: `• range ${first}..${last}`,
-				dst: Array.isArray(newContent) ? (newContent as string[]).join("\n") : "",
-			};
+		const anchor = pos ?? end;
+		if (anchor) {
+			return { srcLabel: `\u2022 ${op} ${anchor}`, dst: contentLines };
 		}
-		if ("old_text" in editRecord || "new_text" in editRecord) {
-			const all = typeof editRecord.all === "boolean" ? editRecord.all : false;
-			return {
-				srcLabel: `• replace old_text→new_text${all ? " (all)" : ""}`,
-				dst: typeof editRecord.new_text === "string" ? editRecord.new_text : "",
-			};
-		}
-		if ("inserted_lines" in editRecord || "before" in editRecord || "after" in editRecord) {
-			const after = typeof editRecord.after === "string" ? editRecord.after : undefined;
-			const before = typeof editRecord.before === "string" ? editRecord.before : undefined;
-			const insertedLines = editRecord.inserted_lines;
-			const text = Array.isArray(insertedLines) ? (insertedLines as string[]).join("\n") : "";
-			const refs = [after, before].filter(Boolean).join("..") || "…";
-			return {
-				srcLabel: `• insert ${refs}`,
-				dst: text,
-			};
-		}
-		return {
-			srcLabel: "• (incomplete edit)",
-			dst: "",
-		};
+		return { srcLabel: `\u2022 ${op} (file-level)`, dst: contentLines };
 	}
 }
 function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
@@ -317,7 +280,7 @@ export const editToolRenderer = {
 		const editIcon = uiTheme.fg("muted", uiTheme.getLangIcon(editLanguage));
 
 		const op = args?.op || result.details?.op;
-		const rename = args?.rename || result.details?.rename;
+		const rename = args?.rename || result.details?.move;
 		const opTitle = op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit";
 
 		// Pre-compute metadata line (static across renders)

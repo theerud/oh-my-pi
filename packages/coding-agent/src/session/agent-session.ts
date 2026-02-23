@@ -40,6 +40,7 @@ import type {
 import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { abortableSleep, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
+import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "../config/model-registry";
 import { expandRoleAlias, parseModelString } from "../config/model-resolver";
@@ -74,7 +75,7 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
-import { resolvePlanUrlToPath } from "../internal-urls";
+import { resolveLocalUrlToPath } from "../internal-urls";
 import { executePython as executePythonCommand, type PythonResult } from "../ipy/executor";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../patch";
@@ -87,7 +88,7 @@ import { closeAllConnections } from "../ssh/connection-manager";
 import { unmountAll } from "../ssh/sshfs-mount";
 import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
-import type { TodoItem } from "../tools/todo-write";
+import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
@@ -134,6 +135,12 @@ export type AgentSessionEvent =
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
+
+export interface AsyncJobSnapshot {
+	running: AsyncJobSnapshotItem[];
+	recent: AsyncJobSnapshotItem[];
+}
 
 // ============================================================================
 // Types
@@ -143,6 +150,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Async background jobs launched by tools */
+	asyncJobManager?: AsyncJobManager;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model; thinkingLevel: ThinkingLevel }>;
 	/** Prompt templates for expansion */
@@ -182,7 +191,7 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
-	/** Mark the user message as synthetic (system-injected). */
+	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
 	synthetic?: boolean;
 }
 
@@ -282,6 +291,8 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
 
+	#asyncJobManager: AsyncJobManager | undefined = undefined;
+
 	#scopedModels: Array<{ model: Model; thinkingLevel: ThinkingLevel }>;
 	#promptTemplates: PromptTemplate[];
 	#slashCommands: FileSlashCommand[];
@@ -298,6 +309,7 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#planModeState: PlanModeState | undefined;
 	#planReferenceSent = false;
+	#planReferencePath = "local://PLAN.md";
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
@@ -318,6 +330,7 @@ export class AgentSession {
 
 	// Todo completion reminder state
 	#todoReminderCount = 0;
+	#todoPhases: TodoPhase[] = [];
 
 	// Bash execution state
 	#bashAbortController: AbortController | undefined = undefined;
@@ -366,6 +379,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#asyncJobManager = config.asyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
@@ -382,6 +396,7 @@ export class AgentSession {
 		this.#forceCopilotAgentInitiator = config.forceCopilotAgentInitiator ?? false;
 		this.#obfuscator = config.obfuscator;
 		this.agent.providerSessionState = this.#providerSessionState;
+		this.#syncTodoPhasesFromBranch();
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
@@ -406,6 +421,25 @@ export class AgentSession {
 	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */
 	get isTtsrAbortPending(): boolean {
 		return this.#ttsrAbortPending;
+	}
+
+	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
+		if (!this.#asyncJobManager) return null;
+		const running = this.#asyncJobManager.getRunningJobs().map(job => ({
+			id: job.id,
+			type: job.type,
+			status: job.status,
+			label: job.label,
+			startTime: job.startTime,
+		}));
+		const recent = this.#asyncJobManager.getRecentJobs(options?.recentLimit ?? 5).map(job => ({
+			id: job.id,
+			type: job.type,
+			status: job.status,
+			label: job.label,
+			startTime: job.startTime,
+		}));
+		return { running, recent };
 	}
 
 	// =========================================================================
@@ -570,6 +604,7 @@ export class AgentSession {
 				}
 			} else if (
 				event.message.role === "user" ||
+				event.message.role === "developer" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult" ||
 				event.message.role === "fileMention"
@@ -606,7 +641,7 @@ export class AgentSession {
 				const { toolName, $normative, toolCallId, details, isError, content } = event.message as {
 					toolName?: string;
 					toolCallId?: string;
-					details?: { path?: string };
+					details?: { path?: string; phases?: TodoPhase[] };
 					$normative?: Record<string, unknown>;
 					isError?: boolean;
 					content?: Array<TextContent | ImageContent>;
@@ -618,14 +653,17 @@ export class AgentSession {
 				if (toolName === "edit" && details?.path) {
 					this.#invalidateFileCacheForPath(details.path);
 				}
+				if (toolName === "todo_write" && !isError && Array.isArray(details?.phases)) {
+					this.setTodoPhases(details.phases);
+				}
 				if (toolName === "todo_write" && isError) {
 					const errorText = content?.find(part => part.type === "text")?.text;
 					const reminderText = [
-						"<system_reminder>",
+						"<system-reminder>",
 						"todo_write failed, so todo progress is not visible to the user.",
 						errorText ? `Failure: ${errorText}` : "Failure: todo_write returned an error.",
 						"Fix the todo payload and call todo_write again before continuing.",
-						"</system_reminder>",
+						"</system-reminder>",
 					].join("\n");
 					await this.sendCustomMessage(
 						{
@@ -1237,6 +1275,11 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
+		const drained = await this.#asyncJobManager?.dispose({ timeoutMs: 3_000 });
+		const deliveryState = this.#asyncJobManager?.getDeliveryState();
+		if (drained === false && deliveryState) {
+			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
+		}
 		await this.sessionManager.flush();
 		await cleanupSshResources();
 		for (const state of this.#providerSessionState.values()) {
@@ -1454,11 +1497,16 @@ export class AgentSession {
 		this.#planModeState = state;
 		if (state?.enabled) {
 			this.#planReferenceSent = false;
+			this.#planReferencePath = state.planFilePath;
 		}
 	}
 
 	markPlanReferenceSent(): void {
 		this.#planReferenceSent = true;
+	}
+
+	setPlanReferencePath(path: string): void {
+		this.#planReferencePath = path;
 	}
 
 	/**
@@ -1509,10 +1557,10 @@ export class AgentSession {
 		if (this.#planModeState?.enabled) return null;
 		if (this.#planReferenceSent) return null;
 
-		const planFilePath = `plan://${this.sessionManager.getSessionId()}/plan.md`;
-		const resolvedPlanPath = resolvePlanUrlToPath(planFilePath, {
-			getPlansDirectory: () => this.settings.getPlansDirectory(),
-			cwd: this.sessionManager.getCwd(),
+		const planFilePath = this.#planReferencePath;
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
 		});
 		let planContent: string;
 		try {
@@ -1543,19 +1591,19 @@ export class AgentSession {
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
 		const state = this.#planModeState;
 		if (!state?.enabled) return null;
-		const sessionPlanUrl = `plan://${this.sessionManager.getSessionId()}/plan.md`;
-		const resolvedPlanPath = state.planFilePath.startsWith("plan://")
-			? resolvePlanUrlToPath(state.planFilePath, {
-					getPlansDirectory: () => this.settings.getPlansDirectory(),
-					cwd: this.sessionManager.getCwd(),
+		const sessionPlanUrl = "local://PLAN.md";
+		const resolvedPlanPath = state.planFilePath.startsWith("local://")
+			? resolveLocalUrlToPath(state.planFilePath, {
+					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+					getSessionId: () => this.sessionManager.getSessionId(),
 				})
 			: resolveToCwd(state.planFilePath, this.sessionManager.getCwd());
-		const resolvedSessionPlan = resolvePlanUrlToPath(sessionPlanUrl, {
-			getPlansDirectory: () => this.settings.getPlansDirectory(),
-			cwd: this.sessionManager.getCwd(),
+		const resolvedSessionPlan = resolveLocalUrlToPath(sessionPlanUrl, {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
 		});
 		const displayPlanPath =
-			state.planFilePath.startsWith("plan://") || resolvedPlanPath !== resolvedSessionPlan
+			state.planFilePath.startsWith("local://") || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
 				: sessionPlanUrl;
 
@@ -1636,16 +1684,11 @@ export class AgentSession {
 			userContent.push(...options.images);
 		}
 
-		await this.#promptWithMessage(
-			{
-				role: "user",
-				content: userContent,
-				synthetic: options?.synthetic,
-				timestamp: Date.now(),
-			},
-			expandedText,
-			options,
-		);
+		const message = options?.synthetic
+			? { role: "developer" as const, content: userContent, timestamp: Date.now() }
+			: { role: "user" as const, content: userContent, timestamp: Date.now() };
+
+		await this.#promptWithMessage(message, expandedText, options);
 	}
 
 	async promptCustomMessage<T = unknown>(
@@ -2148,6 +2191,31 @@ export class AgentSession {
 		return this.#skillWarnings;
 	}
 
+	getTodoPhases(): TodoPhase[] {
+		return this.#cloneTodoPhases(this.#todoPhases);
+	}
+
+	setTodoPhases(phases: TodoPhase[]): void {
+		this.#todoPhases = this.#cloneTodoPhases(phases);
+	}
+
+	#syncTodoPhasesFromBranch(): void {
+		this.setTodoPhases(getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()));
+	}
+
+	#cloneTodoPhases(phases: TodoPhase[]): TodoPhase[] {
+		return phases.map(phase => ({
+			id: phase.id,
+			name: phase.name,
+			tasks: phase.tasks.map(task => ({
+				id: task.id,
+				content: task.content,
+				status: task.status,
+				notes: task.notes,
+			})),
+		}));
+	}
+
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
@@ -2187,9 +2255,11 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort();
+		this.#asyncJobManager?.cancelAll();
 		this.agent.reset();
 		await this.sessionManager.flush();
 		await this.sessionManager.newSession(options);
+		this.setTodoPhases([]);
 		this.agent.sessionId = this.sessionManager.getSessionId();
 		this.#steeringMessages = [];
 		this.#followUpMessages = [];
@@ -2199,6 +2269,7 @@ export class AgentSession {
 
 		this.#todoReminderCount = 0;
 		this.#planReferenceSent = false;
+		this.#planReferencePath = "local://PLAN.md";
 		this.#reconnectToAgent();
 
 		// Emit session_switch event with reason "new" to hooks
@@ -2607,6 +2678,7 @@ export class AgentSession {
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.sessionManager.buildSessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
@@ -2731,6 +2803,7 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
@@ -2887,7 +2960,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		try {
 			// Send the prompt and wait for completion
-			await this.prompt(handoffPrompt, { expandPromptTemplates: false });
+			await this.prompt(handoffPrompt, { expandPromptTemplates: false, synthetic: true });
 			await completionPromise;
 
 			if (!handoffText || this.#handoffAbortController.signal.aborted) {
@@ -2896,6 +2969,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 			// Start a new session
 			await this.sessionManager.flush();
+			this.#asyncJobManager?.cancelAll();
 			await this.sessionManager.newSession();
 			this.agent.reset();
 			this.agent.sessionId = this.sessionManager.getSessionId();
@@ -2911,6 +2985,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			// Rebuild agent messages from session
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#syncTodoPhasesFromBranch();
 
 			return { document: handoffText };
 		} finally {
@@ -3008,25 +3083,24 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			return;
 		}
 
-		// Load current todos from artifacts
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (!sessionFile) return;
-
-		const todoPath = `${sessionFile.slice(0, -6)}/todos.json`;
-
-		let todos: TodoItem[];
-		try {
-			const data = await Bun.file(todoPath).json();
-			todos = data?.todos ?? [];
-		} catch (err) {
-			if (isEnoent(err)) {
-				this.#todoReminderCount = 0;
-			}
+		const phases = this.getTodoPhases();
+		if (phases.length === 0) {
+			this.#todoReminderCount = 0;
 			return;
 		}
 
-		// Check for incomplete todos
-		const incomplete = todos.filter(t => t.status !== "completed");
+		const incompleteByPhase = phases
+			.map(phase => ({
+				name: phase.name,
+				tasks: phase.tasks
+					.filter(
+						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
+							task.status === "pending" || task.status === "in_progress",
+					)
+					.map(task => ({ id: task.id, content: task.content, status: task.status })),
+			}))
+			.filter(phase => phase.tasks.length > 0);
+		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
 			this.#todoReminderCount = 0;
 			return;
@@ -3034,13 +3108,15 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		// Build reminder message
 		this.#todoReminderCount++;
-		const todoList = incomplete.map(t => `- ${t.content}`).join("\n");
+		const todoList = incompleteByPhase
+			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.join("\n");
 		const reminder =
-			`<system_reminder>\n` +
+			`<system-reminder>\n` +
 			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
 			`Please continue working on these tasks or mark them complete if finished.\n` +
 			`(Reminder ${this.#todoReminderCount}/${remindersMax})\n` +
-			`</system_reminder>`;
+			`</system-reminder>`;
 
 		logger.debug("Todo completion: sending reminder", {
 			incomplete: incomplete.length,
@@ -3057,7 +3133,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		// Inject reminder and continue the conversation
 		this.agent.appendMessage({
-			role: "user",
+			role: "developer",
 			content: [{ type: "text", text: reminder }],
 			timestamp: Date.now(),
 		});
@@ -3443,6 +3519,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
@@ -4015,6 +4092,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		}
 
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#syncTodoPhasesFromBranch();
 
 		// Restore model if saved
 		const defaultModelStr = sessionContext.models.default;
@@ -4089,12 +4167,14 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
+		this.#asyncJobManager?.cancelAll();
 
 		if (!selectedEntry.parentId) {
 			await this.sessionManager.newSession({ parentSession: previousSessionFile });
 		} else {
 			this.sessionManager.createBranchedSession(selectedEntry.parentId);
 		}
+		this.#syncTodoPhasesFromBranch();
 		this.agent.sessionId = this.sessionManager.getSessionId();
 
 		// Reload messages from entries (works for both file and in-memory mode)
@@ -4263,6 +4343,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		// Update agent state
 		const sessionContext = this.sessionManager.buildSessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#syncTodoPhasesFromBranch();
 
 		// Emit session_tree event
 		if (this.#extensionRunner) {
@@ -4534,6 +4615,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		function formatArgsAsXml(args: Record<string, unknown>, indent = "\t"): string {
 			const parts: string[] = [];
 			for (const [key, value] of Object.entries(args)) {
+				if (key === "agent__intent") continue;
 				const text = typeof value === "string" ? value : JSON.stringify(value);
 				parts.push(`${indent}<parameter name="${key}">${text}</parameter>`);
 			}

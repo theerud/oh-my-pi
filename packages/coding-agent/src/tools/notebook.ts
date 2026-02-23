@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import { StringEnum } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
@@ -63,8 +63,9 @@ export class NotebookTool implements AgentTool<typeof notebookSchema, NotebookTo
 	readonly name = "notebook";
 	readonly label = "Notebook";
 	readonly description =
-		"Completely replaces the contents of a specific cell in a Jupyter notebook (.ipynb file) with new source. Jupyter notebooks are interactive documents that combine code, text, and visualizations, commonly used for data analysis and scientific computing. The notebook_path parameter must be an absolute path, not a relative path. The cell_number is 0-indexed. Use edit_mode=insert to add a new cell at the index specified by cell_number. Use edit_mode=delete to delete the cell at the index specified by cell_number.";
+		"Edit, insert, or delete cells in Jupyter notebooks (.ipynb). cell_index is 0-based. Paths must be absolute.";
 	readonly parameters = notebookSchema;
+	readonly strict = true;
 	readonly concurrency = "exclusive";
 
 	constructor(private readonly session: ToolSession) {}
@@ -80,17 +81,12 @@ export class NotebookTool implements AgentTool<typeof notebookSchema, NotebookTo
 		const absolutePath = resolveToCwd(notebook_path, this.session.cwd);
 
 		return untilAborted(signal, async () => {
-			// Check if file exists
-			const file = Bun.file(absolutePath);
-			if (!(await file.exists())) {
-				throw new Error(`Notebook not found: ${notebook_path}`);
-			}
-
 			// Read and parse notebook
 			let notebook: Notebook;
 			try {
-				notebook = await file.json();
-			} catch {
+				notebook = await Bun.file(absolutePath).json();
+			} catch (err) {
+				if (isEnoent(err)) throw new Error(`Notebook not found: ${notebook_path}`);
 				throw new Error(`Invalid JSON in notebook: ${notebook_path}`);
 			}
 

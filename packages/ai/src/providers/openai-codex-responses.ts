@@ -1,5 +1,5 @@
 import * as os from "node:os";
-import { $env, abortableSleep, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, abortableSleep, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
 import type {
 	ResponseFunctionToolCall,
 	ResponseInput,
@@ -27,11 +27,12 @@ import type {
 	ToolCall,
 	ToolChoice,
 } from "../types";
+import { normalizeResponsesToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
 import {
 	CODEX_BASE_URL,
 	JWT_CLAIM_PATH,
@@ -255,15 +256,6 @@ function extractCodexWebSocketHandshakeHeaders(socket: WebSocket, openEvent?: Ev
 		toCodexHeaders(socketResponse?.headers) ??
 		toCodexHeaders(socketHandshake?.headers)
 	);
-}
-
-function normalizeResponsesToolCallId(id: string): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
-		return { callId, itemId };
-	}
-	const hash = Bun.hash.xxHash64(id).toString(36);
-	return { callId: `call_${hash}`, itemId: `item_${hash}` };
 }
 
 function normalizeCodexToolChoice(choice: ToolChoice | undefined): string | Record<string, unknown> | undefined {
@@ -805,11 +797,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				resetCodexSessionMetadata(websocketState);
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				formatErrorMessageWithRetryAfter(error),
-				error,
-				rawRequestDump,
-			);
+			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -1576,6 +1564,42 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 					content: filteredContent,
 				});
 			}
+		} else if (msg.role === "developer") {
+			if (typeof msg.content === "string") {
+				if (!msg.content || msg.content.trim() === "") continue;
+				messages.push({
+					role: "developer",
+					content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
+				});
+			} else {
+				const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
+					if (item.type === "text") {
+						return {
+							type: "input_text",
+							text: sanitizeSurrogates(item.text),
+						} satisfies ResponseInputText;
+					}
+					return {
+						type: "input_image",
+						detail: "auto",
+						image_url: `data:${item.mimeType};base64,${item.data}`,
+					} satisfies ResponseInputImage;
+				});
+				let filteredContent = !model.input.includes("image")
+					? content.filter(c => c.type !== "input_image")
+					: content;
+				filteredContent = filteredContent.filter(c => {
+					if (c.type === "input_text") {
+						return c.text.trim().length > 0;
+					}
+					return true;
+				});
+				if (filteredContent.length === 0) continue;
+				messages.push({
+					role: "developer",
+					content: filteredContent,
+				});
+			}
 		} else if (msg.role === "assistant") {
 			const output: ResponseInput = [];
 
@@ -1658,16 +1682,26 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	return messages;
 }
 
-function convertTools(
-	tools: Tool[],
-): Array<{ type: "function"; name: string; description: string; parameters: Record<string, unknown>; strict: null }> {
-	return tools.map(tool => ({
-		type: "function",
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters as unknown as Record<string, unknown>,
-		strict: null,
-	}));
+function convertTools(tools: Tool[]): Array<{
+	type: "function";
+	name: string;
+	description: string;
+	parameters: Record<string, unknown>;
+	strict?: boolean;
+}> {
+	return tools.map(tool => {
+		const strict = !NO_STRICT && tool.strict;
+		return {
+			type: "function",
+			name: tool.name,
+			description: tool.description,
+			parameters: strict
+				? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
+				: (tool.parameters as unknown as Record<string, unknown>),
+			// Only include strict if provider supports it. Some reject unknown fields.
+			...(strict && { strict: true }),
+		};
+	});
 }
 
 function mapStopReason(status: string | undefined): StopReason {
@@ -1686,13 +1720,6 @@ function mapStopReason(status: string | undefined): StopReason {
 		default:
 			return "stop";
 	}
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	if (value && typeof value === "object") {
-		return value as Record<string, unknown>;
-	}
-	return null;
 }
 
 function getString(value: unknown): string | undefined {

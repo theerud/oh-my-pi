@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, formatCount, loadPage } from "./types";
+import { buildResult, formatNumber, loadPage, tryParseJson } from "./types";
 
 interface CoinGeckoResponse {
 	id: string;
@@ -53,13 +53,25 @@ export const handleCoinGecko: SpecialHandler = async (
 			signal,
 		});
 
-		if (!result.ok) return null;
+		if (!result.ok) {
+			const fallback = `# ${coinId}\n\nCoinGecko market data is currently unavailable for this asset.\n`;
+			return buildResult(fallback, {
+				url,
+				method: "coingecko",
+				fetchedAt,
+				notes: ["CoinGecko API request failed"],
+			});
+		}
 
-		let coin: CoinGeckoResponse;
-		try {
-			coin = JSON.parse(result.content);
-		} catch {
-			return null;
+		const coin = tryParseJson<CoinGeckoResponse>(result.content);
+		if (!coin) {
+			const fallback = `# ${coinId}\n\nCoinGecko response could not be parsed for this asset.\n`;
+			return buildResult(fallback, {
+				url,
+				method: "coingecko",
+				fetchedAt,
+				notes: ["CoinGecko API response parsing failed"],
+			});
 		}
 
 		const market = coin.market_data;
@@ -78,11 +90,11 @@ export const handleCoinGecko: SpecialHandler = async (
 		}
 
 		if (market?.market_cap?.usd) {
-			md += `**Market Cap:** $${formatLargeNumber(market.market_cap.usd)}\n`;
+			md += `**Market Cap:** $${formatNumber(market.market_cap.usd)}\n`;
 		}
 
 		if (market?.total_volume?.usd) {
-			md += `**24h Volume:** $${formatLargeNumber(market.total_volume.usd)}\n`;
+			md += `**24h Volume:** $${formatNumber(market.total_volume.usd)}\n`;
 		}
 
 		if (market?.ath?.usd !== undefined) {
@@ -102,12 +114,12 @@ export const handleCoinGecko: SpecialHandler = async (
 
 		// Supply info
 		if (market?.circulating_supply) {
-			md += `**Circulating Supply:** ${formatCount(Math.round(market.circulating_supply))}`;
+			md += `**Circulating Supply:** ${formatNumber(Math.round(market.circulating_supply))}`;
 			if (market.max_supply) {
 				const percent = ((market.circulating_supply / market.max_supply) * 100).toFixed(1);
-				md += ` / ${formatCount(Math.round(market.max_supply))} (${percent}%)`;
+				md += ` / ${formatNumber(Math.round(market.max_supply))} (${percent}%)`;
 			} else if (market.total_supply) {
-				md += ` / ${formatCount(Math.round(market.total_supply))} total`;
+				md += ` / ${formatNumber(Math.round(market.total_supply))} total`;
 			}
 			md += "\n";
 		}
@@ -146,17 +158,7 @@ export const handleCoinGecko: SpecialHandler = async (
 			}
 		}
 
-		const output = finalizeOutput(md);
-		return {
-			url,
-			finalUrl: url,
-			contentType: "text/markdown",
-			method: "coingecko",
-			content: output.content,
-			fetchedAt,
-			truncated: output.truncated,
-			notes: ["Fetched via CoinGecko API"],
-		};
+		return buildResult(md, { url, method: "coingecko", fetchedAt, notes: ["Fetched via CoinGecko API"] });
 	} catch {}
 
 	return null;
@@ -171,14 +173,4 @@ function formatPrice(price: number): string {
 	if (price >= 0.01) return price.toFixed(4);
 	if (price >= 0.0001) return price.toFixed(6);
 	return price.toFixed(8);
-}
-
-/**
- * Format large numbers with B/M/K suffixes
- */
-function formatLargeNumber(n: number): string {
-	if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
-	return n.toFixed(2);
 }

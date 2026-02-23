@@ -7,6 +7,7 @@
 import path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
+import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import {
@@ -14,7 +15,6 @@ import {
 	formatDuration,
 	formatMoreItems,
 	formatStatusIcon,
-	formatTokens,
 	replaceTabs,
 	truncateToWidth,
 } from "../tools/render-utils";
@@ -366,9 +366,9 @@ function renderTaskSection(
 	const trimmed = task.trimEnd();
 	if (!expanded || !trimmed) return lines;
 
-	// Strip the shared <swarm_context>...</swarm_context> block — it's the same
+	// Strip the shared <context>...</context> block — it's the same
 	// across all tasks and just adds noise when expanded.
-	const stripped = trimmed.replace(/<swarm_context>[\s\S]*?<\/swarm_context>\s*/, "").trimStart();
+	const stripped = trimmed.replace(/<context>[\s\S]*?<\/context>\s*/, "").trimStart();
 	if (!stripped) return lines;
 
 	lines.push(`${continuePrefix}${theme.fg("dim", "Task")}`);
@@ -518,13 +518,19 @@ function renderAgentProgress(
 			const taskPreview = truncateToWidth(progress.task, 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
-		statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
+		if (progress.toolCount > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
+		}
 		if (progress.tokens > 0) {
-			statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatTokens(progress.tokens)} tokens`)}`;
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(progress.tokens)} tokens`)}`;
 		}
 	} else if (progress.status === "completed") {
-		statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
-		statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatTokens(progress.tokens)} tokens`)}`;
+		if (progress.toolCount > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
+		}
+		if (progress.tokens > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(progress.tokens)} tokens`)}`;
+		}
 	}
 
 	lines.push(statusLine);
@@ -744,7 +750,7 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 		theme,
 	)}`;
 	if (result.tokens > 0) {
-		statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatTokens(result.tokens)} tokens`)}`;
+		statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(result.tokens)} tokens`)}`;
 	}
 	statusLine += `${theme.sep.dot}${theme.fg("dim", formatDuration(result.durationMs))}`;
 
@@ -882,7 +888,9 @@ export function renderResult(
 
 			const lines: string[] = [];
 
-			if (isPartial && details.progress) {
+			const shouldRenderProgress =
+				Boolean(details.progress && details.progress.length > 0) && (isPartial || details.results.length === 0);
+			if (shouldRenderProgress && details.progress) {
 				details.progress.forEach((progress, i) => {
 					const isLast = i === details.progress!.length - 1;
 					lines.push(...renderAgentProgress(progress, isLast, expanded, theme, spinnerFrame));

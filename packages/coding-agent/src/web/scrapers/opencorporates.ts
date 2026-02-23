@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, loadPage } from "./types";
+import { buildResult, loadPage, tryParseJson } from "./types";
 
 interface Officer {
 	id: number;
@@ -104,17 +104,37 @@ export const handleOpenCorporates: SpecialHandler = async (
 			signal,
 		});
 
-		if (!result.ok) return null;
+		if (!result.ok) {
+			const fallback = `# OpenCorporates Company\n\n**Jurisdiction:** ${jurisdiction.toUpperCase()}\n**Company Number:** ${companyNumber}\n\nOpenCorporates API request failed. Company details are currently unavailable.\n`;
+			return buildResult(fallback, {
+				url,
+				method: "opencorporates",
+				fetchedAt,
+				notes: ["OpenCorporates API request failed"],
+			});
+		}
 
-		let data: ApiResponse;
-		try {
-			data = JSON.parse(result.content);
-		} catch {
-			return null;
+		const data = tryParseJson<ApiResponse>(result.content);
+		if (!data) {
+			const fallback = `# OpenCorporates Company\n\n**Jurisdiction:** ${jurisdiction.toUpperCase()}\n**Company Number:** ${companyNumber}\n\nOpenCorporates response could not be parsed.\n`;
+			return buildResult(fallback, {
+				url,
+				method: "opencorporates",
+				fetchedAt,
+				notes: ["OpenCorporates API response parsing failed"],
+			});
 		}
 
 		const company = data.results?.company;
-		if (!company) return null;
+		if (!company) {
+			const fallback = `# OpenCorporates Company\n\n**Jurisdiction:** ${jurisdiction.toUpperCase()}\n**Company Number:** ${companyNumber}\n\nCompany details were not available from the OpenCorporates API.\n`;
+			return buildResult(fallback, {
+				url,
+				method: "opencorporates",
+				fetchedAt,
+				notes: ["OpenCorporates company payload was missing"],
+			});
+		}
 
 		let md = `# ${company.name}\n\n`;
 
@@ -258,17 +278,13 @@ export const handleOpenCorporates: SpecialHandler = async (
 			md += `**Data Retrieved:** ${company.retrieved_at}\n`;
 		}
 
-		const output = finalizeOutput(md);
-		return {
+		return buildResult(md, {
 			url,
 			finalUrl: company.opencorporates_url || url,
-			contentType: "text/markdown",
 			method: "opencorporates",
-			content: output.content,
 			fetchedAt,
-			truncated: output.truncated,
 			notes: ["Fetched via OpenCorporates API"],
-		};
+		});
 	} catch {}
 
 	return null;

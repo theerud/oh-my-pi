@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, hasFsCode, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, hasFsCode, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getGpuCachePath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
@@ -17,14 +17,6 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import type { ToolName } from "./tools";
-
-interface GitContext {
-	isRepo: boolean;
-	currentBranch: string;
-	mainBranch: string;
-	status: string;
-	commits: string;
-}
 
 type PreloadedSkill = { name: string; content: string };
 
@@ -42,54 +34,6 @@ async function loadPreloadedSkillContents(preloadedSkills: Skill[]): Promise<Pre
 	);
 
 	return contents;
-}
-
-/**
- * Load git context for the system prompt.
- * Returns structured git data or null if not in a git repo.
- */
-export async function loadGitContext(cwd: string): Promise<GitContext | null> {
-	const timeout = 3000;
-	const abortSignal = AbortSignal.timeout(timeout);
-
-	const git = async (...args: string[]): Promise<string | null> => {
-		const proc = Bun.spawn(["git", ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "ignore",
-			timeout: timeout,
-			killSignal: "SIGKILL",
-		});
-		return untilAborted(abortSignal, async () => {
-			const exitCode = await proc.exited;
-			const stdout = await proc.stdout.text();
-			return exitCode === 0 ? stdout.trim() : null;
-		});
-	};
-
-	// Check if inside a git repo
-	const isGitRepo = await git("rev-parse", "--is-inside-work-tree");
-	if (isGitRepo !== "true") return null;
-	const currentBranch = await git("rev-parse", "--abbrev-ref", "HEAD");
-	if (!currentBranch) return null;
-	let mainBranch = "main";
-	const mainExists = await git("rev-parse", "--verify", "main");
-	if (mainExists === null) {
-		const masterExists = await git("rev-parse", "--verify", "master");
-		if (masterExists !== null) mainBranch = "master";
-	}
-
-	const [status, commits] = await Promise.all([
-		git("status", "--porcelain", "--untracked-files=no"),
-		git("log", "--oneline", "-5"),
-	]);
-	return {
-		isRepo: true,
-		currentBranch,
-		mainBranch,
-		status: status === "" ? "(clean)" : (status ?? "(status unavailable)"),
-		commits: commits && commits.length > 0 ? commits : "(no commits)",
-	};
 }
 
 function firstNonEmpty(...values: (string | undefined | null)[]): string | null {
@@ -333,9 +277,7 @@ function getSystemInfoCachePath(): string {
 async function loadGpuCache(): Promise<GpuCache | null> {
 	try {
 		const cachePath = getSystemInfoCachePath();
-		const file = Bun.file(cachePath);
-		if (!(await file.exists())) return null;
-		const content = await file.json();
+		const content = await Bun.file(cachePath).json();
 		return content as GpuCache;
 	} catch {
 		return null;
@@ -477,6 +419,8 @@ export interface BuildSystemPromptOptions {
 	preloadedSkills?: Skill[];
 	/** Pre-loaded rulebook rules (rules with descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
+	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
+	intentField?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -497,11 +441,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills: providedSkills,
 		preloadedSkills: providedPreloadedSkills,
 		rules,
+		intentField,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
 	const preloadedSkills = providedPreloadedSkills;
 
-	const prepPromise = (async () => {
+	const prepPromise = (() => {
 		const systemPromptCustomizationPromise = logger.timeAsync("loadSystemPromptFiles", loadSystemPromptFiles, {
 			cwd: resolvedCwd,
 		});
@@ -516,20 +461,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 					? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
 					: Promise.resolve([]);
 		const preloadedSkillContentsPromise = preloadedSkills
-			? await logger.timeAsync("loadPreloadedSkills", loadPreloadedSkillContents, preloadedSkills)
+			? logger.timeAsync("loadPreloadedSkills", loadPreloadedSkillContents, preloadedSkills)
 			: [];
-		const gitPromise = logger.timeAsync("loadGitContext", loadGitContext, resolvedCwd);
 
-		const [
-			resolvedCustomPrompt,
-			resolvedAppendPrompt,
-			systemPromptCustomization,
-			contextFiles,
-			agentsMdSearch,
-			skills,
-			preloadedSkillContents,
-			git,
-		] = await Promise.all([
+		return Promise.all([
 			resolvePromptInput(customPrompt, "system prompt"),
 			resolvePromptInput(appendSystemPrompt, "append system prompt"),
 			systemPromptCustomizationPromise,
@@ -537,19 +472,25 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			agentsMdSearchPromise,
 			skillsPromise,
 			preloadedSkillContentsPromise,
-			gitPromise,
-		]);
-
-		return {
-			resolvedCustomPrompt,
-			resolvedAppendPrompt,
-			systemPromptCustomization,
-			contextFiles,
-			agentsMdSearch,
-			skills,
-			preloadedSkillContents,
-			git,
-		};
+		]).then(
+			([
+				resolvedCustomPrompt,
+				resolvedAppendPrompt,
+				systemPromptCustomization,
+				contextFiles,
+				agentsMdSearch,
+				skills,
+				preloadedSkillContents,
+			]) => ({
+				resolvedCustomPrompt,
+				resolvedAppendPrompt,
+				systemPromptCustomization,
+				contextFiles,
+				agentsMdSearch,
+				skills,
+				preloadedSkillContents,
+			}),
+		);
 	})();
 
 	const prepResult = await Promise.race([
@@ -571,7 +512,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	};
 	let skills: Skill[] = providedSkills ?? [];
 	let preloadedSkillContents: PreloadedSkill[] = [];
-	let git: GitContext | null = null;
 
 	if (prepResult.type === "timeout") {
 		logger.warn("System prompt preparation timed out; using minimal startup context", {
@@ -595,7 +535,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		agentsMdSearch = prepResult.value.agentsMdSearch;
 		skills = prepResult.value.skills;
 		preloadedSkillContents = prepResult.value.preloadedSkillContents;
-		git = prepResult.value.git;
 	}
 
 	const now = new Date();
@@ -648,7 +587,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			appendPrompt: resolvedAppendPrompt ?? "",
 			contextFiles,
 			agentsMdSearch,
-			git,
 			skills: filteredSkills,
 			preloadedSkills: preloadedSkillContents,
 			rules: rules ?? [],
@@ -667,7 +605,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPromptCustomization: systemPromptCustomization ?? "",
 		contextFiles,
 		agentsMdSearch,
-		git,
 		skills: filteredSkills,
 		preloadedSkills: preloadedSkillContents,
 		rules: rules ?? [],
@@ -675,5 +612,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		dateTime,
 		cwd: resolvedCwd,
 		appendSystemPrompt: resolvedAppendPrompt ?? "",
+		intentTracing: !!intentField,
+		intentField: intentField ?? "",
 	});
 }

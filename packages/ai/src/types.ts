@@ -254,6 +254,12 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+export interface DeveloperMessage {
+	role: "developer";
+	content: string | (TextContent | ImageContent)[];
+	timestamp: number; // Unix timestamp in milliseconds
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | ToolCall)[];
@@ -281,7 +287,7 @@ export interface ToolResultMessage<TDetails = any, TInput = unknown> {
 	$normative?: TInput;
 }
 
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = UserMessage | DeveloperMessage | AssistantMessage | ToolResultMessage;
 
 export type CursorExecHandlerResult<T> = { result: T; toolResult?: ToolResultMessage } | T | ToolResultMessage;
 
@@ -314,6 +320,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
 	parameters: TParameters;
+	/** If true, tool is strictly typed and validated against the parameters schema before execution */
+	strict?: boolean;
 }
 
 export interface Context {
@@ -374,7 +382,7 @@ export interface OpenAICompat {
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
 	vercelGatewayRouting?: VercelGatewayRouting;
-	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
+	/** Whether the provider supports the `strict` field in tool definitions. Default: auto-detected per provider/baseUrl (conservative for unknown providers). */
 	supportsStrictMode?: boolean;
 }
 

@@ -29,10 +29,10 @@ import type {
 	ToolCall,
 	ToolChoice,
 } from "../types";
+import { normalizeResponsesToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import { transformMessages } from "./transform-messages";
@@ -361,11 +361,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 		} catch (error) {
 			for (const block of output.content) delete (block as { index?: number }).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				formatErrorMessageWithRetryAfter(error),
-				error,
-				rawRequestDump,
-			);
+			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -505,15 +501,6 @@ function buildParams(
 	return params;
 }
 
-function normalizeResponsesToolCallId(id: string): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
-		return { callId, itemId };
-	}
-	const hash = Bun.hash.xxHash64(id).toString(36);
-	return { callId: `call_${hash}`, itemId: `item_${hash}` };
-}
-
 function convertMessages(
 	model: Model<"azure-openai-responses">,
 	context: Context,
@@ -585,6 +572,43 @@ function convertMessages(
 				if (filteredContent.length === 0) continue;
 				messages.push({
 					role: "user",
+					content: filteredContent,
+				});
+			}
+		} else if (msg.role === "developer") {
+			const devRole = "user";
+			if (typeof msg.content === "string") {
+				if (!msg.content || msg.content.trim() === "") continue;
+				messages.push({
+					role: devRole,
+					content: sanitizeSurrogates(msg.content),
+				});
+			} else {
+				const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
+					if (item.type === "text") {
+						return {
+							type: "input_text",
+							text: sanitizeSurrogates(item.text),
+						} satisfies ResponseInputText;
+					}
+					return {
+						type: "input_image",
+						detail: "auto",
+						image_url: `data:${item.mimeType};base64,${item.data}`,
+					} satisfies ResponseInputImage;
+				});
+				let filteredContent = !model.input.includes("image")
+					? content.filter(c => c.type !== "input_image")
+					: content;
+				filteredContent = filteredContent.filter(c => {
+					if (c.type === "input_text") {
+						return c.text.trim().length > 0;
+					}
+					return true;
+				});
+				if (filteredContent.length === 0) continue;
+				messages.push({
+					role: devRole,
 					content: filteredContent,
 				});
 			}

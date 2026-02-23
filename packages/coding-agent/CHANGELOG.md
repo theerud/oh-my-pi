@@ -2,61 +2,140 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added support for GitLab Duo authentication provider
-- Exported truncation utilities and streaming output types from `session/streaming-output` module for public use
-- Added `TailBuffer` class for efficient ring-style buffering with lazy joining and windowed truncation
-- Added `truncateTailBytes` and `truncateHeadBytes` functions for UTF-8-aware byte-level truncation
-- Added `formatTailTruncationNotice` and `formatHeadTruncationNotice` functions for consistent truncation notice formatting
-- Added `allocateOutputArtifact` function to allocate artifact paths for tool output spilling
-- Added `getArtifactManager()` method to `ToolSession` for lazy artifact manager access
-
-### Changed
-
-- Refactored byte truncation to use unified `truncateBytesWindowed` function supporting both head and tail modes, reducing code duplication
-- Optimized `truncateHead` and `truncateTail` to avoid full Buffer allocation by processing content incrementally with character-level scanning
-- Improved `TailBuffer.append()` to handle large incoming chunks more efficiently by detecting when a single chunk dominates the tail budget
-- Enhanced `OutputSink.push()` to avoid creating giant intermediate strings when spilling to files by windowing large chunks before concatenation
-- Refactored newline counting to use a constant `NL` for consistency across the module
-- Re-exported `AuthCredentialStore` and `StoredAuthCredential` after migrating credential primitives to shared modules
-- Extracted output/truncation formatting helpers (`formatFullOutputReference`, `formatStyledArtifactReference`, `formatTruncationMetaNotice`, `formatStyledTruncationWarning`, `formatTitle`, `formatErrorMessage`, `formatMeta`, `shortenPath`, `formatHeadTruncationNotice`) into standalone utility functions
-- Moved `getDomain` from fetch internals into render utilities for shared use
-- Moved `parseCommandArgs` and `substituteArgs` from prompt-templates and slash-commands to new `utils/command-args` module
-- Moved `expandPath` from discovery/helpers to new `tools/path-utils` module
-- Moved JTD type definitions and type guards from jtd-to-json-schema and jtd-to-typescript to shared `tools/jtd-utils` module
-- Refactored truncation warning formatting in bash, python, and ssh tool renderers to use centralized `formatStyledTruncationWarning` function
-- Refactored tool UI rendering to use standalone formatting functions instead of `ToolUIKit` class
-- Moved `normalizeUnicode` function from validation.ts to `patch/normalize` module
-- Updated `AuthStorage.create()` to accept options parameter with `configValueResolver`
-- Simplified truncation notice generation in multiple tool renderers by using shared formatting utilities
-- Moved truncation logic from `tools/truncate.ts` to `session/streaming-output.ts` for better architectural separation
-- Renamed `formatSize()` to `formatBytes()` across codebase for consistency
-- Refactored `OutputSink` to use windowed byte truncation for memory efficiency when spilling to files
-- Changed `ToolSession.artifactManager` from cached property to `getArtifactManager()` method for lazy initialization
-- Updated `allocateOutputArtifact` return type to use `{ path, id }` instead of `{ artifactPath, artifactId }`
-- Optimized newline counting to use native `indexOf` for V8-optimized string scanning
-- Improved UTF-8 boundary detection in byte truncation with dedicated helper functions
-
-### Removed
-
-- Removed `ToolUIKit` class from render-utils (replaced with standalone formatting functions)
-- Removed `normalizeUnicodeSpaces` and `expandPath` from discovery/helpers (moved to path-utils)
-- Removed duplicate JTD type definitions from jtd-to-json-schema and jtd-to-typescript (now in jtd-utils)
-- Removed `AnthropicAuthConfig` and related types from web/search/types (moved to @oh-my-pi/pi-ai)
-- Removed `getDomain` function from fetch.ts (moved to render-utils)
-- Removed inline truncation warning formatting logic from bash, python, ssh, and read tool renderers
-- Deleted `tools/truncate.ts` module (functionality moved to `session/streaming-output.ts`)
-- Deleted `tools/output-utils.ts` module (functionality moved to `session/streaming-output.ts`)
-- Removed `formatSize` export from public API (renamed to `formatBytes`)
-- Removed individual truncation function exports from `tools/index.ts` (now exported via `session/streaming-output`)
+## [13.1.1] - 2026-02-23
 
 ### Fixed
 
-- Fixed truncation notice formatting consistency across all tool renderers by centralizing logic
-- Fixed UTF-8 boundary handling in byte truncation to prevent invalid character sequences
-- Fixed memory efficiency in `OutputSink` by using windowed truncation instead of full-buffer encoding
-- Fixed line counting to handle chunk boundaries correctly across multiple `push()` calls
+- Fixed bash internal URL expansion to resolve `local://` targets to concrete filesystem paths, including newly created destination files for commands like `mv src.json local://dest.json`
+- Fixed bash local URL resolution to create missing parent directories under the session local root before command execution, preventing `mv` destination failures for new paths
+## [13.1.0] - 2026-02-23
+### Breaking Changes
+
+- Renamed `file` parameter to `path` in replace, patch, and hashline edit operations
+
+### Added
+
+- Added clarification in hashline edit documentation that the `end` tag must include closing braces/brackets when replacing blocks to prevent syntax errors
+
+### Changed
+
+- Restructured task tool documentation for clarity, moving parameter definitions into a dedicated section and consolidating guidance on context, assignments, and parallelization
+- Reformatted system prompt template to use markdown headings instead of XML tags for skills, preloaded skills, and rules sections
+- Renamed `deviceScaleFactor` parameter to `device_scale_factor` in browser viewport configuration for consistency with snake_case naming convention
+- Moved intent field documentation from per-tool JSON schema descriptions into a single system prompt block, reducing token overhead proportional to tool count
+
+## [13.0.1] - 2026-02-22
+### Changed
+
+- Simplified hashline edit schema to use unified `first`/`last` anchor fields instead of operation-specific field names (`tag`, `before`, `after`)
+- Improved resilience of anchor resolution to degrade gracefully when anchors are missing or invalid, allowing edits to proceed with available anchors
+- Updated hashline tool documentation to reflect new unified anchor syntax across all operations (replace, append, prepend, insert)
+
+## [13.0.0] - 2026-02-22
+### Added
+
+- Added `getTodoPhases()` and `setTodoPhases()` methods to ToolSession API for managing todo state programmatically
+- Added `getLatestTodoPhasesFromEntries()` export to retrieve todo phases from session history
+- Added `local://` protocol for session-scoped scratch space to store large intermediate artifacts, subagent handoffs, and reusable planning artifacts
+- Added `title` parameter to `exit_plan_mode` tool to specify the final plan artifact name when approving a plan
+- Added `LocalProtocolHandler` for resolving `local://` URLs to session-scoped file storage
+- Added `renameApprovedPlanFile` function to finalize approved plans with user-specified titles
+
+### Changed
+
+- Changed todo state management from file-based (`todos.json`) to in-memory session cache for improved performance and consistency
+- Changed todo phases to sync from session branch history when branching or rewriting entries
+- Changed `TodoWriteTool` to update session cache instead of writing to disk, with automatic persistence through session entries
+- Changed XML tag from `<swarm-context>` to `<context>` in subagent prompts and task rendering
+- Changed system reminder XML tags from underscore to kebab-case format (`<system-reminder>`)
+- Changed plan storage from `plan://` protocol to `local://PLAN.md` for draft plans and `local://<title>.md` for finalized approved plans
+- Changed plan mode to use session artifacts directory for plan storage instead of separate plans directory
+- Updated system prompt to document `local://` protocol and internal URL expansion behavior
+- Updated `exit_plan_mode` tool documentation to require `title` parameter and explain plan finalization workflow
+- Updated `write` tool documentation to recommend `local://` for large temporary artifacts and subagent handoffs
+- Updated `task` tool documentation to recommend using `local://` for large intermediate outputs in subagent context
+- Replaced `docs://` protocol with `pi://` for accessing embedded documentation files
+- Renamed `DocsProtocolHandler` to `PiProtocolHandler` for internal documentation URL resolution
+- Removed `artifactsDir` parameter from Python executor options; artifact storage now uses `artifactPath` only
+- Renamed prompt file from `read_path.md` to `read-path.md` for consistency
+- Updated system prompt XML tags to use kebab-case (e.g., `system-reminder`, `system-interrupt`) for consistency
+- Refactored bash tool to use `NO_PAGER_ENV` constant for environment variable management
+- Updated internal URL expansion to support optional `noEscape` parameter for unescaped path resolution
+
+### Removed
+
+- Removed `plan://` protocol handler and related plan directory resolution logic
+- Removed `PlanProtocolHandler` and `resolvePlanUrlToPath` exports from internal URLs module
+
+### Fixed
+
+- Fixed todo reminder XML tags from underscore to kebab-case format (`system-reminder`)
+
+## [12.19.3] - 2026-02-22
+### Added
+
+- Added `pty` parameter to bash tool to enable PTY mode for commands requiring a real terminal (e.g., sudo, ssh, top, less)
+
+### Changed
+
+- Changed bash tool to use per-command PTY control instead of global virtual terminal setting
+
+### Removed
+
+- Removed `bash.virtualTerminal` setting; use the `pty` parameter on individual bash commands instead
+
+## [12.19.1] - 2026-02-22
+### Removed
+
+- Removed `replaceText` edit operation from hashline mode (substring-based text replacement)
+- Removed autocorrect heuristics that attempted to detect and fix line merges and formatting rewrites in hashline edits
+
+## [12.19.0] - 2026-02-22
+### Added
+
+- Added `poll_jobs` tool to block until background jobs complete, providing an alternative to polling `read jobs://` in loops
+- Added `task.maxConcurrency` setting to limit the number of concurrently executing subagent tasks
+- Added support for rendering markdown output from Python cells with proper formatting and theme styling
+- Added async background job execution for bash commands and tasks with `async: true` parameter
+- Added `cancel_job` tool to cancel running background jobs
+- Added `jobs://` internal protocol to inspect background job status and results
+- Added `/jobs` slash command to display running and recent background jobs in interactive mode
+- Added `async.enabled` and `async.maxJobs` settings to control background job execution
+- Added background job status indicator in status line showing count of running jobs
+- Added support for GitLab Duo authentication provider
+- Added clearer truncation notices across tools with consistent line/size context and continuation hints
+
+### Changed
+
+- Updated bash and task tool guidance to recommend `poll_jobs` instead of polling `read jobs://` in loops when waiting for async results
+- Improved parallel task execution to schedule multiple background jobs independently instead of batching all tasks into a single job, enabling true concurrent execution
+- Enhanced task progress tracking to report per-task status (pending, running, completed, failed, aborted) with individual timing and token metrics for each background task
+- Updated background task messaging to provide real-time progress counts (e.g., '2/5 finished') and distinguish between single and multiple task jobs
+- Hid internal `agent__intent` parameter from tool argument displays in UI and logs to reduce visual clutter
+- Updated Python tool to detect and handle markdown display output separately from plain text
+- Updated bash tool to support async execution mode with streaming progress updates
+- Updated task tool to support async execution mode for parallel subagent execution
+- Modified subagent settings to disable async execution in child agents to prevent nesting
+- Updated tool execution component to handle background async task state without spinner animation
+- Changed event controller to keep background tool calls pending until async completion
+- Updated status line width calculation to accommodate background job indicator
+- Updated the system prompt pipeline to reduce injected environment noise and make instructions more focused on execution quality
+- Updated system prompt/workflow guidance to emphasize root-cause fixes, code quality, and explicit handoff/testing expectations
+- Changed default value of `todo.reminders` setting from false to true to enable todo reminders by default
+- Improved truncation/output handling for large command results to reduce memory pressure and keep previews responsive
+- Updated internal artifact handling so tool output artifacts stay consistent across session switches and resumes
+
+### Removed
+
+- Removed git context (branch, status, commit history) from system prompt — version control information is no longer injected into agent instructions
+
+### Fixed
+
+- Fixed task progress display to hide tool count and token metrics when zero, reducing visual clutter in status output
+- Fixed Lobsters scraper to correctly parse API responses where user fields are strings instead of objects, resolving undefined user display in story listings
+- Fixed artifact manager caching to properly invalidate when session file changes, preventing stale artifact references
+- Fixed truncation behavior around UTF-8 boundaries and chunked output accounting
+- Fixed `submit_result` schema generation to use valid JSON Schema when no explicit output schema is provided
 
 ## [12.18.1] - 2026-02-21
 ### Added

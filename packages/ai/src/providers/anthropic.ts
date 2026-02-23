@@ -25,10 +25,10 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types";
+import { isAnthropicOAuthToken, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
@@ -63,7 +63,7 @@ const claudeCodeBetaDefaults = [
 	"prompt-caching-scope-2026-01-05",
 ];
 export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<string, string> {
-	const oauthToken = options.isOAuth ?? isOAuthToken(options.apiKey);
+	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
 	const betaHeader = buildBetaHeader(claudeCodeBetaDefaults, extraBetas);
@@ -108,20 +108,6 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	}
 
 	return headers;
-}
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
 }
 
 type AnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" | "5m" };
@@ -299,13 +285,19 @@ const PROVIDER_MAX_RETRIES = 3;
 const PROVIDER_BASE_DELAY_MS = 2000;
 
 /**
- * Check if an error from the Anthropic SDK is a rate-limit or transient error
- * that the SDK itself didn't retry (e.g. z.ai returns non-429 status with rate limit in body).
+ * Check if an error from the Anthropic SDK is a rate-limit/transient error that
+ * should be retried before any content has been emitted.
+ *
+ * Includes malformed JSON stream-envelope parse errors seen from some
+ * Anthropic-compatible proxy endpoints.
  */
-function isProviderRetryableError(error: unknown): boolean {
+export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	const msg = error.message;
-	return /rate.?limit|too many requests|overloaded|service.?unavailable|1302/i.test(msg);
+	return (
+		/rate.?limit|too many requests|overloaded|service.?unavailable|1302/i.test(msg) ||
+		/json parse error|unterminated string|unexpected end of json input/i.test(msg)
+	);
 }
 
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
@@ -570,11 +562,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 		} catch (error) {
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				formatErrorMessageWithRetryAfter(error),
-				error,
-				rawRequestDump,
-			);
+			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -663,10 +651,6 @@ function mapThinkingLevelToEffort(level: SimpleStreamOptions["reasoning"]): Anth
 	}
 }
 
-function isOAuthToken(apiKey: string): boolean {
-	return apiKey.includes("sk-ant-oat");
-}
-
 export function normalizeExtraBetas(betas?: string[] | string): string[] {
 	if (!betas) return [];
 	const raw = Array.isArray(betas) ? betas : betas.split(",");
@@ -684,7 +668,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		dynamicHeaders,
 		isOAuth,
 	} = args;
-	const oauthToken = isOAuth ?? isOAuthToken(apiKey);
+	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
 
 	if (model.provider === "github-copilot") {
 		const betaFeatures = [...extraBetas];
@@ -971,11 +955,6 @@ function buildParams(
 	return params;
 }
 
-// Normalize tool call IDs to match Anthropic's required pattern and length
-function normalizeToolCallId(id: string): string {
-	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-}
-
 export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
@@ -988,7 +967,7 @@ export function convertAnthropicMessages(
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
-		if (msg.role === "user") {
+		if (msg.role === "user" || msg.role === "developer") {
 			if (!msg.content) continue;
 
 			if (typeof msg.content === "string") {

@@ -1,17 +1,19 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
 	applyHashlineEdits,
 	computeLineHash,
 	formatHashLines,
 	HashlineMismatchError,
+	hashlineParseText,
 	parseTag,
 	streamHashLinesFromLines,
 	streamHashLinesFromUtf8,
+	stripNewLinePrefixes,
 	validateLineRef,
 } from "@oh-my-pi/pi-coding-agent/patch";
-import { formatLineTag, type HashlineEdit, type LineTag } from "@oh-my-pi/pi-coding-agent/patch/hashline";
+import { type Anchor, formatLineTag, type HashlineEdit } from "@oh-my-pi/pi-coding-agent/patch/hashline";
 
-function makeTag(line: number, content: string): LineTag {
+function makeTag(line: number, content: string): Anchor {
 	return parseTag(formatLineTag(line, content));
 }
 
@@ -40,6 +42,18 @@ describe("computeLineHash", () => {
 	it("empty line produces valid hash", () => {
 		const hash = computeLineHash(1, "");
 		expect(hash).toMatch(/^[ZPMQVRWSNKTXJBYH]{2}$/);
+	});
+
+	it("uses line number for symbol-only lines", () => {
+		const a = computeLineHash(1, "***");
+		const b = computeLineHash(2, "***");
+		expect(a).not.toBe(b);
+	});
+
+	it("does not use line number for alphanumeric lines", () => {
+		const a = computeLineHash(1, "hello");
+		const b = computeLineHash(2, "hello");
+		expect(a).toBe(b);
 	});
 });
 
@@ -231,49 +245,47 @@ describe("validateLineRef", () => {
 describe("applyHashlineEdits — replace", () => {
 	it("replaces single line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(2, "bbb"), content: ["BBB"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBBB\nccc");
+		expect(result.lines).toBe("aaa\nBBB\nccc");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("range replace (shrink)", () => {
 		const content = "aaa\nbbb\nccc\nddd";
-		const edits: HashlineEdit[] = [
-			{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: ["ONE"] },
-		];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: ["ONE"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nONE\nddd");
+		expect(result.lines).toBe("aaa\nONE\nddd");
 	});
 
 	it("range replace (same count)", () => {
 		const content = "aaa\nbbb\nccc\nddd";
 		const edits: HashlineEdit[] = [
-			{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: ["XXX", "YYY"] },
+			{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: ["XXX", "YYY"] },
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nXXX\nYYY\nddd");
+		expect(result.lines).toBe("aaa\nXXX\nYYY\nddd");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("replaces first line", () => {
 		const content = "first\nsecond\nthird";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(1, "first"), content: ["FIRST"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(1, "first"), lines: ["FIRST"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("FIRST\nsecond\nthird");
+		expect(result.lines).toBe("FIRST\nsecond\nthird");
 		expect(result.firstChangedLine).toBe(1);
 	});
 
 	it("replaces last line", () => {
 		const content = "first\nsecond\nthird";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(3, "third"), content: ["THIRD"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(3, "third"), lines: ["THIRD"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("first\nsecond\nTHIRD");
+		expect(result.lines).toBe("first\nsecond\nTHIRD");
 		expect(result.firstChangedLine).toBe(3);
 	});
 });
@@ -285,267 +297,189 @@ describe("applyHashlineEdits — replace", () => {
 describe("applyHashlineEdits — delete", () => {
 	it("deletes single line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(2, "bbb"), content: [] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), lines: [] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nccc");
+		expect(result.lines).toBe("aaa\nccc");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("deletes range of lines", () => {
 		const content = "aaa\nbbb\nccc\nddd";
-		const edits: HashlineEdit[] = [{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: [] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: [] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nddd");
+		expect(result.lines).toBe("aaa\nddd");
 	});
 
 	it("deletes first line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(1, "aaa"), content: [] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(1, "aaa"), lines: [] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("bbb\nccc");
+		expect(result.lines).toBe("bbb\nccc");
 	});
 
 	it("deletes last line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "set", tag: makeTag(3, "ccc"), content: [] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(3, "ccc"), lines: [] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nbbb");
+		expect(result.lines).toBe("aaa\nbbb");
 	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// applyHashlineEdits — insert
+// applyHashlineEdits — append
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("applyHashlineEdits — insert", () => {
+describe("applyHashlineEdits — append", () => {
 	it("inserts after a line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: ["NEW"] }];
+		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: ["NEW"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
+		expect(result.lines).toBe("aaa\nNEW\nbbb\nccc");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("inserts multiple lines", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: ["x", "y", "z"] }];
+		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: ["x", "y", "z"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb");
+		expect(result.lines).toBe("aaa\nx\ny\nz\nbbb");
 	});
 
 	it("inserts after last line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(2, "bbb"), content: ["NEW"] }];
+		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(2, "bbb"), lines: ["NEW"] }];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nbbb\nNEW");
+		expect(result.lines).toBe("aaa\nbbb\nNEW");
 	});
 
-	it("insert with empty dst throws", () => {
+	it("insert with empty dst inserts an empty line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: [] }];
+		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: [] }];
 
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("aaa\n\nbbb");
+		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("inserts at EOF without anchors", () => {
 		const content = "aaa\nbbb";
-		const edits = [{ op: "append", content: ["NEW"] }] as unknown as HashlineEdit[];
+		const edits = [{ op: "append", lines: ["NEW"] }] as unknown as HashlineEdit[];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nbbb\nNEW");
+		expect(result.lines).toBe("aaa\nbbb\nNEW");
 		expect(result.firstChangedLine).toBe(3);
 	});
 
 	it("inserts at EOF into empty file without anchors", () => {
 		const content = "";
-		const edits = [{ op: "append", content: ["NEW"] }] as unknown as HashlineEdit[];
+		const edits = [{ op: "append", lines: ["NEW"] }] as unknown as HashlineEdit[];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("NEW");
+		expect(result.lines).toBe("NEW");
 		expect(result.firstChangedLine).toBe(1);
 	});
 
-	it("insert at EOF with empty dst throws", () => {
+	it("insert at EOF with empty dst inserts a trailing empty line", () => {
 		const content = "aaa\nbbb";
-		const edits = [{ op: "append", content: [] }] as unknown as HashlineEdit[];
+		const edits = [{ op: "append", lines: [] }] as unknown as HashlineEdit[];
 
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("aaa\nbbb\n");
+		expect(result.firstChangedLine).toBe(3);
 	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// applyHashlineEdits — insert (before)
+// applyHashlineEdits — prepend
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("applyHashlineEdits — insert (before)", () => {
+describe("applyHashlineEdits — prepend", () => {
 	it("inserts before a line", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(2, "bbb"), content: ["NEW"] }];
+		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["NEW"] }];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
+		expect(result.lines).toBe("aaa\nNEW\nbbb\nccc");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("inserts multiple lines before", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(2, "bbb"), content: ["x", "y", "z"] }];
+		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["x", "y", "z"] }];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb");
+		expect(result.lines).toBe("aaa\nx\ny\nz\nbbb");
 	});
 
 	it("inserts before first line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: ["NEW"] }];
+		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: ["NEW"] }];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("NEW\naaa\nbbb");
+		expect(result.lines).toBe("NEW\naaa\nbbb");
 	});
 
 	it("prepends at BOF without anchor", () => {
 		const content = "aaa\nbbb";
-		const edits = [{ op: "prepend", content: ["NEW"] }] as unknown as HashlineEdit[];
+		const edits = [{ op: "prepend", lines: ["NEW"] }] as unknown as HashlineEdit[];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("NEW\naaa\nbbb");
+		expect(result.lines).toBe("NEW\naaa\nbbb");
 		expect(result.firstChangedLine).toBe(1);
 	});
 
-	it("insert with before and empty text throws", () => {
+	it("insert with before and empty text inserts an empty line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: [] }];
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
-	});
-
-	it("strips anchor echo from end of inserted text (autocorrect)", () => {
-		Bun.env.PI_HL_AUTOCORRECT = "1";
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(2, "bbb"), content: ["NEW", "bbb"] }];
+		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: [] }];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
+		expect(result.lines).toBe("\naaa\nbbb");
+		expect(result.firstChangedLine).toBe(1);
 	});
-	Bun.env.PI_HL_AUTOCORRECT = undefined;
 
 	it("insert before and insert after at same line produce correct order", () => {
 		const content = "aaa\nbbb\nccc";
 		const edits: HashlineEdit[] = [
-			{ op: "prepend", before: makeTag(2, "bbb"), content: ["BEFORE"] },
-			{ op: "append", after: makeTag(2, "bbb"), content: ["AFTER"] },
+			{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["BEFORE"] },
+			{ op: "append", pos: makeTag(2, "bbb"), lines: ["AFTER"] },
 		];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBEFORE\nbbb\nAFTER\nccc");
+		expect(result.lines).toBe("aaa\nBEFORE\nbbb\nAFTER\nccc");
 	});
 
 	it("insert before with set at same line", () => {
 		const content = "aaa\nbbb\nccc";
 		const edits: HashlineEdit[] = [
-			{ op: "prepend", before: makeTag(2, "bbb"), content: ["BEFORE"] },
-			{ op: "set", tag: makeTag(2, "bbb"), content: ["BBB"] },
+			{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["BEFORE"] },
+			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
 		];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBEFORE\nBBB\nccc");
+		expect(result.lines).toBe("aaa\nBEFORE\nBBB\nccc");
 	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// applyHashlineEdits — insert (between)
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("applyHashlineEdits — insert (between)", () => {
-	it("inserts between adjacent anchors", () => {
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [
-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(2, "bbb"), content: ["NEW"] },
-		];
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
-		expect(result.firstChangedLine).toBe(2);
-	});
-
-	it("inserts multiple lines between anchors", () => {
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [
-			{
-				op: "insert",
-				after: makeTag(1, "aaa"),
-				before: makeTag(2, "bbb"),
-				content: ["x", "y", "z"],
-			},
-		];
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb\nccc");
-	});
-
-	it("strips boundary echo from both sides (autocorrect)", () => {
-		Bun.env.PI_HL_AUTOCORRECT = "1";
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [
-			{
-				op: "insert",
-				after: makeTag(1, "aaa"),
-				before: makeTag(2, "bbb"),
-				content: ["aaa", "NEW", "bbb"],
-			},
-		];
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
-	});
-	Bun.env.PI_HL_AUTOCORRECT = undefined;
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // applyHashlineEdits — heuristics
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("applyHashlineEdits — heuristics", () => {
-	let origEnv: string | undefined;
-	beforeAll(() => {
-		origEnv = Bun.env.PI_HL_AUTOCORRECT;
-		Bun.env.PI_HL_AUTOCORRECT = "1";
-	});
-	afterAll(() => {
-		Bun.env.PI_HL_AUTOCORRECT = origEnv;
-	});
-
-	it("strips insert-after anchor echo", () => {
+	it("accepts polluted src that starts with LINE#ID but includes trailing content", () => {
 		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(2, "bbb"), content: ["bbb", "NEW"] }];
-
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nbbb\nNEW\nccc");
-	});
-
-	it("strips range boundary echo and preserves whitespace on unchanged lines", () => {
-		const content = [
-			"import { foo } from 'x';",
-			"if (cond) {",
-			"  doA();",
-			"} else {",
-			"  doB();",
-			"}",
-			"after();",
-		].join("\n");
-
-		const start = 2;
-		const end = 6;
+		const srcHash = computeLineHash(2, "bbb");
 		const edits: HashlineEdit[] = [
 			{
 				op: "replace",
-				first: makeTag(start, "if (cond) {"),
-				last: makeTag(end, "}"),
-				// Echoes line after the range ("after();") and also reformats the import line.
-				content: ["if (cond) {", "  doA();", "} else {", "  doB();", "}", "after();"],
+				pos: parseTag(`2#${srcHash}export function foo(a, b) {}`), // comma in trailing content
+				lines: ["BBB"],
 			},
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		// Should not duplicate the trailing boundary line.
-		expect(result.content.split("\n")).toHaveLength(7);
-		expect(result.content).toBe(content);
+		expect(result.lines).toBe("aaa\nBBB\nccc");
 	});
 
 	it("does not override model whitespace choices in replacement content", () => {
@@ -553,13 +487,13 @@ describe("applyHashlineEdits — heuristics", () => {
 		const edits: HashlineEdit[] = [
 			{
 				op: "replace",
-				first: makeTag(1, "import { foo } from 'x';"),
-				last: makeTag(2, "import { bar } from 'y';"),
-				content: ["import {foo} from 'x';", "import { bar } from 'y';", "// added"],
+				pos: makeTag(1, "import { foo } from 'x';"),
+				end: makeTag(2, "import { bar } from 'y';"),
+				lines: ["import {foo} from 'x';", "import { bar } from 'y';", "// added"],
 			},
 		];
 		const result = applyHashlineEdits(content, edits);
-		const outLines = result.content.split("\n");
+		const outLines = result.lines.split("\n");
 		// Model's whitespace choice is respected -- no longer overridden
 		expect(outLines[0]).toBe("import {foo} from 'x';");
 		expect(outLines[1]).toBe("import { bar } from 'y';");
@@ -567,99 +501,12 @@ describe("applyHashlineEdits — heuristics", () => {
 		expect(outLines[3]).toBe("const x = 1;");
 	});
 
-	it("restores a long wrapped line when model reflows it across many lines", () => {
-		const longLine =
-			"const options = veryLongIdentifier + anotherLongIdentifier + thirdLongIdentifier + fourthLongIdentifier;";
-		const content = ["before();", longLine, "after();"].join("\n");
-		const edits: HashlineEdit[] = [
-			{
-				op: "set",
-				tag: makeTag(2, longLine),
-				content: [
-					"const",
-					"options",
-					"=",
-					"veryLongIdentifier",
-					"+",
-					"anotherLongIdentifier",
-					"+",
-					"thirdLongIdentifier",
-					"+",
-					"fourthLongIdentifier;",
-				],
-			},
-		];
-
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe(content);
-	});
-
-	it("repairs single-line replacement that absorbed the next line (prevents duplication)", () => {
-		const content = ["    typeof HOOK === 'undefined' &&", "    typeof HOOK.checkDCE !== 'function'", "tail();"].join(
-			"\n",
-		);
-
-		const edits: HashlineEdit[] = [
-			{
-				op: "set",
-				tag: makeTag(1, "    typeof HOOK === 'undefined' &&"),
-				// Model merged both lines into one and dropped indentation.
-				content: ["typeof HOOK === 'undefined' || typeof HOOK.checkDCE !== 'function'"],
-			},
-		];
-
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe(
-			["    typeof HOOK === 'undefined' || typeof HOOK.checkDCE !== 'function'", "tail();"].join("\n"),
-		);
-	});
-
-	it("repairs single-line replacement that absorbed the previous line (prevents duplication)", () => {
-		const content = [
-			"  const nativeStyleResolver: ResolveNativeStyle | void =",
-			"    resolveRNStyle || hook.resolveRNStyle;",
-			"  after();",
-		].join("\n");
-
-		const edits: HashlineEdit[] = [
-			{
-				op: "set",
-				tag: makeTag(2, "    resolveRNStyle || hook.resolveRNStyle;"),
-				// Model absorbed the declaration line and dropped indentation.
-				content: ["const nativeStyleResolver: ResolveNativeStyle | void = resolveRNStyle ?? hook.resolveRNStyle;"],
-			},
-		];
-
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe(
-			[
-				"  const nativeStyleResolver: ResolveNativeStyle | void = resolveRNStyle ?? hook.resolveRNStyle;",
-				"  after();",
-			].join("\n"),
-		);
-	});
-
-	it("accepts polluted src that starts with LINE#ID but includes trailing content", () => {
-		const content = "aaa\nbbb\nccc";
-		const srcHash = computeLineHash(2, "bbb");
-		const edits: HashlineEdit[] = [
-			{
-				op: "set",
-				tag: parseTag(`2#${srcHash}export function foo(a, b) {}`), // comma in trailing content
-				content: ["BBB"],
-			},
-		];
-
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBBB\nccc");
-	});
-
 	it("treats same-line ranges as single-line replacements", () => {
 		const content = "aaa\nbbb\nccc";
 		const good = makeTag(2, "bbb");
-		const edits: HashlineEdit[] = [{ op: "replace", first: good, last: good, content: ["BBB"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: good, end: good, lines: ["BBB"] }];
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBBB\nccc");
+		expect(result.lines).toBe("aaa\nBBB\nccc");
 	});
 });
 
@@ -671,35 +518,35 @@ describe("applyHashlineEdits — multiple edits", () => {
 	it("applies two non-overlapping replaces (bottom-up safe)", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
 		const edits: HashlineEdit[] = [
-			{ op: "set", tag: makeTag(2, "bbb"), content: ["BBB"] },
-			{ op: "set", tag: makeTag(4, "ddd"), content: ["DDD"] },
+			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
+			{ op: "replace", pos: makeTag(4, "ddd"), lines: ["DDD"] },
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBBB\nccc\nDDD\neee");
+		expect(result.lines).toBe("aaa\nBBB\nccc\nDDD\neee");
 		expect(result.firstChangedLine).toBe(2);
 	});
 
 	it("applies replace + delete in one call", () => {
 		const content = "aaa\nbbb\nccc\nddd";
 		const edits: HashlineEdit[] = [
-			{ op: "set", tag: makeTag(2, "bbb"), content: ["BBB"] },
-			{ op: "set", tag: makeTag(4, "ddd"), content: [] },
+			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
+			{ op: "replace", pos: makeTag(4, "ddd"), lines: [] },
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nBBB\nccc");
+		expect(result.lines).toBe("aaa\nBBB\nccc");
 	});
 
-	it("applies replace + insert in one call", () => {
+	it("applies replace + append in one call", () => {
 		const content = "aaa\nbbb\nccc";
 		const edits: HashlineEdit[] = [
-			{ op: "set", tag: makeTag(3, "ccc"), content: ["CCC"] },
-			{ op: "append", after: makeTag(1, "aaa"), content: ["INSERTED"] },
+			{ op: "replace", pos: makeTag(3, "ccc"), lines: ["CCC"] },
+			{ op: "append", pos: makeTag(1, "aaa"), lines: ["INSERTED"] },
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nINSERTED\nbbb\nCCC");
+		expect(result.lines).toBe("aaa\nINSERTED\nbbb\nCCC");
 	});
 
 	it("applies non-overlapping edits against original anchors when line counts change", () => {
@@ -707,21 +554,21 @@ describe("applyHashlineEdits — multiple edits", () => {
 		const edits: HashlineEdit[] = [
 			{
 				op: "replace",
-				first: makeTag(2, "two"),
-				last: makeTag(3, "three"),
-				content: ["TWO_THREE"],
+				pos: makeTag(2, "two"),
+				end: makeTag(3, "three"),
+				lines: ["TWO_THREE"],
 			},
-			{ op: "set", tag: makeTag(6, "six"), content: ["SIX"] },
+			{ op: "replace", pos: makeTag(6, "six"), lines: ["SIX"] },
 		];
 
 		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("one\nTWO_THREE\nfour\nfive\nSIX");
+		expect(result.lines).toBe("one\nTWO_THREE\nfour\nfive\nSIX");
 	});
 
 	it("empty edits array is a no-op", () => {
 		const content = "aaa\nbbb";
 		const result = applyHashlineEdits(content, []);
-		expect(result.content).toBe(content);
+		expect(result.lines).toBe(content);
 		expect(result.firstChangedLine).toBeUndefined();
 	});
 });
@@ -734,13 +581,13 @@ describe("applyHashlineEdits — errors", () => {
 	it("rejects stale hash", () => {
 		const content = "aaa\nbbb\nccc";
 		// Use a hash that doesn't match any line (avoid 00 — ccc hashes to 00)
-		const edits: HashlineEdit[] = [{ op: "set", tag: parseTag("2#QQ"), content: ["BBB"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("2#QQ"), lines: ["BBB"] }];
 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
 	});
 
 	it("stale hash error shows >>> markers with correct hashes", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
-		const edits: HashlineEdit[] = [{ op: "set", tag: parseTag("2#QQ"), content: ["BBB"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("2#QQ"), lines: ["BBB"] }];
 
 		try {
 			applyHashlineEdits(content, edits);
@@ -764,8 +611,8 @@ describe("applyHashlineEdits — errors", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
 		// Use hashes that don't match any line (avoid 00 — ccc hashes to 00)
 		const edits: HashlineEdit[] = [
-			{ op: "set", tag: parseTag("2#ZZ"), content: ["BBB"] },
-			{ op: "set", tag: parseTag("4#ZZ"), content: ["DDD"] },
+			{ op: "replace", pos: parseTag("2#ZZ"), lines: ["BBB"] },
+			{ op: "replace", pos: parseTag("4#ZZ"), lines: ["DDD"] },
 		];
 
 		try {
@@ -786,7 +633,7 @@ describe("applyHashlineEdits — errors", () => {
 	it("does not relocate stale line refs even when hash uniquely matches another line", () => {
 		const content = "aaa\nbbb\nccc";
 		const staleButUnique = parseTag(`2#${computeLineHash(1, "ccc")}`);
-		const edits: HashlineEdit[] = [{ op: "set", tag: staleButUnique, content: ["CCC"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: staleButUnique, lines: ["CCC"] }];
 		try {
 			applyHashlineEdits(content, edits);
 			expect.unreachable("should have thrown");
@@ -800,61 +647,116 @@ describe("applyHashlineEdits — errors", () => {
 	it("does not relocate when expected hash is non-unique", () => {
 		const content = "dup\nmid\ndup";
 		const staleDuplicate = parseTag(`2#${computeLineHash(1, "dup")}`);
-		const edits: HashlineEdit[] = [{ op: "set", tag: staleDuplicate, content: ["DUP"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: staleDuplicate, lines: ["DUP"] }];
 
 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
 	});
 
 	it("rejects out-of-range line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "set", tag: parseTag("10#ZZ"), content: ["X"] }];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("10#ZZ"), lines: ["X"] }];
 
 		expect(() => applyHashlineEdits(content, edits)).toThrow(/does not exist/);
 	});
 
 	it("rejects range with start > end", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
-		const edits: HashlineEdit[] = [
-			{ op: "replace", first: makeTag(5, "eee"), last: makeTag(2, "bbb"), content: ["X"] },
-		];
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(5, "eee"), end: makeTag(2, "bbb"), lines: ["X"] }];
 
 		expect(() => applyHashlineEdits(content, edits)).toThrow();
 	});
 
-	it("rejects insert with after and empty text", () => {
+	it("accepts append/prepend with empty text by inserting empty lines", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: [] }];
+		const appendEdits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: [] }];
+		expect(applyHashlineEdits(content, appendEdits).lines).toBe("aaa\n\nbbb");
 
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+		const prependEdits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: [] }];
+		expect(applyHashlineEdits(content, prependEdits).lines).toBe("\naaa\nbbb");
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// stripNewLinePrefixes — regression tests for DIFF_PLUS_RE
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("stripNewLinePrefixes", () => {
+	it("strips leading '+' when majority of lines start with '+'", () => {
+		const lines = ["+line one", "+line two", "+line three"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["line one", "line two", "line three"]);
 	});
 
-	it("rejects insert with before and empty text", () => {
-		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: [] }];
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+	it("does NOT strip leading '-' from Markdown list items", () => {
+		const lines = ["- item one", "- item two", "- item three"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["- item one", "- item two", "- item three"]);
 	});
 
-	it("rejects insert with both anchors and empty text", () => {
-		const content = "aaa\nbbb";
+	it("does NOT strip leading '-' from checkbox list items", () => {
+		const lines = ["- [ ] task one", "- [x] task two", "- [ ] task three"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["- [ ] task one", "- [x] task two", "- [ ] task three"]);
+	});
+
+	it("does NOT strip when fewer than 50% of lines start with '+'", () => {
+		const lines = ["+added", "regular", "regular", "regular"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["+added", "regular", "regular", "regular"]);
+	});
+
+	it("strips hashline prefixes when majority of lines carry them", () => {
+		const lines = ["1#AB:foo", "2#CD:bar", "3#EF:baz"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["foo", "bar", "baz"]);
+	});
+
+	it("does NOT strip '+' when line starts with '++'", () => {
+		const lines = ["++conflict marker", "++another"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["++conflict marker", "++another"]);
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// hashlineParseContent — string vs array input
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("hashlineParseContent", () => {
+	it("returns empty array for null", () => {
+		expect(hashlineParseText(null)).toEqual([]);
+	});
+
+	it("returns array as-is (bypasses stripNewLinePrefixes)", () => {
+		const input = ["- [x] done", "- [ ] todo"];
+		expect(hashlineParseText(input)).toBe(input);
+	});
+
+	it("splits string on newline and preserves Markdown list '-' prefix", () => {
+		const result = hashlineParseText("- item one\n- item two\n- item three");
+		expect(result).toEqual(["- item one", "- item two", "- item three"]);
+	});
+
+	it("strips '+' diff markers from string input", () => {
+		const result = hashlineParseText("+line one\n+line two");
+		expect(result).toEqual(["line one", "line two"]);
+	});
+
+	it("regression: set op with Markdown list string content preserves '-' in file", () => {
+		// Reproducer for the bug where DIFF_PLUS_RE = /^[+-](?![+-])/ matched '-'
+		// and stripped it from every line, corrupting list-item replacements.
+		const fileContent = "# Title\n- old item\n- old item 2\nfooter";
 		const edits: HashlineEdit[] = [
-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(2, "bbb"), content: [] },
+			{
+				op: "replace",
+				pos: makeTag(2, "- old item"),
+				lines: hashlineParseText("- [x] new item"),
+			},
 		];
-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+		const result = applyHashlineEdits(fileContent, edits);
+		expect(result.lines).toBe("# Title\n- [x] new item\n- old item 2\nfooter");
 	});
 
-	it("inserts with non-adjacent anchors (before the 'before' anchor)", () => {
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [
-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(3, "ccc"), content: ["NEW"] },
-		];
-		const result = applyHashlineEdits(content, edits);
-		expect(result.content).toBe("aaa\nbbb\nNEW\nccc");
-	});
-	it("rejects insert with reversed anchors (before <= after)", () => {
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [
-			{ op: "insert", after: makeTag(3, "ccc"), before: makeTag(1, "aaa"), content: ["NEW"] },
-		];
-		expect(() => applyHashlineEdits(content, edits)).toThrow(/after.*<.*before/);
+	it("regression: set op replacing multiple list items preserves all '-' prefixes", () => {
+		// All replacement lines start with '- ', triggering the 50% heuristic when '-' matched.
+		const fileContent = "- [x] done\n- [ ] pending\n- [ ] also pending";
+		const newContent = hashlineParseText("- [x] done");
+		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "- [ ] pending"), lines: newContent }];
+		const result = applyHashlineEdits(fileContent, edits);
+		expect(result.lines).toBe("- [x] done\n- [x] done\n- [ ] also pending");
 	});
 });

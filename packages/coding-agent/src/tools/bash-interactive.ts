@@ -12,8 +12,7 @@ import {
 import { Terminal } from "@xterm/headless";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
-import { getStateIcon } from "../tui";
-import { replaceTabs } from "./render-utils";
+import { formatStatusIcon, replaceTabs } from "./render-utils";
 
 export interface BashInteractiveResult extends OutputSummary {
 	exitCode: number | undefined;
@@ -234,10 +233,10 @@ class BashInteractiveOverlayComponent implements Component {
 		}
 		const statusIcon =
 			this.#state === "running"
-				? getStateIcon("running", this.uiTheme)
+				? formatStatusIcon("running", this.uiTheme)
 				: this.#state === "complete" && this.#exitCode === 0
-					? getStateIcon("success", this.uiTheme)
-					: getStateIcon("warning", this.uiTheme);
+					? formatStatusIcon("success", this.uiTheme)
+					: formatStatusIcon("warning", this.uiTheme);
 		const title = this.uiTheme.fg("accent", "Console");
 		const statusBadge = `${this.uiTheme.fg("dim", this.uiTheme.format.bracketLeft)}${this.#stateText()}${this.uiTheme.fg("dim", this.uiTheme.format.bracketRight)}`;
 		const prefix = `${statusIcon} ${title} `;
@@ -275,7 +274,7 @@ class BashInteractiveOverlayComponent implements Component {
 	}
 }
 
-const NO_PAGER_ENV = {
+export const NO_PAGER_ENV = {
 	// Disable pagers so commands don't block on interactive views.
 	PAGER: "cat",
 	GIT_PAGER: "cat",

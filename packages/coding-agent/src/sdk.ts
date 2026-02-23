@@ -1,19 +1,30 @@
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	INTENT_FIELD,
+	type ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import { type Message, type Model, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
+import { AsyncJobManager } from "./async";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability } from "./capability/rule";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelString, parseModelPattern, parseModelString } from "./config/model-resolver";
-import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
+import {
+	loadPromptTemplates as loadPromptTemplatesInternal,
+	type PromptTemplate,
+	renderPromptTemplate,
+} from "./config/prompt-templates";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
-import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { resolveConfigValue } from "./config/resolve-config-value";
 import { initializeWithSettings } from "./discovery";
 import { TtsrManager } from "./export/ttsr";
@@ -42,16 +53,18 @@ import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal }
 import {
 	AgentProtocolHandler,
 	ArtifactProtocolHandler,
-	DocsProtocolHandler,
 	InternalUrlRouter,
+	JobsProtocolHandler,
+	LocalProtocolHandler,
 	MemoryProtocolHandler,
-	PlanProtocolHandler,
+	PiProtocolHandler,
 	RuleProtocolHandler,
 	SkillProtocolHandler,
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
+import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
 import { AgentSession } from "./session/agent-session";
 import { AuthStorage } from "./session/auth-storage";
@@ -716,8 +729,56 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let session: AgentSession;
 
 	const enableLsp = options.enableLsp ?? true;
+	const asyncEnabled = settings.get("async.enabled");
+	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 15));
+	const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
+	const ASYNC_PREVIEW_MAX_CHARS = 4_000;
+	const formatAsyncResultForFollowUp = async (result: string): Promise<string> => {
+		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
+			return result;
+		}
 
-	let artifactManager: ArtifactManager | null = null;
+		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		try {
+			const { path: artifactPath, id: artifactId } = await sessionManager.allocateArtifactPath("async");
+			if (artifactPath && artifactId) {
+				await Bun.write(artifactPath, result);
+				return `${preview}\nFull output: artifact://${artifactId}`;
+			}
+		} catch (error) {
+			logger.warn("Failed to persist async follow-up artifact", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+
+		return preview;
+	};
+	const asyncJobManager = asyncEnabled
+		? new AsyncJobManager({
+				maxRunningJobs: asyncMaxJobs,
+				onJobComplete: async (jobId, result, job) => {
+					if (!session) return;
+					const formattedResult = await formatAsyncResultForFollowUp(result);
+					const message = renderPromptTemplate(asyncResultTemplate, { jobId, result: formattedResult });
+					const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
+					await session.sendCustomMessage(
+						{
+							customType: "async-result",
+							content: message,
+							display: true,
+							details: {
+								jobId,
+								type: job?.type,
+								label: job?.label,
+								durationMs,
+							},
+						},
+						{ deliverAs: "followUp", triggerTurn: true },
+					);
+				},
+			})
+		: undefined;
+
 	const toolSession: ToolSession = {
 		cwd,
 		hasUI: options.hasUI ?? false,
@@ -745,40 +806,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		getPlanModeState: () => session.getPlanModeState(),
 		getCompactContext: () => session.formatCompactContext(),
-		getArtifactManager: () => {
-			if (artifactManager) {
-				return artifactManager;
+		getTodoPhases: () => session.getTodoPhases(),
+		setTodoPhases: phases => session.setTodoPhases(phases),
+		allocateOutputArtifact: async toolType => {
+			try {
+				return await sessionManager.allocateArtifactPath(toolType);
+			} catch {
+				return {};
 			}
-			const sessionFile = sessionManager.getSessionFile();
-			if (!sessionFile) {
-				return null;
-			}
-			const manager = new ArtifactManager(sessionFile);
-			artifactManager = manager;
-			return manager;
 		},
 		settings,
 		authStorage,
 		modelRegistry,
+		asyncJobManager,
 	};
 
-	// Initialize internal URL router for internal protocols (agent://, artifact://, plan://, memory://, skill://, rule://)
+	// Initialize internal URL router for internal protocols (agent://, artifact://, memory://, skill://, rule://, local://)
 	const internalRouter = new InternalUrlRouter();
-	const getArtifactsDir = () => {
-		const sessionFile = sessionManager.getSessionFile();
-		return sessionFile ? sessionFile.slice(0, -6) : null; // strip .jsonl
-	};
+	const getArtifactsDir = () => sessionManager.getArtifactsDir();
 	internalRouter.register(new AgentProtocolHandler({ getArtifactsDir }));
 	internalRouter.register(new ArtifactProtocolHandler({ getArtifactsDir }));
 	internalRouter.register(
-		new PlanProtocolHandler({
-			getPlansDirectory: () => settings.getPlansDirectory(),
-			cwd,
+		new MemoryProtocolHandler({
+			getMemoryRoot: () => getMemoryRoot(agentDir, settings.getCwd()),
 		}),
 	);
 	internalRouter.register(
-		new MemoryProtocolHandler({
-			getMemoryRoot: () => getMemoryRoot(agentDir, settings.getCwd()),
+		new LocalProtocolHandler({
+			getArtifactsDir,
+			getSessionId: () => sessionManager.getSessionId(),
 		}),
 	);
 	internalRouter.register(
@@ -791,7 +847,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getRules: () => rulebookRules,
 		}),
 	);
-	internalRouter.register(new DocsProtocolHandler());
+	internalRouter.register(new PiProtocolHandler());
+	internalRouter.register(new JobsProtocolHandler({ getAsyncJobManager: () => asyncJobManager }));
 	toolSession.internalRouter = internalRouter;
 	toolSession.getArtifactsDir = getArtifactsDir;
 	toolSession.agentOutputManager = new AgentOutputManager(
@@ -1064,6 +1121,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 
 	const repeatToolDescriptions = settings.get("repeatToolDescriptions");
+	const intentField = settings.get("tools.intentTracing") || $env.PI_INTENT_TRACING === "1" ? INTENT_FIELD : undefined;
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
 		const memoryInstructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
@@ -1078,6 +1136,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills") as SkillsSettings,
 			appendSystemPrompt: memoryInstructions,
 			repeatToolDescriptions,
+			intentField,
 		});
 
 		if (options.systemPrompt === undefined) {
@@ -1096,6 +1155,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: memoryInstructions,
 				repeatToolDescriptions,
+				intentField,
 			});
 		}
 		return options.systemPrompt(defaultPrompt);
@@ -1233,7 +1293,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		cursorExecHandlers,
 		transformToolCallArguments: obfuscator?.hasSecrets() ? args => obfuscator!.deobfuscateObject(args) : undefined,
-		intentTracing: settings.get("tools.intentTracing") || $env.PI_INTENT_TRACING === "1",
+		intentTracing: !!intentField,
 	});
 	cursorEventEmitter = event => agent.emitExternalEvent(event);
 
@@ -1269,6 +1329,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		ttsrManager,
 		forceCopilotAgentInitiator,
 		obfuscator,
+		asyncJobManager,
 	});
 
 	if (model?.api === "openai-codex-responses") {

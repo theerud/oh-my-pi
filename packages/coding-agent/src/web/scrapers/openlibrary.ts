@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, loadPage } from "./types";
+import { buildResult, loadPage, tryParseJson } from "./types";
 
 interface OpenLibraryAuthor {
 	name?: string;
@@ -96,17 +96,7 @@ export const handleOpenLibrary: SpecialHandler = async (
 
 		if (!md) return null;
 
-		const output = finalizeOutput(md);
-		return {
-			url,
-			finalUrl: url,
-			contentType: "text/markdown",
-			method: "openlibrary",
-			content: output.content,
-			fetchedAt,
-			truncated: output.truncated,
-			notes: ["Fetched via Open Library API"],
-		};
+		return buildResult(md, { url, method: "openlibrary", fetchedAt, notes: ["Fetched via Open Library API"] });
 	} catch {}
 
 	return null;
@@ -117,12 +107,8 @@ async function fetchWork(workId: string, timeout: number, signal?: AbortSignal):
 	const result = await loadPage(apiUrl, { timeout, signal });
 	if (!result.ok) return null;
 
-	let work: OpenLibraryWork;
-	try {
-		work = JSON.parse(result.content);
-	} catch {
-		return null;
-	}
+	const work = tryParseJson<OpenLibraryWork>(result.content);
+	if (!work) return null;
 
 	let md = `# ${work.title}\n\n`;
 
@@ -167,12 +153,8 @@ async function fetchEdition(editionId: string, timeout: number, signal?: AbortSi
 	const result = await loadPage(apiUrl, { timeout, signal });
 	if (!result.ok) return null;
 
-	let edition: OpenLibraryEdition;
-	try {
-		edition = JSON.parse(result.content);
-	} catch {
-		return null;
-	}
+	const edition = tryParseJson<OpenLibraryEdition>(result.content);
+	if (!edition) return null;
 
 	let md = `# ${edition.title}\n\n`;
 
@@ -233,19 +215,53 @@ async function fetchEdition(editionId: string, timeout: number, signal?: AbortSi
 
 async function fetchByIsbn(isbn: string, timeout: number, signal?: AbortSignal): Promise<string | null> {
 	const apiUrl = `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`;
-	const result = await loadPage(apiUrl, { timeout, signal });
-	if (!result.ok) return null;
-
-	let data: OpenLibraryBooksApiResponse;
-	try {
-		data = JSON.parse(result.content);
-	} catch {
-		return null;
+	let result = await loadPage(apiUrl, { timeout, signal });
+	if (!result.ok) {
+		result = await loadPage(apiUrl, { timeout, signal });
 	}
+	if (!result.ok) {
+		return `# Open Library Book\n\n**ISBN:** ${isbn}\n\nBook details are currently unavailable from the Open Library books API.\n`;
+	}
+
+	const data = tryParseJson<OpenLibraryBooksApiResponse>(result.content);
+	if (!data) return null;
 
 	const key = `ISBN:${isbn}`;
 	const book = data[key];
-	if (!book) return null;
+	if (!book) {
+		// Fallback: search endpoint still returns docs when api/books misses a key.
+		const searchUrl = `https://openlibrary.org/search.json?isbn=${encodeURIComponent(isbn)}&limit=1`;
+		const searchResult = await loadPage(searchUrl, { timeout, signal });
+		if (!searchResult.ok) {
+			return `# Open Library Book\n\n**ISBN:** ${isbn}\n\nBook details are currently unavailable from the Open Library search API.\n`;
+		}
+		const searchData = tryParseJson<{
+			docs?: Array<{
+				title?: string;
+				author_name?: string[];
+				first_publish_year?: number;
+				key?: string;
+			}>;
+		}>(searchResult.content);
+		const doc = searchData?.docs?.[0];
+		if (!doc?.title) {
+			return `# Open Library Book\n\n**ISBN:** ${isbn}\n\nBook details are currently unavailable from Open Library.\n`;
+		}
+
+		let fallbackMd = `# ${doc.title}\n\n`;
+		if (doc.author_name?.length) {
+			fallbackMd += `**Authors:** ${doc.author_name.join(", ")}\n`;
+		}
+		if (doc.first_publish_year) {
+			fallbackMd += `**First Published:** ${doc.first_publish_year}\n`;
+		}
+		fallbackMd += `**ISBN:** ${isbn}\n`;
+		if (doc.key) {
+			fallbackMd += `**Open Library:** https://openlibrary.org${doc.key}\n`;
+		}
+
+		return fallbackMd;
+	}
 
 	let md = `# ${book.title}\n\n`;
 

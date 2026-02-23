@@ -7,14 +7,14 @@ Classify git diff into conventional commit format.
 ## 1. Determine Scope
 
 Apply scope when 60%+ line changes target single component:
-- 150 lines in src/api/, 30 in src/lib.rs -> "api"
-- 50 lines in src/api/, 50 in src/types/ -> null (50/50 split)
+- 150 lines in src/api/, 30 in src/lib.rs → "api"
+- 50 lines in src/api/, 50 in src/types/ → null (50/50 split)
 
 Use null for: cross-cutting changes, project-wide refactoring.
 
 Forbidden scopes (use null): src, lib, include, tests, benches, examples, docs, project name, app, main, entire, all, misc.
 
-Prefer scopes from <common_scopes> over inventing new.
+Prefer scopes from <common-scopes> over inventing new.
 ## 2. Generate Details (0-6 items)
 
 Each detail:
@@ -32,7 +32,7 @@ Group 3+ similar changes: "Updated 5 test files for new API." (not five bullets)
 
 Issue references inline: (#123), (#123, #456), (#123-#125).
 
-Priority: user-visible -> perf/security -> architecture -> internal.
+Priority: user-visible → perf/security → architecture → internal.
 
 Exclude: import changes, whitespace, formatting, trivial renames, debug prints, comment-only, file moves without modification.
 
@@ -55,7 +55,7 @@ user_visible: false for: internal refactoring, performance optimizations (unless
 Omit changelog_category when user_visible false.
 </instructions>
 
-<output_format>
+<output-format>
 Call create_conventional_analysis with:
 
 {
@@ -74,7 +74,7 @@ Call create_conventional_analysis with:
 ],
 "issue_refs": []
 }
-</output_format>
+</output-format>
 
 <example name="feature-with-api">
 {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [13.1.0] - 2026-02-23
+
+### Changed
+
+- Removed per-tool `agent__intent` field description from injected schema to reduce token usage; intent format is now documented once in the system prompt instead of repeated in every tool definition
+## [12.19.0] - 2026-02-22
+### Changed
+
+- Updated tool result messages to include error details when tool execution fails
+
 ## [12.14.0] - 2026-02-19
 
 ### Added

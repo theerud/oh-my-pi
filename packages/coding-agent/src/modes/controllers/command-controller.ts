@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { copyToClipboard } from "@oh-my-pi/pi-natives";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { formatDuration, Snowflake } from "@oh-my-pi/pi-utils";
 import { setProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { $ } from "bun";
 import { reset as resetCapabilities } from "../../capability";
@@ -24,6 +24,7 @@ import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { PythonExecutionComponent } from "../../modes/components/python-execution";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
 import { createCompactionSummaryMessage } from "../../session/messages";
 import { outputMeta } from "../../tools/output-meta";
@@ -304,6 +305,47 @@ export class CommandController {
 
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new Text(info, 1, 0));
+		this.ctx.ui.requestRender();
+	}
+
+	async handleJobsCommand(): Promise<void> {
+		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
+		if (!snapshot) {
+			this.ctx.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+
+		const now = Date.now();
+		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
+		let info = `${theme.bold("Background Jobs")}\n\n`;
+		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
+
+		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
+			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
+			this.ctx.chatContainer.addChild(new Spacer(1));
+			this.ctx.chatContainer.addChild(new Text(info, 1, 0));
+			this.ctx.ui.requestRender();
+			return;
+		}
+
+		if (snapshot.running.length > 0) {
+			info += `\n${theme.bold("Running Jobs")}\n`;
+			for (const job of snapshot.running) {
+				info += `${renderJobLine(job, now)}\n`;
+				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+			}
+		}
+
+		if (snapshot.recent.length > 0) {
+			info += `\n${theme.bold("Recent Jobs")}\n`;
+			for (const job of snapshot.recent) {
+				info += `${renderJobLine(job, now)}\n`;
+				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+			}
+		}
+
+		this.ctx.chatContainer.addChild(new Spacer(1));
+		this.ctx.chatContainer.addChild(new Text(info.trimEnd(), 1, 0));
 		this.ctx.ui.requestRender();
 	}
 
@@ -778,6 +820,32 @@ export class CommandController {
 const BAR_WIDTH = 24;
 const COLUMN_WIDTH = BAR_WIDTH + 2;
 
+function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
+	const duration = formatDuration(Math.max(0, now - job.startTime));
+	const status = formatJobStatus(job.status);
+	return `${theme.fg("dim", job.id)} ${theme.fg("dim", `[${job.type}]`)} ${status} ${theme.fg("dim", `(${duration})`)}`;
+}
+
+function formatJobStatus(status: AsyncJobSnapshotItem["status"]): string {
+	if (status === "running") return theme.fg("warning", "running");
+	if (status === "completed") return theme.fg("success", "completed");
+	if (status === "cancelled") return theme.fg("dim", "cancelled");
+	return theme.fg("error", "failed");
+}
+
+function truncateJobLabel(label: string, maxWidth: number): string {
+	if (visibleWidth(label) <= maxWidth) return label;
+	if (maxWidth <= 1) return "…";
+
+	let out = "";
+	for (const char of label) {
+		const next = `${out}${char}`;
+		if (visibleWidth(`${next}…`) > maxWidth) break;
+		out = next;
+	}
+
+	return `${out}…`;
+}
 function formatProviderName(provider: string): string {
 	return provider
 		.split(/[-_]/g)
@@ -791,33 +859,6 @@ function formatNumber(value: number, maxFractionDigits = 1): string {
 
 function formatUsedAccounts(value: number): string {
 	return `${value.toFixed(2)} used`;
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.round(ms / 1000));
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	const hours = Math.floor(minutes / 60);
-	const mins = minutes % 60;
-	const days = Math.floor(hours / 24);
-	const hrs = hours % 24;
-	if (days > 0) return `${days}d ${hrs}h`;
-	if (hours > 0) return `${hours}h ${mins}m`;
-	if (minutes > 0) return `${minutes}m ${seconds}s`;
-	return `${seconds}s`;
-}
-
-function formatDurationShort(ms: number): string {
-	const totalSeconds = Math.max(0, Math.round(ms / 1000));
-	const minutes = Math.floor(totalSeconds / 60);
-	const hours = Math.floor(minutes / 60);
-	const mins = minutes % 60;
-	const days = Math.floor(hours / 24);
-	const hrs = hours % 24;
-	if (days > 0) return `${days}d${hrs > 0 ? ` ${hrs}h` : ""}`;
-	if (hours > 0) return `${hours}h${mins > 0 ? ` ${mins}m` : ""}`;
-	if (minutes > 0) return `${minutes}m`;
-	return `${totalSeconds}s`;
 }
 
 function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): string {
@@ -890,10 +931,10 @@ function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: numbe
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
 	if (limit.window?.resetInMs !== undefined) {
-		return formatDurationShort(limit.window.resetInMs);
+		return formatDuration(limit.window.resetInMs);
 	}
 	if (limit.window?.resetsAt !== undefined) {
-		return formatDurationShort(limit.window.resetsAt - nowMs);
+		return formatDuration(limit.window.resetsAt - nowMs);
 	}
 	return undefined;
 }

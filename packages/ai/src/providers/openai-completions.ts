@@ -28,12 +28,12 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
+import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
 
@@ -444,11 +444,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 		} catch (error) {
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				formatErrorMessageWithRetryAfter(error),
-				error,
-				rawRequestDump,
-			);
+			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -588,7 +584,7 @@ function maybeAddOpenRouterAnthropicCacheControl(
 	// on the last user/assistant message (walking backwards until we find text content).
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role !== "user" && msg.role !== "assistant") continue;
+		if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "developer") continue;
 
 		const content = msg.content;
 		if (typeof content === "string") {
@@ -648,19 +644,25 @@ export function convertMessages(
 		const msg = transformedMessages[i];
 		// Some providers (e.g. Mistral/Devstral) don't allow user messages directly after tool results
 		// Insert a synthetic assistant message to bridge the gap
-		if (compat.requiresAssistantAfterToolResult && lastRole === "toolResult" && msg.role === "user") {
+		if (
+			compat.requiresAssistantAfterToolResult &&
+			lastRole === "toolResult" &&
+			(msg.role === "user" || msg.role === "developer")
+		) {
 			params.push({
 				role: "assistant",
 				content: "I have processed the tool results.",
 			});
 		}
 
-		if (msg.role === "user") {
+		const devAsUser = !compat.supportsDeveloperRole;
+		if (msg.role === "user" || msg.role === "developer") {
+			const role = !devAsUser && msg.role === "developer" ? "developer" : "user";
 			if (typeof msg.content === "string") {
 				const text = sanitizeSurrogates(msg.content);
 				if (text.trim().length === 0) continue;
 				params.push({
-					role: "user",
+					role: role,
 					content: text,
 				});
 			} else {
@@ -875,23 +877,33 @@ export function convertMessages(
 			continue;
 		}
 
-		lastRole = msg.role;
+		lastRole =
+			msg.role === "developer"
+				? model.reasoning && compat.supportsDeveloperRole
+					? "developer"
+					: "system"
+				: msg.role;
 	}
 
 	return params;
 }
 
 function convertTools(tools: Tool[], compat: ResolvedOpenAICompat): OpenAI.Chat.Completions.ChatCompletionTool[] {
-	return tools.map(tool => ({
-		type: "function",
-		function: {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-			// Only include strict if provider supports it. Some reject unknown fields.
-			...(compat.supportsStrictMode !== false && { strict: false }),
-		},
-	}));
+	return tools.map(tool => {
+		const strict = !NO_STRICT && compat.supportsStrictMode !== false && tool.strict !== false;
+		return {
+			type: "function",
+			function: {
+				name: tool.name,
+				description: tool.description,
+				parameters: strict
+					? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
+					: (tool.parameters as unknown as Record<string, unknown>),
+				// Only include strict if provider supports it. Some reject unknown fields.
+				...(strict && { strict: true }),
+			},
+		};
+	});
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): StopReason {
@@ -911,6 +923,21 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): Sto
 			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
 		}
 	}
+}
+
+function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
+	if (provider === "openai" || provider === "cerebras" || provider === "together") return true;
+
+	const normalizedBaseUrl = baseUrl.toLowerCase();
+	return (
+		normalizedBaseUrl.includes("api.openai.com") ||
+		normalizedBaseUrl.includes(".openai.azure.com") ||
+		normalizedBaseUrl.includes("models.inference.ai.azure.com") ||
+		normalizedBaseUrl.includes("api.cerebras.ai") ||
+		normalizedBaseUrl.includes("api.together.xyz") ||
+		normalizedBaseUrl.includes("api.deepseek.com") ||
+		normalizedBaseUrl.includes("deepseek.com")
+	);
 }
 
 /**
@@ -961,7 +988,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAICompat 
 		requiresAssistantContentForToolCalls: isOpenRouterKimi,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
-		supportsStrictMode: true,
+		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 	};
 }
 

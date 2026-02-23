@@ -28,28 +28,15 @@ import type {
 	ToolCall,
 	ToolChoice,
 } from "../types";
+import { normalizeResponsesToolCallId, resolveCacheRetention } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
+import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if ($env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
 
 /**
  * Get prompt cache retention based on cacheRetention and base URL.
@@ -367,11 +354,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 		} catch (error) {
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				formatErrorMessageWithRetryAfter(error),
-				error,
-				rawRequestDump,
-			);
+			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -446,7 +429,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (context.tools) {
-		params.tools = convertTools(context.tools);
+		params.tools = convertTools(context.tools, supportsStrictMode(model));
 		if (options?.toolChoice) {
 			params.tool_choice = mapToOpenAIResponsesToolChoice(options.toolChoice);
 		}
@@ -483,17 +466,19 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	return params;
 }
 
-function normalizeResponsesToolCallId(id: string): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
-		return { callId, itemId };
-	}
-	const hash = Bun.hash.xxHash64(id).toString(36);
-	return { callId: `call_${hash}`, itemId: `item_${hash}` };
-}
-
 function isAzureOpenAIBaseUrl(baseUrl: string): boolean {
 	return baseUrl.includes(".openai.azure.com") || baseUrl.includes("azure.com/openai");
+}
+
+function supportsStrictMode(model: Model<"openai-responses">): boolean {
+	if (model.provider === "openai" || model.provider === "azure") return true;
+
+	const baseUrl = model.baseUrl.toLowerCase();
+	return (
+		baseUrl.includes("api.openai.com") ||
+		baseUrl.includes(".openai.azure.com") ||
+		baseUrl.includes("models.inference.ai.azure.com")
+	);
 }
 
 function convertMessages(
@@ -532,7 +517,7 @@ function convertMessages(
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
+		if (msg.role === "user" || msg.role === "developer") {
 			if (typeof msg.content === "string") {
 				// Skip empty user messages
 				if (!msg.content || msg.content.trim() === "") continue;
@@ -683,14 +668,20 @@ function convertMessages(
 	return messages;
 }
 
-function convertTools(tools: Tool[]): OpenAITool[] {
-	return tools.map(tool => ({
-		type: "function",
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-		strict: false,
-	}));
+function convertTools(tools: Tool[], strictMode: boolean): OpenAITool[] {
+	return tools.map(tool => {
+		const strict = !NO_STRICT && strictMode && tool.strict !== false;
+		const parameters = strict
+			? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
+			: (tool.parameters as unknown as Record<string, unknown>);
+		return {
+			type: "function",
+			name: tool.name,
+			description: tool.description,
+			parameters,
+			...(strict && { strict: true }),
+		} as OpenAITool;
+	});
 }
 
 function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {

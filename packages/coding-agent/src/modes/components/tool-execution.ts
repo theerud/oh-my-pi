@@ -34,6 +34,7 @@ import {
 	JSON_TREE_SCALAR_LEN_COLLAPSED,
 	JSON_TREE_SCALAR_LEN_EXPANDED,
 	renderJsonTreeLines,
+	stripInternalArgs,
 } from "../../tools/json-tree";
 import { PYTHON_DEFAULT_PREVIEW_LINES } from "../../tools/python";
 import { formatExpandHint, truncateToWidth } from "../../tools/render-utils";
@@ -323,7 +324,10 @@ export class ToolExecutionComponent extends Container {
 	#updateSpinnerAnimation(): void {
 		// Spinner for: task tool with partial result, or edit/write while args streaming
 		const isStreamingArgs = !this.#argsComplete && (this.#toolName === "edit" || this.#toolName === "write");
-		const isPartialTask = this.#isPartial && this.#toolName === "task";
+		const isBackgroundAsyncTask =
+			this.#toolName === "task" &&
+			(this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
+		const isPartialTask = this.#isPartial && this.#toolName === "task" && !isBackgroundAsyncTask;
 		const needsSpinner = isStreamingArgs || isPartialTask;
 		if (needsSpinner && !this.#spinnerInterval) {
 			this.#spinnerInterval = setInterval(() => {
@@ -628,7 +632,9 @@ export class ToolExecutionComponent extends Container {
 			lines.push("");
 			lines.push(theme.fg("dim", "Args"));
 			const tree = renderJsonTreeLines(
-				this.#args,
+				this.#args && typeof this.#args === "object" && !Array.isArray(this.#args)
+					? stripInternalArgs(this.#args as Record<string, unknown>)
+					: this.#args,
 				theme,
 				JSON_TREE_MAX_DEPTH_EXPANDED,
 				JSON_TREE_MAX_LINES_EXPANDED,

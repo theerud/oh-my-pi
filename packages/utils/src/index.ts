@@ -1,8 +1,10 @@
 export * from "./abortable";
+export * from "./async";
 export * from "./color";
 export * from "./dirs";
 export * from "./cli";
 export * from "./env";
+export * from "./format";
 export * from "./fs-error";
 export * from "./glob";
 export * as logger from "./logger";
@@ -14,3 +16,4 @@ export { AbortError, ChildProcess, Exception, NonZeroExitError } from "./ptree";
 export { Snowflake } from "./snowflake";
 export * from "./stream";
 export * from "./temp";
+export * from "./type-guards";

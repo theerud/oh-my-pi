@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import type { MessageStats, SessionEntry, SessionMessageEntry } from "./types";
 
@@ -55,37 +56,30 @@ export async function parseSessionFile(
 	sessionPath: string,
 	fromOffset = 0,
 ): Promise<{ stats: MessageStats[]; newOffset: number }> {
-	const file = Bun.file(sessionPath);
-	const exists = await file.exists();
-	if (!exists) {
-		return { stats: [], newOffset: fromOffset };
+	let bytes: Uint8Array;
+	try {
+		bytes = await Bun.file(sessionPath).bytes();
+	} catch (err) {
+		if (isEnoent(err)) return { stats: [], newOffset: fromOffset };
+		throw err;
 	}
 
-	const text = await file.text();
-	const lines = text.split("\n");
 	const folder = extractFolderFromPath(sessionPath);
 	const stats: MessageStats[] = [];
+	const start = Math.max(0, Math.min(fromOffset, bytes.length));
+	const unprocessed = bytes.subarray(start);
+	const { values, error, read } = Bun.JSONL.parseChunk(unprocessed);
+	if (error) throw error;
+	const entries = values as SessionEntry[];
 
-	let currentOffset = 0;
-	for (const line of lines) {
-		const lineLength = line.length + 1; // +1 for newline
-		if (line.trim()) {
-			try {
-				const entry = JSON.parse(line) as SessionEntry;
-				if (currentOffset >= fromOffset && entry && isAssistantMessage(entry)) {
-					const msgStats = extractStats(sessionPath, folder, entry);
-					if (msgStats) {
-						stats.push(msgStats);
-					}
-				}
-			} catch {
-				// Skip malformed JSONL lines
-			}
+	for (const entry of entries) {
+		if (isAssistantMessage(entry)) {
+			const msgStats = extractStats(sessionPath, folder, entry);
+			if (msgStats) stats.push(msgStats);
 		}
-		currentOffset += lineLength;
 	}
 
-	return { stats, newOffset: currentOffset };
+	return { stats, newOffset: start + read };
 }
 
 /**
@@ -132,11 +126,13 @@ export async function listAllSessionFiles(): Promise<string[]> {
  * Find a specific entry in a session file.
  */
 export async function getSessionEntry(sessionPath: string, entryId: string): Promise<SessionEntry | null> {
-	const file = Bun.file(sessionPath);
-	if (!(await file.exists())) return null;
-
-	const text = await file.bytes();
-	const entries = Bun.JSONL.parse(text) as SessionEntry[];
+	let entries: SessionEntry[];
+	try {
+		entries = Bun.JSONL.parse(await Bun.file(sessionPath).bytes()) as SessionEntry[];
+	} catch (err) {
+		if (isEnoent(err)) return null;
+		throw err;
+	}
 
 	for (const entry of entries) {
 		if ("id" in entry && entry.id === entryId) {

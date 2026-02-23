@@ -57,7 +57,7 @@ Tags encode enforcement level. Use consistently throughout:
 ### Special Tags
 
 ```
-<north_star>     Core values, ultimate objectives
+<north-star>     Core values, ultimate objectives
 <stance>         Communication style, attitude
 <commitment>     What the agent commits to doing
 <field>          Domain-specific mindset/context
@@ -199,7 +199,7 @@ Keep going until complete. This matters.
 ### System Prompt (Main Agent)
 
 ```markdown
-<system_directive>
+<system-directive>
 XML tags in this prompt are system-level instructions. They are not suggestions.
 
 Tag hierarchy (by enforcement level):
@@ -210,7 +210,7 @@ Tag hierarchy (by enforcement level):
 - `<instruction>` — How to operate. Follow precisely.
 - `<conditions>` — When rules apply. Check before acting.
 - `<avoid>` — Anti-patterns. Prefer alternatives.
-  </system_directive>
+  </system-directive>
 
 You are a [specific role with credentials].
 
@@ -242,9 +242,9 @@ External proof: tests, linters, type checks.
 3. State intent before each tool call
 </procedure>
 
-<north_star>
+<north-star>
 Core values. What ultimately matters.
-</north_star>
+</north-star>
 
 <prohibited>
 Actions that cause harm.
@@ -283,6 +283,31 @@ Good: "Critical: X."
 "Be thorough."
 "Keep going until fully resolved."
 ```
+
+### Normative Language (RFC 2119)
+
+All prompt prose that prescribes behavior MUST use RFC 2119 key words in **full caps**. This removes ambiguity about whether an instruction is absolute or advisory.
+
+| Keyword | Meaning | Replaces |
+| --- | --- | --- |
+| **MUST** / **REQUIRED** | Absolute requirement | "always", "make sure", "ensure", "do" |
+| **MUST NOT** / **PROHIBITED** | Absolute prohibition | "never", "do not", "don't", "strictly prohibited" |
+| **SHOULD** / **RECOMMENDED** | Strong preference; deviation allowed with known tradeoffs | "prefer", "recommend", "it's best to" |
+| **SHOULD NOT** / **NOT RECOMMENDED** | Strong discouragement; deviation allowed with known tradeoffs | "avoid", "try not to" |
+| **MAY** / **OPTIONAL** | Truly optional | "can", "may", "you could" |
+
+```
+Bad:  "Never edit from a grep snippet alone"
+Good: "You MUST NOT edit from a grep snippet alone"
+
+Bad:  "Prefer unit tests over mocks"
+Good: "You SHOULD prefer unit tests over mocks"
+
+Bad:  "Make sure to run lsp references before modifying a symbol"
+Good: "You MUST run lsp references before modifying any symbol"
+```
+
+**What not to convert**: factual/descriptive sentences (what a tool returns, what a parameter does), code blocks, examples, schema definitions, Handlebars template syntax. Only prescriptive prose gets RFC treatment.
 
 ### Positive Framing
 
@@ -573,6 +598,7 @@ Read-only. Call `submit_result` when done. This matters.
 - [ ] **Specificity**: Exact formats, limits, constraints—not vague?
 - [ ] **Token efficiency**: Each sentence justifies its cost?
 - [ ] **Verification**: External feedback loop if correctness matters?
+- [ ] **RFC 2119 normative language**: All prescriptive sentences use MUST/MUST NOT/SHOULD/MAY in caps?
 - [ ] **Persistence**: "Keep going until complete" for complex tasks?
 
 **High-impact interventions: persistence, tool verification, planning, context positioning, urgency.**
@@ -590,7 +616,7 @@ Structure:    <role> <context> <procedure> <directives> <parameters> <output>
 Capability:   <strengths> <tools> <operations>
 Examples:     <example name="kebab-case-name">
 Data:         <environment> <data> <documents>
-Special:      <north_star> <stance> <commitment> <field> <protocol>
+Special:      <north-star> <stance> <commitment> <field> <protocol>
 ```
 
 ### Example Name Patterns

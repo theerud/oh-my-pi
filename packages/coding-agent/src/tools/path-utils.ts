@@ -50,7 +50,8 @@ function normalizeAtPrefix(filePath: string): string {
 		withoutAt.startsWith("agent://") ||
 		withoutAt.startsWith("artifact://") ||
 		withoutAt.startsWith("skill://") ||
-		withoutAt.startsWith("rule://")
+		withoutAt.startsWith("rule://") ||
+		withoutAt.startsWith("local://")
 	) {
 		return withoutAt;
 	}
@@ -58,15 +59,21 @@ function normalizeAtPrefix(filePath: string): string {
 	return filePath;
 }
 
+export function expandTilde(filePath: string, home?: string): string {
+	const h = home ?? os.homedir();
+	if (filePath === "~") return h;
+	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
+		return h + filePath.slice(1);
+	}
+	if (filePath.startsWith("~")) {
+		return path.join(h, filePath.slice(1));
+	}
+	return filePath;
+}
+
 export function expandPath(filePath: string): string {
 	const normalized = normalizeUnicodeSpaces(normalizeAtPrefix(filePath));
-	if (normalized === "~") {
-		return os.homedir();
-	}
-	if (normalized.startsWith("~/")) {
-		return os.homedir() + normalized.slice(1);
-	}
-	return normalized;
+	return expandTilde(normalized);
 }
 
 /**

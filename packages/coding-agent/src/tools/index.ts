@@ -1,5 +1,6 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, logger } from "@oh-my-pi/pi-utils";
+import type { AsyncJobManager } from "../async";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { Skill } from "../extensibility/skills";
@@ -9,15 +10,16 @@ import { checkPythonKernelAvailability } from "../ipy/kernel";
 import { LspTool } from "../lsp";
 import { EditTool } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
-import type { ArtifactManager } from "../session/artifacts";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { EventBus } from "../utils/event-bus";
 import { SearchTool } from "../web/search";
 import { AskTool } from "./ask";
+import { AwaitTool } from "./await-tool";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { CalculatorTool } from "./calculator";
+import { CancelJobTool } from "./cancel-job";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FetchTool } from "./fetch";
 import { FindTool } from "./find";
@@ -29,7 +31,7 @@ import { ReadTool } from "./read";
 import { reportFindingTool } from "./review";
 import { loadSshTool } from "./ssh";
 import { SubmitResultTool } from "./submit-result";
-import { TodoWriteTool } from "./todo-write";
+import { type TodoPhase, TodoWriteTool } from "./todo-write";
 import { WriteTool } from "./write";
 
 // Exa MCP tools (22 tools)
@@ -52,9 +54,11 @@ export * from "../session/streaming-output";
 export { BUNDLED_AGENTS, TaskTool } from "../task";
 export * from "../web/search";
 export { AskTool, type AskToolDetails } from "./ask";
+export { AwaitTool, type AwaitToolDetails } from "./await-tool";
 export { BashTool, type BashToolDetails, type BashToolInput, type BashToolOptions } from "./bash";
 export { BrowserTool, type BrowserToolDetails } from "./browser";
 export { CalculatorTool, type CalculatorToolDetails } from "./calculator";
+export { CancelJobTool, type CancelJobToolDetails } from "./cancel-job";
 export { type ExitPlanModeDetails, ExitPlanModeTool } from "./exit-plan-mode";
 export { FetchTool, type FetchToolDetails } from "./fetch";
 export { type FindOperations, FindTool, type FindToolDetails, type FindToolInput, type FindToolOptions } from "./find";
@@ -66,7 +70,13 @@ export { ReadTool, type ReadToolDetails, type ReadToolInput } from "./read";
 export { reportFindingTool, type SubmitReviewDetails } from "./review";
 export { loadSshTool, type SSHToolDetails, SshTool } from "./ssh";
 export { SubmitResultTool } from "./submit-result";
-export { type TodoItem, TodoWriteTool, type TodoWriteToolDetails } from "./todo-write";
+export {
+	getLatestTodoPhasesFromEntries,
+	type TodoItem,
+	type TodoPhase,
+	TodoWriteTool,
+	type TodoWriteToolDetails,
+} from "./todo-write";
 export { WriteTool, type WriteToolDetails, type WriteToolInput } from "./write";
 
 /** Tool type (AgentTool from pi-ai) */
@@ -108,10 +118,10 @@ export interface ToolSession {
 	getSessionFile: () => string | null;
 	/** Get session ID */
 	getSessionId?: () => string | null;
-	/** Get artifact manager (allocated per ToolSession) */
-	getArtifactManager?: () => ArtifactManager | null;
-	/** Get artifacts directory for artifact:// URLs and $ARTIFACTS env var */
+	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
+	/** Allocate a new artifact path and ID for session-scoped truncated output. */
+	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
 	/** Get resolved model string if explicitly set for this session */
@@ -128,12 +138,18 @@ export interface ToolSession {
 	internalRouter?: InternalUrlRouter;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
+	/** Async background job manager for bash/task async execution */
+	asyncJobManager?: AsyncJobManager;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Get compact conversation context for subagents (excludes tool results, system prompts) */
 	getCompactContext?: () => string;
+	/** Get cached todo phases for this session. */
+	getTodoPhases?: () => TodoPhase[];
+	/** Replace cached todo phases for this session. */
+	setTodoPhases?: (phases: TodoPhase[]) => void;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -152,6 +168,8 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	read: s => new ReadTool(s),
 	browser: s => new BrowserTool(s),
 	task: TaskTool.create,
+	cancel_job: CancelJobTool.createIf,
+	await: AwaitTool.createIf,
 	todo_write: s => new TodoWriteTool(s),
 	fetch: s => new FetchTool(s),
 	web_search: s => new SearchTool(s),

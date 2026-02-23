@@ -138,21 +138,23 @@ function injectIntentIntoSchema(schema: unknown): unknown {
 		? requiredValue.filter((item): item is string => typeof item === "string")
 		: [];
 	if (INTENT_FIELD in properties) {
-		if (required.includes(INTENT_FIELD)) return schema;
+		const { [INTENT_FIELD]: intentProp, ...rest } = properties;
+		const needsReorder = Object.keys(properties)[0] !== INTENT_FIELD;
+		const needsRequired = !required.includes(INTENT_FIELD);
+		if (!needsReorder && !needsRequired) return schema;
 		return {
 			...schemaRecord,
-			required: [...required, INTENT_FIELD],
+			...(needsReorder ? { properties: { [INTENT_FIELD]: intentProp, ...rest } } : {}),
+			...(needsRequired ? { required: [...required, INTENT_FIELD] } : {}),
 		};
 	}
 	return {
 		...schemaRecord,
 		properties: {
-			...properties,
 			[INTENT_FIELD]: {
 				type: "string",
-				description:
-					"Describe intent as one sentence in present participle form (e.g., Inserting comment before the function) with no trailing period",
 			},
+			...properties,
 		},
 		required: [...required, INTENT_FIELD],
 	};
@@ -225,7 +227,7 @@ async function runLoop(
 				const toolCalls = message.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 				const toolResults: ToolResultMessage[] = [];
 				for (const toolCall of toolCalls) {
-					const result = createAbortedToolResult(toolCall, stream, message.stopReason);
+					const result = createAbortedToolResult(toolCall, stream, message.stopReason, message.errorMessage);
 					currentContext.messages.push(result);
 					newMessages.push(result);
 					toolResults.push(result);
@@ -622,10 +624,11 @@ function createAbortedToolResult(
 	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	reason: "aborted" | "error",
+	errorMessage?: string,
 ): ToolResultMessage {
 	const message = reason === "aborted" ? "Tool execution was aborted." : "Tool execution failed due to an error.";
 	const result: AgentToolResult<any> = {
-		content: [{ type: "text", text: message }],
+		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : message }],
 		details: {},
 	};
 

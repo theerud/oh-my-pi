@@ -258,6 +258,7 @@ export class SearchTool implements AgentTool<typeof webSearchSchema, SearchRende
 	readonly label = "Web Search";
 	readonly description: string;
 	readonly parameters = webSearchSchema;
+	readonly strict = true;
 
 	constructor(_session: ToolSession) {
 		this.description = renderPromptTemplate(webSearchDescription);
@@ -582,15 +583,6 @@ export async function getSearchTools(options: SearchToolsOptions = {}): Promise<
 
 	return tools;
 }
-
-/**
- * Check if Exa-specific web search tools are available.
- */
-export async function hasExaSearch(): Promise<boolean> {
-	const exaKey = await findExaKey();
-	return exaKey !== null;
-}
-
 export {
 	getSearchProvider,
 	setPreferredSearchProvider,

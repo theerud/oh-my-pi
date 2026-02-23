@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, formatCount, loadPage } from "./types";
+import { buildResult, formatNumber, loadPage, tryParseJson } from "./types";
 
 interface SearchcodeResult {
 	id?: number | string;
@@ -84,12 +84,8 @@ export const handleSearchcode: SpecialHandler = async (
 			const result = await loadPage(apiUrl, { timeout, signal, headers: { Accept: "application/json" } });
 			if (!result.ok) return null;
 
-			let data: SearchcodeResult;
-			try {
-				data = JSON.parse(result.content) as SearchcodeResult;
-			} catch {
-				return null;
-			}
+			const data = tryParseJson<SearchcodeResult>(result.content);
+			if (!data) return null;
 
 			const filename = data.filename || data.location || `Result ${id}`;
 			const lineNumbers = parseLineNumbers(data.lines);
@@ -116,17 +112,7 @@ export const handleSearchcode: SpecialHandler = async (
 				md += "\n\n_No snippet available._\n";
 			}
 
-			const output = finalizeOutput(md);
-			return {
-				url,
-				finalUrl: url,
-				contentType: "text/markdown",
-				method: "searchcode",
-				content: output.content,
-				fetchedAt,
-				truncated: output.truncated,
-				notes: ["Fetched via searchcode API"],
-			};
+			return buildResult(md, { url, method: "searchcode", fetchedAt, notes: ["Fetched via searchcode API"] });
 		}
 
 		const query = parsed.searchParams.get("q");
@@ -141,12 +127,8 @@ export const handleSearchcode: SpecialHandler = async (
 		const result = await loadPage(apiUrl, { timeout, signal, headers: { Accept: "application/json" } });
 		if (!result.ok) return null;
 
-		let data: SearchcodeSearchResponse;
-		try {
-			data = JSON.parse(result.content) as SearchcodeSearchResponse;
-		} catch {
-			return null;
-		}
+		const data = tryParseJson<SearchcodeSearchResponse>(result.content);
+		if (!data) return null;
 
 		const results = Array.isArray(data.results) ? data.results : [];
 		const total =
@@ -162,7 +144,7 @@ export const handleSearchcode: SpecialHandler = async (
 		md += `## Metadata\n\n`;
 		md += `**Query:** \`${query}\`\n`;
 		md += `**Page:** ${page}\n`;
-		if (total !== null) md += `**Total Results:** ${formatCount(total)}\n`;
+		if (total !== null) md += `**Total Results:** ${formatNumber(total)}\n`;
 		md += `**Result Count:** ${results.length}\n`;
 		if (typeof data.nextpage === "number") md += `**Next Page:** ${data.nextpage}\n`;
 
@@ -200,17 +182,7 @@ export const handleSearchcode: SpecialHandler = async (
 			}
 		}
 
-		const output = finalizeOutput(md);
-		return {
-			url,
-			finalUrl: url,
-			contentType: "text/markdown",
-			method: "searchcode",
-			content: output.content,
-			fetchedAt,
-			truncated: output.truncated,
-			notes: ["Fetched via searchcode API"],
-		};
+		return buildResult(md, { url, method: "searchcode", fetchedAt, notes: ["Fetched via searchcode API"] });
 	} catch {}
 
 	return null;

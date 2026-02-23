@@ -32,7 +32,7 @@ import "../tools/review";
 import { discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimit } from "./parallel";
+import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderCall, renderResult } from "./render";
 import { renderTemplate } from "./template";
 import {
@@ -109,6 +109,7 @@ function renderDescription(
 	agents: AgentDefinition[],
 	maxConcurrency: number,
 	isolationEnabled: boolean,
+	asyncEnabled: boolean,
 	disabledAgents: string[],
 ): string {
 	const filteredAgents = disabledAgents.length > 0 ? agents.filter(a => !disabledAgents.includes(a.name)) : agents;
@@ -116,6 +117,7 @@ function renderDescription(
 		agents: filteredAgents,
 		MAX_CONCURRENCY: maxConcurrency,
 		isolationEnabled,
+		asyncEnabled,
 	});
 }
 
@@ -132,6 +134,7 @@ function renderDescription(
 export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	readonly name = "task";
 	readonly label = "Task";
+	readonly strict = true;
 	readonly parameters: TaskSchema;
 	readonly renderCall = renderCall;
 	readonly renderResult = renderResult;
@@ -143,7 +146,13 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
 		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
-		return renderDescription(this.#discoveredAgents, maxConcurrency, isolationEnabled, disabledAgents);
+		return renderDescription(
+			this.#discoveredAgents,
+			maxConcurrency,
+			isolationEnabled,
+			this.session.settings.get("async.enabled"),
+			disabledAgents,
+		);
 	}
 	private constructor(
 		private readonly session: ToolSession,
@@ -169,6 +178,246 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 		params: TaskParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+	): Promise<AgentToolResult<TaskToolDetails>> {
+		const asyncEnabled = this.session.settings.get("async.enabled");
+		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
+		if (!asyncEnabled || selectedAgent?.blocking === true) {
+			return this.#executeSync(_toolCallId, params, signal, onUpdate);
+		}
+
+		const manager = this.session.asyncJobManager;
+		if (!manager) {
+			return {
+				content: [{ type: "text", text: "Async execution is enabled but no async job manager is available." }],
+				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+			};
+		}
+
+		const taskItems = params.tasks ?? [];
+		if (taskItems.length === 0) {
+			return this.#executeSync(_toolCallId, params, signal, onUpdate);
+		}
+
+		const outputManager =
+			this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+		const uniqueIds = await outputManager.allocateBatch(taskItems.map(t => t.id));
+		const fallbackAgentSource =
+			this.#discoveredAgents.find(agent => agent.name === params.agent)?.source ?? "bundled";
+		const renderedTasks = taskItems.map(taskItem => renderTemplate(params.context, taskItem));
+		const progressByTaskId = new Map<string, AgentProgress>();
+		for (let index = 0; index < renderedTasks.length; index++) {
+			const renderedTask = renderedTasks[index];
+			progressByTaskId.set(renderedTask.id, {
+				index,
+				id: renderedTask.id,
+				agent: params.agent,
+				agentSource: fallbackAgentSource,
+				status: "pending",
+				task: renderedTask.task,
+				description: renderedTask.description,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				tokens: 0,
+				durationMs: 0,
+			});
+		}
+
+		const startedJobs: Array<{ jobId: string; taskId: string }> = [];
+		const failedSchedules: string[] = [];
+		let completedJobs = 0;
+		let failedJobs = 0;
+
+		const getProgressSnapshot = (): AgentProgress[] => {
+			return Array.from(progressByTaskId.values())
+				.sort((a, b) => a.index - b.index)
+				.map(progress => structuredClone(progress));
+		};
+
+		const buildAsyncDetails = (state: "running" | "completed" | "failed", jobId: string): TaskToolDetails => ({
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			progress: getProgressSnapshot(),
+			async: { state, jobId, type: "task" },
+		});
+
+		const emitAsyncUpdate = (state: "running" | "completed" | "failed", text: string): void => {
+			const primaryJobId = startedJobs[0]?.jobId ?? "task";
+			onUpdate?.({
+				content: [{ type: "text", text }],
+				details: buildAsyncDetails(state, primaryJobId),
+			});
+		};
+
+		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
+		const semaphore = new Semaphore(maxConcurrency);
+
+		for (let i = 0; i < taskItems.length; i++) {
+			const taskItem = taskItems[i];
+			if (signal?.aborted) {
+				failedSchedules.push(`${taskItem.id}: cancelled before scheduling`);
+				const progress = progressByTaskId.get(taskItem.id);
+				if (progress) {
+					progress.status = "aborted";
+				}
+				continue;
+			}
+
+			const uniqueId = uniqueIds[i];
+			const singleParams: TaskParams = { ...params, tasks: [taskItem] };
+			const label = uniqueId;
+			try {
+				const jobId = manager.register(
+					"task",
+					label,
+					async ({ signal: runSignal, reportProgress }) => {
+						const startedAt = Date.now();
+						const progress = progressByTaskId.get(taskItem.id);
+						await semaphore.acquire();
+						if (runSignal.aborted) {
+							semaphore.release();
+							if (progress) {
+								progress.status = "aborted";
+							}
+							throw new Error("Aborted before execution");
+						}
+						if (progress) {
+							progress.status = "running";
+						}
+						await reportProgress(
+							`Running background task ${taskItem.id}...`,
+							buildAsyncDetails("running", startedJobs[0]?.jobId ?? label) as unknown as Record<string, unknown>,
+						);
+						try {
+							const result = await this.#executeSync(_toolCallId, singleParams, runSignal, undefined, [
+								uniqueId,
+							]);
+							const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
+							const singleResult = result.details?.results[0];
+							if (progress) {
+								progress.status = singleResult?.aborted
+									? "aborted"
+									: (singleResult?.exitCode ?? 0) === 0
+										? "completed"
+										: "failed";
+								progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
+								progress.tokens = singleResult?.tokens ?? 0;
+								progress.extractedToolData = singleResult?.extractedToolData;
+							}
+							completedJobs += 1;
+							if (singleResult && ((singleResult.aborted ?? false) || singleResult.exitCode !== 0)) {
+								failedJobs += 1;
+							}
+							const remaining = taskItems.length - completedJobs;
+							const isDone = remaining === 0;
+							await reportProgress(
+								isDone
+									? `Background task batch complete: ${completedJobs}/${taskItems.length} finished.`
+									: `Background task batch progress: ${completedJobs}/${taskItems.length} finished (${remaining} running).`,
+								buildAsyncDetails(
+									isDone ? (failedJobs > 0 || failedSchedules.length > 0 ? "failed" : "completed") : "running",
+									startedJobs[0]?.jobId ?? label,
+								) as unknown as Record<string, unknown>,
+							);
+							if (isDone) {
+								emitAsyncUpdate(
+									failedJobs > 0 || failedSchedules.length > 0 ? "failed" : "completed",
+									`Background task batch complete: ${completedJobs}/${taskItems.length} finished.`,
+								);
+							}
+							return finalText;
+						} catch (error) {
+							if (progress) {
+								progress.status = "failed";
+								progress.durationMs = Math.max(0, Date.now() - startedAt);
+							}
+							completedJobs += 1;
+							failedJobs += 1;
+							const remaining = taskItems.length - completedJobs;
+							const isDone = remaining === 0;
+							await reportProgress(
+								isDone
+									? `Background task batch complete with failures: ${failedJobs} failed.`
+									: `Background task batch progress: ${completedJobs}/${taskItems.length} finished (${remaining} running).`,
+								buildAsyncDetails(
+									isDone ? "failed" : "running",
+									startedJobs[0]?.jobId ?? label,
+								) as unknown as Record<string, unknown>,
+							);
+							if (isDone) {
+								emitAsyncUpdate(
+									"failed",
+									`Background task batch complete with failures: ${failedJobs} failed.`,
+								);
+							}
+							throw error;
+						} finally {
+							semaphore.release();
+						}
+					},
+					{
+						id: label,
+						onProgress: (text, details) => {
+							const progressDetails =
+								(details as TaskToolDetails | undefined) ??
+								buildAsyncDetails("running", startedJobs[0]?.jobId ?? label);
+							onUpdate?.({ content: [{ type: "text", text }], details: progressDetails });
+						},
+					},
+				);
+				startedJobs.push({ jobId, taskId: taskItem.id });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				failedSchedules.push(`${taskItem.id}: ${message}`);
+				const progress = progressByTaskId.get(taskItem.id);
+				if (progress) {
+					progress.status = "failed";
+				}
+			}
+		}
+
+		if (startedJobs.length === 0) {
+			const failureText = `Failed to start background task jobs: ${failedSchedules.join("; ")}`;
+			return {
+				content: [{ type: "text", text: failureText }],
+				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+			};
+		}
+
+		emitAsyncUpdate(
+			"running",
+			`Launching ${startedJobs.length} background ${startedJobs.length === 1 ? "task" : "tasks"}...`,
+		);
+
+		const scheduleFailureSummary =
+			failedSchedules.length > 0
+				? ` Failed to schedule ${failedSchedules.length} task${failedSchedules.length === 1 ? "" : "s"}.`
+				: "";
+
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Started ${startedJobs.length} background task job${startedJobs.length === 1 ? "" : "s"} using ${params.agent}.${scheduleFailureSummary} Results will be delivered when complete.`,
+				},
+			],
+			details: {
+				projectAgentsDir: null,
+				results: [],
+				totalDurationMs: 0,
+				progress: getProgressSnapshot(),
+				async: { state: "running", jobId: startedJobs[0].jobId, type: "task" },
+			},
+		};
+	}
+
+	async #executeSync(
+		_toolCallId: string,
+		params: TaskParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		preAllocatedIds?: string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
@@ -420,9 +669,14 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 
 			// Build full prompts with context prepended
 			// Allocate unique IDs across the session to prevent artifact collisions
-			const outputManager =
-				this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
-			const uniqueIds = await outputManager.allocateBatch(tasks.map(t => t.id));
+			let uniqueIds: string[];
+			if (preAllocatedIds && preAllocatedIds.length === tasks.length) {
+				uniqueIds = preAllocatedIds;
+			} else {
+				const outputManager =
+					this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+				uniqueIds = await outputManager.allocateBatch(tasks.map(t => t.id));
+			}
 			const tasksWithUniqueIds = tasks.map((t, i) => ({ ...t, id: uniqueIds[i] }));
 
 			// Build full prompts with context prepended

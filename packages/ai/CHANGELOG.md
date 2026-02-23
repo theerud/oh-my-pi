@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [12.19.1] - 2026-02-22
+### Added
+
+- Exported `isProviderRetryableError` function for detecting rate-limit and transient stream errors
+- Support for retrying malformed JSON stream-envelope parse errors from Anthropic-compatible proxy endpoints
+
+### Changed
+
+- Expanded retry detection to include JSON parse errors (unterminated strings, unexpected end of input) in addition to rate-limit errors
+
+## [12.19.0] - 2026-02-22
 ### Added
 
 - Added GitLab Duo provider with support for Claude, GPT-5, and other models via GitLab AI Gateway
@@ -14,6 +25,7 @@
 
 ### Changed
 
+- Enhanced `getModelMapping()` to support both GitLab Duo alias IDs (e.g., `duo-chat-gpt-5-codex`) and canonical model IDs (e.g., `gpt-5-codex`) for improved model resolution flexibility
 - Migrated `AuthCredentialStore` and `AuthStorage` into `@oh-my-pi/pi-ai` as shared credential primitives for downstream packages
 - Moved Anthropic auth helpers (`findAnthropicAuth`, `isOAuthToken`, `buildAnthropicSearchHeaders`, `buildAnthropicUrl`) into shared AI utilities for reuse across providers
 - Replaced `CliAuthStorage` with `AuthCredentialStore` for improved credential management with multiple credentials per provider

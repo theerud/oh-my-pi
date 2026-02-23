@@ -59,6 +59,7 @@ export class SubmitResultTool implements AgentTool<TObject, SubmitResultDetails>
 		"Finish the task with structured JSON output. Call exactly once at the end of the task.\n\n" +
 		"If you cannot complete the task, call with status='aborted' and an error message.";
 	readonly parameters: TObject;
+	readonly strict = true;
 
 	readonly #validate?: ValidateFunction;
 	readonly #schemaError?: string;
@@ -89,7 +90,7 @@ export class SubmitResultTool implements AgentTool<TObject, SubmitResultDetails>
 					...(normalizedSchema as object),
 					description: `Structured output matching the schema:\n${schemaHint}`,
 				})
-			: Type.Any({ description: "Structured JSON output (no schema specified)" });
+			: Type.Object({}, { additionalProperties: true, description: "Structured JSON output (no schema specified)" });
 
 		this.parameters = Type.Object({
 			data: Type.Optional(dataSchema),

@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/patch";
-import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
@@ -24,15 +23,21 @@ function getTextOutput(result: any): string {
 	);
 }
 
+let artifactCounter = 0;
 function createTestToolSession(cwd: string): ToolSession {
 	const sessionFile = path.join(cwd, "session.jsonl");
-	const artifactManager = new ArtifactManager(sessionFile);
+	const sessionDir = path.join(cwd, "session");
 	return {
 		cwd,
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
-		getArtifactManager: () => artifactManager,
+		getArtifactsDir: () => sessionDir,
+		allocateOutputArtifact: async (toolType: string) => {
+			fs.mkdirSync(sessionDir, { recursive: true });
+			const id = `artifact-${++artifactCounter}`;
+			return { id, path: path.join(sessionDir, `${id}.${toolType}.log`) };
+		},
 		settings: Settings.isolated(),
 	};
 }
@@ -258,6 +263,17 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 		});
+		it("should write to a new local:// path under the session local root", async () => {
+			const localPath = "local://handoffs/new-output.json";
+			const content = '{"ok":true}\n';
+			const expectedPath = path.join(testDir, "session", "local", "handoffs", "new-output.json");
+
+			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
+
+			expect(getTextOutput(result)).toContain(`Successfully wrote ${content.length} bytes to ${localPath}`);
+			expect(fs.existsSync(expectedPath)).toBe(true);
+			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
+		});
 	});
 
 	describe("edit tool", () => {
@@ -407,6 +423,18 @@ function b() {
 			expect(result.details).toBeUndefined();
 		});
 
+		it("should resolve local:// destination paths for mv commands", async () => {
+			const sourcePath = path.join(testDir, "move-source.json");
+			const targetPath = path.join(testDir, "session", "local", "moved-via-bash.json");
+			fs.writeFileSync(sourcePath, '{"move":true}\n');
+
+			await bashTool.execute("test-call-8-local-mv", { command: `mv ${sourcePath} local://moved-via-bash.json` });
+
+			expect(fs.existsSync(sourcePath)).toBe(false);
+			expect(fs.existsSync(targetPath)).toBe(true);
+			expect(fs.readFileSync(targetPath, "utf-8")).toBe('{"move":true}\n');
+		});
+
 		it("should stream output updates", async () => {
 			const updates: string[] = [];
 			const result = await bashTool.execute(
@@ -492,7 +520,7 @@ function b() {
 			});
 
 			const output = getTextOutput(result);
-			expect(output).toContain("1. example.txt:2");
+			expect(output).not.toContain("# example.txt");
 			expect(output).toMatch(/>>\s*2#[ZPMQVRWSNKTXJBYH]{2}:match line/);
 		});
 
@@ -510,13 +538,92 @@ function b() {
 			});
 
 			const output = getTextOutput(result);
-			expect(output).toContain("1. context.txt:2");
+			expect(output).not.toContain("# context.txt");
 			expect(output).toMatch(/\b1#[ZPMQVRWSNKTXJBYH]{2}:before/);
 			expect(output).toMatch(/>>\s*2#[ZPMQVRWSNKTXJBYH]{2}:match one/);
 			expect(output).toMatch(/\b3#[ZPMQVRWSNKTXJBYH]{2}:after/);
 			expect(output).toContain("[1 matches limit reached. Use limit=2 for more]");
 			// Ensure second match is not present
 			expect(output).not.toContain("match two");
+		});
+
+		it("should group multi-file matches and distribute limit with round-robin", async () => {
+			for (let i = 1; i <= 3; i++) {
+				fs.writeFileSync(path.join(testDir, `file-${i}.txt`), `needle in file ${i}\nextra needle ${i}`);
+			}
+			fs.writeFileSync(path.join(testDir, "dominant.txt"), "needle a\nneedle b\nneedle c\nneedle d");
+
+			const result = await grepTool.execute("test-call-13-round-robin", {
+				pattern: "needle",
+				path: testDir,
+				limit: 4,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("# file-1.txt");
+			expect(output).toContain("# file-2.txt");
+			expect(output).toContain("# file-3.txt");
+			expect(output).toContain("# dominant.txt");
+			expect(output).not.toContain("# .");
+			expect(output).toContain("[4 matches limit reached. Use limit=8 for more]");
+			expect(result.details?.fileCount).toBe(4);
+			expect(result.details?.matchCount).toBe(4);
+		});
+
+		it("should not repeat file headings when round-robin selects multiple matches per file", async () => {
+			fs.writeFileSync(path.join(testDir, "alpha.txt"), "needle a1\nneedle a2\nneedle a3");
+			fs.writeFileSync(path.join(testDir, "beta.txt"), "needle b1\nneedle b2\nneedle b3");
+
+			const result = await grepTool.execute("test-call-14-grouped-headings", {
+				pattern: "needle",
+				path: testDir,
+				limit: 4,
+			});
+
+			const output = getTextOutput(result);
+			const alphaHeadings = output.match(/# alpha\.txt/g)?.length ?? 0;
+			const betaHeadings = output.match(/# beta\.txt/g)?.length ?? 0;
+			expect(alphaHeadings).toBe(1);
+			expect(betaHeadings).toBe(1);
+			expect(result.details?.fileMatches).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ path: "alpha.txt", count: 2 }),
+					expect.objectContaining({ path: "beta.txt", count: 2 }),
+				]),
+			);
+		});
+
+		it("should group files under directory headings", async () => {
+			const nestedDir = path.join(testDir, "packages", "ai");
+			fs.mkdirSync(nestedDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedDir, "CHANGELOG.md"), "Claude Opus\n");
+			fs.writeFileSync(path.join(nestedDir, "models.json"), '{ "name": "Claude Opus" }\n');
+
+			const result = await grepTool.execute("test-call-15-directory-headings", {
+				pattern: "Claude Opus",
+				path: testDir,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("# packages/ai");
+			expect(output).toContain("## └─ CHANGELOG.md");
+			expect(output).toContain("## └─ models.json");
+			expect(result.details?.fileCount).toBeGreaterThanOrEqual(2);
+		});
+
+		it("should apply default limit of 20 when limit is not provided", async () => {
+			const lines = Array.from({ length: 60 }, (_, i) => `needle ${i + 1}`);
+			fs.writeFileSync(path.join(testDir, "default-limit.txt"), lines.join("\n"));
+
+			const result = await grepTool.execute("test-call-14-default-limit", {
+				pattern: "needle",
+				path: testDir,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("[20 matches limit reached. Use limit=40 for more]");
+			expect(result.details?.matchCount).toBe(20);
+			expect(result.details?.matchLimitReached).toBe(20);
 		});
 	});
 
@@ -656,37 +763,6 @@ describe("edit tool CRLF handling", () => {
 		).rejects.toThrow(/Found 2 occurrences/);
 	});
 
-	it("should apply hashline replace (substr-style) when edit variant is hashline", async () => {
-		const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
-		const originalHashlineReplace = Bun.env.PI_HL_REPLACETXT;
-		Bun.env.PI_EDIT_VARIANT = "hashline";
-		Bun.env.PI_HL_REPLACETXT = "1";
-
-		const hashDir = path.join(os.tmpdir(), `coding-agent-hashline-replace-${Snowflake.next()}`);
-		fs.mkdirSync(hashDir, { recursive: true });
-		const testFile = path.join(hashDir, "app.txt");
-		fs.writeFileSync(testFile, "x = 42\ny = 10\n");
-
-		try {
-			const session = createTestToolSession(hashDir);
-			const hashlineEditTool = new EditTool(session);
-			const result = await hashlineEditTool.execute("hashline-replace-1", {
-				path: testFile,
-				edits: [{ op: "replaceText", old_text: "x = 42", new_text: "x = 99" }],
-			});
-
-			expect(getTextOutput(result)).toContain("Updated");
-			const content = await Bun.file(testFile).text();
-			expect(content).toBe("x = 99\ny = 10\n");
-		} finally {
-			fs.rmSync(hashDir, { recursive: true, force: true });
-			if (originalEditVariant === undefined) delete Bun.env.PI_EDIT_VARIANT;
-			else Bun.env.PI_EDIT_VARIANT = originalEditVariant;
-			if (originalHashlineReplace === undefined) delete Bun.env.PI_HL_REPLACETXT;
-			else Bun.env.PI_HL_REPLACETXT = originalHashlineReplace;
-		}
-	});
-
 	it("should delete file in hashline mode with delete:true", async () => {
 		const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
 		Bun.env.PI_EDIT_VARIANT = "hashline";
@@ -730,10 +806,10 @@ describe("edit tool CRLF handling", () => {
 			const result = await hashlineEditTool.execute("hashline-rename-1", {
 				path: sourceFile,
 				edits: [],
-				rename: targetFile,
+				move: targetFile,
 			});
 
-			expect(getTextOutput(result)).toContain("Updated and moved");
+			expect(getTextOutput(result)).toContain("Moved");
 			expect(fs.existsSync(sourceFile)).toBe(false);
 			expect(fs.existsSync(targetFile)).toBe(true);
 			expect(await Bun.file(targetFile).text()).toBe("unchanged content\n");

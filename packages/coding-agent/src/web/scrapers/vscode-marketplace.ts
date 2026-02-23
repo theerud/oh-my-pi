@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, formatCount, loadPage } from "./types";
+import { buildResult, formatNumber, loadPage, tryParseJson } from "./types";
 
 interface MarketplaceProperty {
 	key?: string;
@@ -64,12 +64,12 @@ function formatRating(averageRating?: number, ratingCount?: number): string | nu
 	if (averageRating !== undefined) {
 		const formatted = averageRating.toFixed(2).replace(/\.0+$/, "").replace(/\.$/, "");
 		if (ratingCount !== undefined) {
-			return `${formatted} (${formatCount(ratingCount)} ratings)`;
+			return `${formatted} (${formatNumber(ratingCount)} ratings)`;
 		}
 		return formatted;
 	}
 	if (ratingCount !== undefined) {
-		return `${formatCount(ratingCount)} ratings`;
+		return `${formatNumber(ratingCount)} ratings`;
 	}
 	return null;
 }
@@ -135,12 +135,8 @@ export const handleVscodeMarketplace: SpecialHandler = async (
 
 		if (!result.ok) return null;
 
-		let data: MarketplaceResponse;
-		try {
-			data = JSON.parse(result.content) as MarketplaceResponse;
-		} catch {
-			return null;
-		}
+		const data = tryParseJson<MarketplaceResponse>(result.content);
+		if (!data) return null;
 
 		const extension = data.results?.[0]?.extensions?.[0];
 		if (!extension) return null;
@@ -172,23 +168,18 @@ export const handleVscodeMarketplace: SpecialHandler = async (
 		md += `**Identifier:** ${identifier}\n`;
 		if (publisherLabel) md += `**Publisher:** ${publisherLabel}\n`;
 		if (version) md += `**Version:** ${version}\n`;
-		if (installs !== undefined) md += `**Installs:** ${formatCount(installs)}\n`;
+		if (installs !== undefined) md += `**Installs:** ${formatNumber(installs)}\n`;
 		if (ratingLabel) md += `**Rating:** ${ratingLabel}\n`;
 		if (extension.categories?.length) md += `**Categories:** ${extension.categories.join(", ")}\n`;
 		if (extension.tags?.length) md += `**Tags:** ${extension.tags.join(", ")}\n`;
 		if (repoLink) md += `**Repository:** ${repoLink}\n`;
 
-		const output = finalizeOutput(md);
-		return {
+		return buildResult(md, {
 			url,
-			finalUrl: url,
-			contentType: "text/markdown",
 			method: "vscode-marketplace",
-			content: output.content,
 			fetchedAt,
-			truncated: output.truncated,
 			notes: ["Fetched via VS Code Marketplace API"],
-		};
+		});
 	} catch {}
 
 	return null;

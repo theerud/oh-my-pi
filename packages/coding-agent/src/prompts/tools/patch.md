@@ -43,11 +43,11 @@ Returns success/failure; on failure, error message indicates:
 </output>
 
 <critical>
-- Always read target file before editing
-- Copy anchors and context lines verbatim (including whitespace)
-- Never use anchors as comments (no line numbers, location labels, placeholders like `@@ @@`)
-- Do not place new lines outside intended block
-- If edit fails or breaks structure, re-read file and produce new patch from current content—do not retry same diff
+- You MUST read the target file before editing
+- You MUST copy anchors and context lines verbatim (including whitespace)
+- You MUST NOT use anchors as comments (no line numbers, location labels, placeholders like `@@ @@`)
+- You MUST NOT place new lines outside the intended block
+- If edit fails or breaks structure, you MUST re-read the file and produce a new patch from current content — you MUST NOT retry the same diff
 - **NEVER** use edit to fix indentation, whitespace, or reformat code. Formatting is a single command run once at the end (`bun fmt`, `cargo fmt`, `prettier --write`, etc.)—not N individual edits. If you see inconsistent indentation after an edit, leave it; the formatter will fix all of it in one pass.
 </critical>
 
@@ -60,7 +60,7 @@ edit {"path":"src/app.py","op":"update","diff":"@@ def greet():\n def greet():\n
 </example>
 
 <example name="rename">
-edit {"path":"src/app.py","op":"update","rename":"src/main.py","diff":"@@\n ...\n"}
+edit {"path":"src/app.py","op":"update","rename":"src/main.py","diff":"@@\n …\n"}
 </example>
 
 <example name="delete">

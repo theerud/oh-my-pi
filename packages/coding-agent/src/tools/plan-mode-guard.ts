@@ -1,25 +1,25 @@
-import { resolvePlanUrlToPath } from "../internal-urls";
+import { resolveLocalUrlToPath } from "../internal-urls";
 import type { ToolSession } from ".";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
-const PLAN_URL_PREFIX = "plan://";
+const LOCAL_URL_PREFIX = "local://";
 
 export function resolvePlanPath(session: ToolSession, targetPath: string): string {
-	if (!targetPath.startsWith(PLAN_URL_PREFIX)) {
-		return resolveToCwd(targetPath, session.cwd);
+	if (targetPath.startsWith(LOCAL_URL_PREFIX)) {
+		return resolveLocalUrlToPath(targetPath, {
+			getArtifactsDir: session.getArtifactsDir,
+			getSessionId: session.getSessionId,
+		});
 	}
 
-	return resolvePlanUrlToPath(targetPath, {
-		getPlansDirectory: () => session.settings.getPlansDirectory(),
-		cwd: session.cwd,
-	});
+	return resolveToCwd(targetPath, session.cwd);
 }
 
 export function enforcePlanModeWrite(
 	session: ToolSession,
 	targetPath: string,
-	options?: { rename?: string; op?: "create" | "update" | "delete" },
+	options?: { move?: string; op?: "create" | "update" | "delete" },
 ): void {
 	const state = session.getPlanModeState?.();
 	if (!state?.enabled) return;
@@ -27,7 +27,7 @@ export function enforcePlanModeWrite(
 	const resolvedTarget = resolvePlanPath(session, targetPath);
 	const resolvedPlan = resolvePlanPath(session, state.planFilePath);
 
-	if (options?.rename) {
+	if (options?.move) {
 		throw new ToolError("Plan mode: renaming files is not allowed.");
 	}
 

@@ -1,5 +1,5 @@
 import type { RenderResult, SpecialHandler } from "./types";
-import { finalizeOutput, formatCount, htmlToBasicMarkdown, loadPage } from "./types";
+import { buildResult, formatNumber, htmlToBasicMarkdown, loadPage, tryParseJson } from "./types";
 
 interface MastodonAccount {
 	id: string;
@@ -141,9 +141,9 @@ function formatStatus(status: MastodonStatus, isReblog = false): string {
 
 	// Stats
 	md += `---\n`;
-	md += `💬 ${formatCount(status.replies_count)} replies · `;
-	md += `🔁 ${formatCount(status.reblogs_count)} boosts · `;
-	md += `⭐ ${formatCount(status.favourites_count)} favorites\n`;
+	md += `💬 ${formatNumber(status.replies_count)} replies · `;
+	md += `🔁 ${formatNumber(status.reblogs_count)} boosts · `;
+	md += `⭐ ${formatNumber(status.favourites_count)} favorites\n`;
 
 	return md;
 }
@@ -167,9 +167,9 @@ function formatAccount(account: MastodonAccount): string {
 	}
 
 	// Stats
-	md += `**Followers:** ${formatCount(account.followers_count)} · `;
-	md += `**Following:** ${formatCount(account.following_count)} · `;
-	md += `**Posts:** ${formatCount(account.statuses_count)}\n\n`;
+	md += `**Followers:** ${formatNumber(account.followers_count)} · `;
+	md += `**Following:** ${formatNumber(account.following_count)} · `;
+	md += `**Posts:** ${formatNumber(account.statuses_count)}\n\n`;
 
 	md += `**Joined:** ${formatDate(account.created_at)}\n`;
 	md += `**Profile:** ${account.url}\n`;
@@ -224,26 +224,18 @@ export const handleMastodon: SpecialHandler = async (
 
 			if (!result.ok) return null;
 
-			let status: MastodonStatus;
-			try {
-				status = JSON.parse(result.content);
-			} catch {
-				return null;
-			}
+			const status = tryParseJson<MastodonStatus>(result.content);
+			if (!status) return null;
 
 			const md = formatStatus(status);
-			const output = finalizeOutput(md);
 
-			return {
+			return buildResult(md, {
 				url,
 				finalUrl: status.url || url,
-				contentType: "text/markdown",
 				method: "mastodon",
-				content: output.content,
 				fetchedAt,
-				truncated: output.truncated,
 				notes: [`Fetched via Mastodon API (${instance})`],
-			};
+			});
 		}
 
 		if (profileMatch) {
@@ -259,12 +251,8 @@ export const handleMastodon: SpecialHandler = async (
 
 			if (!result.ok) return null;
 
-			let account: MastodonAccount;
-			try {
-				account = JSON.parse(result.content);
-			} catch {
-				return null;
-			}
+			const account = tryParseJson<MastodonAccount>(result.content);
+			if (!account) return null;
 
 			// Fetch recent statuses
 			const statusesUrl = `https://${instance}/api/v1/accounts/${account.id}/statuses?limit=5&exclude_replies=true`;
@@ -277,32 +265,25 @@ export const handleMastodon: SpecialHandler = async (
 			let md = formatAccount(account);
 
 			if (statusesResult.ok) {
-				try {
-					const statuses: MastodonStatus[] = JSON.parse(statusesResult.content);
-					if (statuses.length > 0) {
-						md += "\n---\n\n## Recent Posts\n\n";
-						for (const status of statuses.slice(0, 5)) {
-							md += `### ${formatDate(status.created_at)}\n\n`;
-							const content = htmlToBasicMarkdown(status.content);
-							md += `${content}\n\n`;
-							md += `💬 ${status.replies_count} · 🔁 ${status.reblogs_count} · ⭐ ${status.favourites_count}\n\n`;
-						}
+				const statuses = tryParseJson<MastodonStatus[]>(statusesResult.content);
+				if (statuses && statuses.length > 0) {
+					md += "\n---\n\n## Recent Posts\n\n";
+					for (const status of statuses.slice(0, 5)) {
+						md += `### ${formatDate(status.created_at)}\n\n`;
+						const content = htmlToBasicMarkdown(status.content);
+						md += `${content}\n\n`;
+						md += `\uD83D\uDCAC ${status.replies_count} \u00B7 \uD83D\uDD01 ${status.reblogs_count} \u00B7 \u2B50 ${status.favourites_count}\n\n`;
 					}
-				} catch {}
+				}
 			}
 
-			const output = finalizeOutput(md);
-
-			return {
+			return buildResult(md, {
 				url,
 				finalUrl: account.url || url,
-				contentType: "text/markdown",
 				method: "mastodon",
-				content: output.content,
 				fetchedAt,
-				truncated: output.truncated,
 				notes: [`Fetched via Mastodon API (${instance})`],
-			};
+			});
 		}
 	} catch {}
 

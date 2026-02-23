@@ -1,5 +1,5 @@
 import type { SpecialHandler } from "./types";
-import { finalizeOutput, formatCount, loadPage } from "./types";
+import { buildResult, formatNumber, loadPage, tryParseJson } from "./types";
 
 interface HfModelData {
 	modelId: string;
@@ -126,19 +126,15 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 
 				if (!apiResult.ok) return null;
 
-				let model: HfModelData;
-				try {
-					model = JSON.parse(apiResult.content);
-				} catch {
-					return null;
-				}
+				const model = tryParseJson<HfModelData>(apiResult.content);
+				if (!model) return null;
 
 				let md = `# ${model.modelId}\n\n`;
 
 				if (model.pipeline_tag) md += `**Task:** ${model.pipeline_tag}\n`;
 				if (model.library_name) md += `**Library:** ${model.library_name}\n`;
-				if (model.downloads !== undefined) md += `**Downloads:** ${formatCount(model.downloads)}\n`;
-				if (model.likes !== undefined) md += `**Likes:** ${formatCount(model.likes)}\n`;
+				if (model.downloads !== undefined) md += `**Downloads:** ${formatNumber(model.downloads)}\n`;
+				if (model.likes !== undefined) md += `**Likes:** ${formatNumber(model.likes)}\n`;
 				if (model.private) md += `**Visibility:** Private\n`;
 				if (model.gated) md += `**Access:** Gated\n`;
 
@@ -168,17 +164,7 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 					md += `## Model Card\n\n${readmeResult.content}`;
 				}
 
-				const { content, truncated } = finalizeOutput(md);
-				return {
-					url,
-					finalUrl: apiResult.finalUrl,
-					contentType: "text/markdown",
-					method: "huggingface",
-					content,
-					fetchedAt,
-					truncated,
-					notes,
-				};
+				return buildResult(md, { url, finalUrl: apiResult.finalUrl, method: "huggingface", fetchedAt, notes });
 			}
 
 			case "dataset": {
@@ -192,18 +178,14 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 
 				if (!apiResult.ok) return null;
 
-				let dataset: HfDatasetData;
-				try {
-					dataset = JSON.parse(apiResult.content);
-				} catch {
-					return null;
-				}
+				const dataset = tryParseJson<HfDatasetData>(apiResult.content);
+				if (!dataset) return null;
 
 				let md = `# ${dataset.id}\n\n`;
 				if (dataset.description) md += `${dataset.description}\n\n`;
 
-				if (dataset.downloads !== undefined) md += `**Downloads:** ${formatCount(dataset.downloads)}\n`;
-				if (dataset.likes !== undefined) md += `**Likes:** ${formatCount(dataset.likes)}\n`;
+				if (dataset.downloads !== undefined) md += `**Downloads:** ${formatNumber(dataset.downloads)}\n`;
+				if (dataset.likes !== undefined) md += `**Likes:** ${formatNumber(dataset.likes)}\n`;
 				if (dataset.private) md += `**Visibility:** Private\n`;
 				if (dataset.gated) md += `**Access:** Gated\n`;
 
@@ -233,17 +215,7 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 					md += `## Dataset Card\n\n${readmeResult.content}`;
 				}
 
-				const { content, truncated } = finalizeOutput(md);
-				return {
-					url,
-					finalUrl: apiResult.finalUrl,
-					contentType: "text/markdown",
-					method: "huggingface",
-					content,
-					fetchedAt,
-					truncated,
-					notes,
-				};
+				return buildResult(md, { url, finalUrl: apiResult.finalUrl, method: "huggingface", fetchedAt, notes });
 			}
 
 			case "space": {
@@ -257,19 +229,15 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 
 				if (!apiResult.ok) return null;
 
-				let space: HfSpaceData;
-				try {
-					space = JSON.parse(apiResult.content);
-				} catch {
-					return null;
-				}
+				const space = tryParseJson<HfSpaceData>(apiResult.content);
+				if (!space) return null;
 
 				let md = `# ${space.id}\n\n`;
 				if (space.title) md += `${space.title}\n\n`;
 
 				if (space.author) md += `**Author:** ${space.author}\n`;
 				if (space.sdk) md += `**SDK:** ${space.sdk}\n`;
-				if (space.likes !== undefined) md += `**Likes:** ${formatCount(space.likes)}\n`;
+				if (space.likes !== undefined) md += `**Likes:** ${formatNumber(space.likes)}\n`;
 				if (space.private) md += `**Visibility:** Private\n`;
 
 				if (space.cardData) {
@@ -287,17 +255,7 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 					md += `## Space Info\n\n${readmeResult.content}`;
 				}
 
-				const { content, truncated } = finalizeOutput(md);
-				return {
-					url,
-					finalUrl: apiResult.finalUrl,
-					contentType: "text/markdown",
-					method: "huggingface",
-					content,
-					fetchedAt,
-					truncated,
-					notes,
-				};
+				return buildResult(md, { url, finalUrl: apiResult.finalUrl, method: "huggingface", fetchedAt, notes });
 			}
 
 			case "model_or_user": {
@@ -306,12 +264,7 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 				const modelResult = await loadPage(modelApiUrl, { timeout, signal });
 
 				if (modelResult.ok) {
-					let model: HfModelData | null = null;
-					try {
-						model = JSON.parse(modelResult.content);
-					} catch {
-						// Fall through to user check
-					}
+					const model = tryParseJson<HfModelData>(modelResult.content);
 					if (model) {
 						const readmeUrl = `https://huggingface.co/${parsed.id}/raw/main/README.md`;
 						const readmeResult = await loadPage(readmeUrl, { timeout: Math.min(timeout, 5), signal });
@@ -319,25 +272,21 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 						let md = `# ${model.modelId}\n\n`;
 						if (model.pipeline_tag) md += `**Task:** ${model.pipeline_tag}\n`;
 						if (model.library_name) md += `**Library:** ${model.library_name}\n`;
-						if (model.downloads !== undefined) md += `**Downloads:** ${formatCount(model.downloads)}\n`;
-						if (model.likes !== undefined) md += `**Likes:** ${formatCount(model.likes)}\n`;
+						if (model.downloads !== undefined) md += `**Downloads:** ${formatNumber(model.downloads)}\n`;
+						if (model.likes !== undefined) md += `**Likes:** ${formatNumber(model.likes)}\n`;
 						if (model.tags?.length) md += `**Tags:** ${model.tags.join(", ")}\n`;
 						md += "\n";
 						if (readmeResult.ok && readmeResult.content.trim()) {
 							md += `## Model Card\n\n${readmeResult.content}`;
 						}
 
-						const { content, truncated } = finalizeOutput(md);
-						return {
+						return buildResult(md, {
 							url,
 							finalUrl: modelResult.finalUrl,
-							contentType: "text/markdown",
 							method: "huggingface",
-							content,
 							fetchedAt,
-							truncated,
 							notes,
-						};
+						});
 					}
 				}
 
@@ -346,34 +295,20 @@ export const handleHuggingFace: SpecialHandler = async (url: string, timeout: nu
 				const userResult = await loadPage(userApiUrl, { timeout, signal });
 				if (!userResult.ok) return null;
 
-				let user: HfUserData;
-				try {
-					user = JSON.parse(userResult.content);
-				} catch {
-					return null;
-				}
+				const user = tryParseJson<HfUserData>(userResult.content);
+				if (!user) return null;
 
 				let md = `# ${user.user || parsed.id}\n\n`;
 				if (user.fullname) md += `**Name:** ${user.fullname}\n`;
-				if (user.numModels !== undefined) md += `**Models:** ${formatCount(user.numModels)}\n`;
-				if (user.numDatasets !== undefined) md += `**Datasets:** ${formatCount(user.numDatasets)}\n`;
-				if (user.numSpaces !== undefined) md += `**Spaces:** ${formatCount(user.numSpaces)}\n`;
+				if (user.numModels !== undefined) md += `**Models:** ${formatNumber(user.numModels)}\n`;
+				if (user.numDatasets !== undefined) md += `**Datasets:** ${formatNumber(user.numDatasets)}\n`;
+				if (user.numSpaces !== undefined) md += `**Spaces:** ${formatNumber(user.numSpaces)}\n`;
 
 				if (user.orgs?.length) {
 					md += `**Organizations:** ${user.orgs.map(o => o.name).join(", ")}\n`;
 				}
 
-				const { content, truncated } = finalizeOutput(md);
-				return {
-					url,
-					finalUrl: userResult.finalUrl,
-					contentType: "text/markdown",
-					method: "huggingface",
-					content,
-					fetchedAt,
-					truncated,
-					notes,
-				};
+				return buildResult(md, { url, finalUrl: userResult.finalUrl, method: "huggingface", fetchedAt, notes });
 			}
 
 			default:

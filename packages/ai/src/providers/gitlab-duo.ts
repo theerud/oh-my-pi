@@ -1,4 +1,4 @@
-import { mapAnthropicToolChoice } from "../stream";
+import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, Model, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { streamAnthropic } from "./anthropic";
@@ -137,7 +137,12 @@ export const MODEL_MAPPINGS: Record<string, GitLabModelMapping> = {
 };
 
 export function getModelMapping(modelId: string): GitLabModelMapping | undefined {
-	return MODEL_MAPPINGS[modelId];
+	const direct = MODEL_MAPPINGS[modelId];
+	if (direct) return direct;
+
+	// Support canonical model IDs (e.g. "gpt-5-codex", "claude-sonnet-4-5-20250929")
+	// in addition to Duo aliases (e.g. "duo-chat-gpt-5-codex").
+	return Object.values(MODEL_MAPPINGS).find(mapping => mapping.model === modelId);
 }
 
 export function getGitLabDuoModels(): Model<Api>[] {
@@ -167,14 +172,6 @@ interface DirectAccessToken {
 }
 
 const directAccessCache = new Map<string, DirectAccessToken>();
-
-const ANTHROPIC_THINKING_BUDGETS = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 32768,
-} as const;
 
 async function getDirectAccessToken(gitlabAccessToken: string): Promise<DirectAccessToken> {
 	const cached = directAccessCache.get(gitlabAccessToken);
@@ -295,8 +292,7 @@ export function streamGitLabDuo(
 								onPayload: options.onPayload,
 								thinkingEnabled: Boolean(options.reasoning) && model.reasoning,
 								thinkingBudgetTokens: options.reasoning
-									? (options.thinkingBudgets?.[options.reasoning] ??
-										ANTHROPIC_THINKING_BUDGETS[options.reasoning])
+									? (options.thinkingBudgets?.[options.reasoning] ?? ANTHROPIC_THINKING[options.reasoning])
 									: undefined,
 								reasoning: options.reasoning,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),

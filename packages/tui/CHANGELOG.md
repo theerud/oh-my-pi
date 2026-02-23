@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [12.19.0] - 2026-02-22
+
+### Added
+
+- Added `getTopBorderAvailableWidth()` method to calculate available width for top border content accounting for border characters and padding
+
+### Fixed
+
+- Fixed stale viewport rows appearing when terminal height increases by triggering full re-render on height changes
+
 ## [12.18.0] - 2026-02-21
 ### Fixed
 

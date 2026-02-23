@@ -3,15 +3,13 @@
 Powerful search tool built on ripgrep.
 
 <instruction>
-- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`)
+- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`); literal braces need escaping (`interface\\{\\}` for `interface{}` in Go)
 - Filter files with `glob` (e.g., `*.js`, `**/*.tsx`) or `type` (e.g., `js`, `py`, `rust`)
-- Pattern syntax uses ripgrep—literal braces need escaping (`interface\\{\\}` to find `interface{}` in Go)
 - For cross-line patterns like `struct \\{[\\s\\S]*?field`, set `multiline: true` if needed
 - If the pattern contains a literal `\n`, multiline defaults to true
 </instruction>
 
 <output>
-- Results are always content mode.
 {{#if IS_HASHLINE_MODE}}
 - Text output is CID prefixed: `LINE#ID:content`
 {{else}}
@@ -22,7 +20,7 @@ Powerful search tool built on ripgrep.
 </output>
 
 <critical>
-- ALWAYS use Grep when searching for content.
-- NEVER invoke `grep` or `rg` via Bash.
-- If the search is open-ended, requiring multiple rounds, use Task tool with explore subagent instead
+- You MUST use Grep when searching for content.
+- You MUST NOT invoke `grep` or `rg` via Bash.
+- If the search is open-ended, requiring multiple rounds, you MUST use Task tool with explore subagent instead.
 </critical>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Skill } from "../../src/extensibility/skills";
+import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import { expandInternalUrls, expandSkillUrls } from "../../src/tools/bash-skill-urls";
 import { ToolError } from "../../src/tools/tool-errors";
 
@@ -150,21 +151,20 @@ describe("expandSkillUrls", () => {
 });
 
 describe("expandInternalUrls", () => {
-	it("expands skill/agent/artifact/plan/memory/rule URLs in one command", async () => {
+	it("expands skill/agent/artifact/memory/rule URLs in one command", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const router = createInternalRouter({
 			"artifact://12": { sourcePath: "/tmp/artifacts/12.bash.log" },
 			"agent://reviewer_0": { sourcePath: "/tmp/session/reviewer_0.md" },
-			"plan://session/plan.md": { sourcePath: "/tmp/plans/session/plan.md" },
 			"memory://root/memory_summary.md": { sourcePath: "/tmp/memories/memory_summary.md" },
 			"rule://rs-no-unwrap": { sourcePath: "/tmp/rules/rs-no-unwrap.md" },
 		});
 		const command =
-			"cat agent://reviewer_0 artifact://12 plan://session/plan.md memory://root/memory_summary.md rule://rs-no-unwrap skill://valid-skill/scripts/init.py";
+			"cat agent://reviewer_0 artifact://12 memory://root/memory_summary.md rule://rs-no-unwrap skill://valid-skill/scripts/init.py";
 		const expectedSkillPath = path.join(skills[0].baseDir, "scripts/init.py");
 
 		await expect(expandInternalUrls(command, { skills, internalRouter: router })).resolves.toBe(
-			`cat ${shellEscape("/tmp/session/reviewer_0.md")} ${shellEscape("/tmp/artifacts/12.bash.log")} ${shellEscape("/tmp/plans/session/plan.md")} ${shellEscape("/tmp/memories/memory_summary.md")} ${shellEscape("/tmp/rules/rs-no-unwrap.md")} ${shellEscape(expectedSkillPath)}`,
+			`cat ${shellEscape("/tmp/session/reviewer_0.md")} ${shellEscape("/tmp/artifacts/12.bash.log")} ${shellEscape("/tmp/memories/memory_summary.md")} ${shellEscape("/tmp/rules/rs-no-unwrap.md")} ${shellEscape(expectedSkillPath)}`,
 		);
 	});
 
@@ -183,6 +183,25 @@ describe("expandInternalUrls", () => {
 		});
 		await expect(expandInternalUrls("echo agent://abc", { skills: [], internalRouter: router })).resolves.toBe(
 			`echo ${shellEscape("/tmp/session/abc.md")}`,
+		);
+	});
+
+	it("expands local:// URLs to filesystem paths without requiring preexisting files", async () => {
+		const localOptions = {
+			getArtifactsDir: () => "/tmp/session-artifacts",
+			getSessionId: () => "session-1",
+		};
+		const command = "mv /tmp/source.json local://handoffs/new-file.json";
+		const expectedPath = resolveLocalUrlToPath("local://handoffs/new-file.json", localOptions);
+
+		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
+			`mv /tmp/source.json ${shellEscape(expectedPath)}`,
+		);
+	});
+
+	it("throws when local:// URL is used without local protocol options", async () => {
+		await expect(expandInternalUrls("mv foo local://bar", { skills: [] })).rejects.toThrow(
+			"Cannot resolve local:// URL in bash command: local protocol options are unavailable for this session.",
 		);
 	});
 

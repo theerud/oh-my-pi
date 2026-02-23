@@ -3,14 +3,14 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { ptree } from "@oh-my-pi/pi-utils";
+import { ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { parse as parseHtml } from "node-html-parser";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import fetchDescription from "../prompts/tools/fetch.md" with { type: "text" };
-import { allocateOutputArtifact, DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
+import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { ensureTool } from "../utils/tools-manager";
@@ -856,6 +856,7 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 	readonly label = "Fetch";
 	readonly description: string;
 	readonly parameters = fetchSchema;
+	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {
 		this.description = renderPromptTemplate(fetchDescription);
@@ -899,7 +900,7 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 		};
 
 		if (needsArtifact) {
-			const { path: artifactPath, id } = await allocateOutputArtifact(this.session, "fetch");
+			const { path: artifactPath, id } = (await this.session.allocateOutputArtifact?.("fetch")) ?? {};
 			if (artifactPath) {
 				await Bun.write(artifactPath, buildOutput(result.content));
 				artifactId = id;
@@ -940,13 +941,6 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 // =============================================================================
 // TUI Rendering
 // =============================================================================
-
-/** Truncate text to max length with ellipsis */
-function truncate(text: string, maxLen: number, ellipsis: string): string {
-	if (text.length <= maxLen) return text;
-	const sliceLen = Math.max(0, maxLen - ellipsis.length);
-	return `${text.slice(0, sliceLen)}${ellipsis}`;
-}
 
 /** Count non-empty lines */
 function countNonEmptyLines(text: string): number {

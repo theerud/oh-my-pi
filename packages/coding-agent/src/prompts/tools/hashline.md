@@ -1,102 +1,116 @@
 # Edit
 
-Apply precise file edits using `LINE#ID` tags, anchoring to the file content.
+Apply precise file edits using `LINE#ID` tags from `read` output.
 
 <workflow>
-1. `read` the target range to capture current `LINE#ID` tags.
-2. Pick the smallest operation per change site (line/range/insert/content-replace).
-3. Direction-lock every edit: exact current text → intended text.
-4. Submit one `edit` call per file containing all operations.
-5. If another edit is needed in that file, re-read first (hashes changed).
-6. Output tool calls only; no prose.
+1. You SHOULD issue a `read` call before editing if you have no tagged context for a file.
+2. You MUST pick the smallest operation per change site.
+3. You MUST submit one `edit` call per file with all operations, think your changes through before submitting.
 </workflow>
 
 <operations>
-- **Single line replace/delete**
-  - `{ op: "set", tag: "N#ID", content: […] }`
-  - `content: null` deletes the line; `content: [""]` keeps a blank line.
-- **Range replace/delete**
-  - `{ op: "replace", first: "N#ID", last: "N#ID", content: […] }`
-  - Use for swaps, block rewrites, or deleting a full span (`content: null`).
-- **Insert** (new content)
-  - `{ op: "prepend", before: "N#ID", content: […] }` or `{ op: "prepend", content: […] }` (no `before` = insert at beginning of file)
-  - `{ op: "append", after: "N#ID", content: […] }` or `{ op: "append", content: […] }` (no `after` = insert at end of file)
-  - `{ op: "insert", after: "N#ID", before: "N#ID", content: […] }` (between adjacent anchors; safest for blocks)
-{{#if allowReplaceText}}
-- **Content replace**
-  - `{ op: "replaceText", old_text: "…", new_text: "…", all?: boolean }`
-{{/if}}
-- **File-level controls**
-  - `{ delete: true, edits: [] }` deletes the file (cannot be combined with `rename`).
-  - `{ rename: "new/path.ts", edits: […] }` writes result to new path and removes old path.
-**Atomicity:** all ops validate against the same pre-edit file snapshot; refs are interpreted against last `read`; applicator applies bottom-up.
+Every edit has `op`, `pos`, and `lines`. Range replaces also have `end`. Both `pos` and `end` use `"N#ID"` format (e.g. `"23#XY"`).
+**`pos`** — the anchor line. Meaning depends on `op`:
+- `replace`: start of range (or the single line to replace)
+- `prepend`: insert new lines **before** this line; omit for beginning of file
+- `append`: insert new lines **after** this line; omit for end of file
+**`end`** — range replace only. The last line of the range (inclusive). Omit for single-line replace.
+**`lines`** — the replacement content:
+- `["line1", "line2"]` — replace with these lines (array of strings)
+- `"line1"` — shorthand for `["line1"]` (single-line replace)
+- `[""]` — replace content with a blank line (line preserved, content cleared)
+- `null` or `[]` — **delete** the line(s) entirely
+
+### Line or range replace/delete
+- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", lines: null }] }` — delete one line
+- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: null }] }` — delete a range
+- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", lines: […] }] }` — replace one line
+- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: […] }] }` — replace a range
+
+### Insert new lines
+- `{ path: "…", edits: [{ op: "prepend", pos: "N#ID", lines: […] }] }` — insert before tagged line
+- `{ path: "…", edits: [{ op: "prepend", lines: […] }] }` — insert at beginning of file (no tag)
+- `{ path: "…", edits: [{ op: "append", pos: "N#ID", lines: […] }] }` — insert after tagged line
+- `{ path: "…", edits: [{ op: "append", lines: […] }] }` — insert at end of file (no tag)
+
+### File-level controls
+- `{ path: "…", delete: true, edits: [] }` — delete the file
+- `{ path: "…", move: "new/path.ts", edits: […] }` — move file to new path (edits applied first)
+**Atomicity:** all ops in one call validate against the same pre-edit snapshot; tags reference the last `read`. Edits are applied bottom-up, so earlier tags stay valid even when later ops add or remove lines.
 </operations>
 
 <rules>
-1. **Minimize scope:** one logical mutation site per operation.
-2. **Preserve formatting:** keep indentation, punctuation, line breaks, trailing commas, brace style.
-3. **Prefer insertion over neighbor rewrites:** anchor on structural boundaries (`}`, `]`, `},`) not interior property lines.
-4. **No no-ops:** replacement content must differ from current content.
-5. **Touch only requested code:** avoid incidental edits.
-6. **Use exact current tokens:** never rewrite approximately; mutate the token that exists now.
-7. **For swaps/moves:** prefer one range operation over multiple single-line operations.
+1. **Minimize scope:** You MUST use one logical mutation per operation.
+2. **No no-ops:** replacement MUST differ from current.
+3. **Prefer insertion over neighbor rewrites:** You SHOULD anchor on structural boundaries (`}`, `]`, `},`), not interior lines.
+4. **For swaps/moves:** You SHOULD prefer one range op over multiple single-line ops.
+5. **Range end tag:** When replacing a block (e.g., an `if` body), the `end` tag MUST include the block's closing brace/bracket — not just the last interior line. Verify the `end` tag covers all lines being logically removed, including trailing `}`, `]`, or `)`. An off-by-one on `end` orphans a brace and breaks syntax.
 </rules>
 
-<op_choice>
-- One wrong line → `set`
-- Adjacent block changed → `insert`
-- Missing line/block → insert with `append`/`prepend`
-</op_choice>
-
-<tag_choice>
-- Copy tags exactly from the prefix of the `read` or error output.
-- Never guess tags.
-- For inserts, prefer `insert` > `append`/`prepend` when both boundaries are known.
-- Re-read after each successful edit call before issuing another on same file.
-</tag_choice>
-
 <recovery>
-**Tag mismatch (`>>>`)**
-- Retry with the updated tags shown in error output.
-- Re-read only if required tags are missing from error snippet.
-- If mismatch repeats, stop and re-read the exact block.
+**Tag mismatch (`>>>`):** You MUST retry using fresh tags from the error snippet. Re-read only if snippet lacks context.
+**No-op (`identical`):** You MUST NOT resubmit. Re-read target lines and adjust the edit.
 </recovery>
 
-<example name="fix a value or type">
+<example name="single-line replace">
 ```ts
 {{hlinefull 23 "  const timeout: number = 5000;"}}
 ```
 ```
-op: "set"
-tag: "{{hlineref 23 "  const timeout: number = 5000;"}}"
-content: ["  const timeout: number = 30_000;"]
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: "{{hlineref 23 "  const timeout: number = 5000;"}}",
+    lines: ["  const timeout: number = 30_000;"]
+  }]
+}
 ```
 </example>
 
-<example name="remove a line entirely">
-```ts
-{{hlinefull 7 "// @ts-ignore"}}
-{{hlinefull 8 "const data = fetchSync(url);"}}
+<example name="delete lines">
+Single line — `lines: null` deletes entirely:
 ```
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: "{{hlineref 7 "// @ts-ignore"}}",
+    lines: null
+  }]
+}
 ```
-op: "set"
-tag: "{{hlineref 7 "// @ts-ignore"}}"
-content: null
+Range — add `end`:
+```
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: "{{hlineref 80 "  // TODO: remove after migration"}}",
+    end: "{{hlineref 83 "  }"}}",
+    lines: null
+  }]
+}
 ```
 </example>
 
-<example name="clear content but keep the line break">
+<example name="clear text but keep the line break">
 ```ts
 {{hlinefull 14 "  placeholder: \"DO NOT SHIP\","}}
 ```
 ```
-op: "set"
-tag: "{{hlineref 14 "  placeholder: \"DO NOT SHIP\","}}"
-content: [""]
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: "{{hlineref 14 "  placeholder: \"DO NOT SHIP\","}}",
+    lines: [""]
+  }]
+}
 ```
 </example>
 
-<example name="rewrite a block of logic">
+<example name="rewrite a block">
 ```ts
 {{hlinefull 60 "    } catch (err) {"}}
 {{hlinefull 61 "      console.error(err);"}}
@@ -104,129 +118,74 @@ content: [""]
 {{hlinefull 63 "    }"}}
 ```
 ```
-op: "replace"
-first: "{{hlineref 60 "    } catch (err) {"}}"
-last: "{{hlineref 63 "    }"}}"
-content: ["    } catch (err) {", "      if (isEnoent(err)) return null;", "      throw err;", "    }"]
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: "{{hlineref 60 "    } catch (err) {"}}",
+    end: "{{hlineref 63 "    }"}}",
+    lines: [
+      "    } catch (err) {",
+      "      if (isEnoent(err)) return null;",
+      "      throw err;",
+      "    }"
+    ]
+  }]
+}
 ```
 </example>
 
-<example name="remove a full block">
-```ts
-{{hlinefull 80 "  // TODO: remove after migration"}}
-{{hlinefull 81 "  if (legacy) {"}}
-{{hlinefull 82 "    legacyHandler(req);"}}
-{{hlinefull 83 "  }"}}
-```
-```
-op: "replace"
-first: "{{hlineref 80 "  // TODO: remove after migration"}}"
-last: "{{hlineref 83 "  }"}}"
-content: null
-```
-</example>
-
-<example name="add an import above the first import">
-```ts
-{{hlinefull 1 "import * as fs from \"node:fs/promises\";"}}
-{{hlinefull 2 "import * as path from \"node:path\";"}}
-```
-```
-op: "prepend"
-before: "{{hlineref 1 "import * as fs from \"node:fs/promises\";"}}"
-content: ["import * as os from \"node:os\";"]
-```
-Use `before` for anchored insertion before a specific line. Omit `before` to prepend at BOF.
-</example>
-
-<example name="append at end of file">
-```ts
-{{hlinefull 260 "export { serialize, deserialize };"}}
-```
-```
-op: "append"
-after: "{{hlineref 260 "export { serialize, deserialize };"}}"
-content: ["export { validate };"]
-```
-Use `after` for anchored insertion after a specific line. Omit `after` to append at EOF.
-</example>
-
-<example name="add an entry between known siblings">
+<example name="insert between siblings">
 ```ts
 {{hlinefull 44 "  \"build\": \"bun run compile\","}}
 {{hlinefull 45 "  \"test\": \"bun test\""}}
 ```
 ```
-op: "insert"
-after: "{{hlineref 44 "  \"build\": \"bun run compile\","}}"
-before: "{{hlineref 45 "  \"test\": \"bun test\""}}"
-content: ["  \"lint\": \"biome check\","]
+{
+  path: "…",
+  edits: [{
+    op: "prepend",
+    pos: "{{hlineref 45 "  \"test\": \"bun test\""}}",
+    lines: ["  \"lint\": \"biome check\","]
+  }]
+}
 ```
-Dual anchors pin the insert to exactly one gap, preventing drift from edits elsewhere in the file. **Always prefer dual anchors when both boundaries are content lines.**
+Result:
+```ts
+{{hlinefull 44 "  \"build\": \"bun run compile\","}}
+{{hlinefull 45 "  \"lint\": \"biome check\","}}
+{{hlinefull 46 "  \"test\": \"bun test\""}}
+```
 </example>
 
-<example name="insert a function before another function">
+<example name="anchor to structure, not whitespace">
+Trailing `""` in `lines` preserves blank-line separators. Anchor to the structural line, not the blank line above — blank lines are ambiguous and shift.
 ```ts
-{{hlinefull 100 "  return buf.toString(\"hex\");"}}
 {{hlinefull 101 "}"}}
 {{hlinefull 102 ""}}
 {{hlinefull 103 "export function serialize(data: unknown): string {"}}
 ```
+Bad — append after "}"
+Good — anchors to structural line:
 ```
-op: "insert"
-before: "{{hlineref 103 "export function serialize(data: unknown): string {"}}"
-content: ["function validate(data: unknown): boolean {", "  return data != null && typeof data === \"object\";", "}", ""]
-```
-The trailing `""` in `content` preserves the blank-line separator. **Anchor to the structural line (`export function ...`), not the blank line above it** — blank lines are ambiguous and may be added or removed by other edits.
-</example>
-
-{{#if allowReplaceText}}
-<example name="content replace (rare)">
-```
-op: "replaceText"
-old_text: "x = 42"
-new_text: "x = 99"
-```
-
-Use only when line anchors aren't available. `old_text` must match exactly one location in the file (or set `"all": true` for all occurrences).
-</example>
-{{/if}}
-
-<example name="file delete">
-```
-path: "src/deprecated/legacy.ts"
-delete: true
-```
-</example>
-
-<example name="file rename with edits">
-```
-path: "src/utils.ts"
-rename: "src/helpers/utils.ts"
-edits: […]
-```
-</example>
-
-<example name="anti-pattern: anchoring to whitespace">
-Bad — tags to a blank line; fragile if blank lines shift:
-```
-after: "{{hlineref 102 ""}}"
-content: ["function validate() {", …, "}"]
-```
-
-Good — anchors to the structural target:
-
-```
-before: "{{hlineref 103 "export function serialize(data: unknown): string {"}}"
-content: ["function validate() {", …, "}"]
+{
+  path: "…",
+  edits: [{
+    op: "prepend",
+    pos: "{{hlineref 103 "export function serialize(data: unknown): string {"}}",
+    lines: [
+      "function validate(data: unknown): boolean {",
+      "  return data != null && typeof data === \"object\";",
+      "}",
+      ""
+    ]
+  }]
+}
 ```
 </example>
 
 <critical>
-Ensure:
-- Payload shape is `{ "path": string, "edits": [operation, …], "delete"?: boolean, "rename"?: string }`
-- Every edit matches exactly one variant
-- Every tag has been copied EXACTLY from a tool result as `N#ID`
-- Scope is minimal and formatting is preserved except targeted token changes
+- Edit payload: `{ path, edits[] }`. Each entry: `op`, `lines`, optional `pos`/`end`. No extra keys.
+- Every tag MUST be copied exactly from fresh tool result as `N#ID`.
+- You MUST re-read after each edit call before issuing another on same file.
 </critical>
-**Final reminder:** tags are immutable references to the last read snapshot. Re-read when state changes, then edit.

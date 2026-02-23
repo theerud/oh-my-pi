@@ -127,6 +127,7 @@ export interface AgentDefinition {
 	model?: string[];
 	thinkingLevel?: ThinkingLevel;
 	output?: unknown;
+	blocking?: boolean;
 	source: AgentSource;
 	filePath?: string;
 }
@@ -193,4 +194,9 @@ export interface TaskToolDetails {
 	usage?: Usage;
 	outputPaths?: string[];
 	progress?: AgentProgress[];
+	async?: {
+		state: "running" | "completed" | "failed";
+		jobId: string;
+		type: "task";
+	};
 }

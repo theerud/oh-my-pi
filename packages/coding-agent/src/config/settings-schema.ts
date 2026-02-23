@@ -403,7 +403,7 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	"todo.reminders": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: { tab: "agent", label: "Todo reminders", description: "Remind agent to complete todos before stopping" },
 	},
 	"todo.reminders.max": {
@@ -509,6 +509,25 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Intent tracing",
 			description: "Ask the agent to describe the intent of each tool call before executing it",
+		},
+	},
+	"async.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Async execution",
+			description: "Enable async bash commands and background task execution",
+		},
+	},
+	"async.maxJobs": {
+		type: "number",
+		default: 15,
+		ui: {
+			tab: "tools",
+			label: "Async max jobs",
+			description: "Maximum concurrent background jobs (1-100)",
+			submenu: true,
 		},
 	},
 
@@ -737,17 +756,6 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	// Bash interceptor settings
 	// ─────────────────────────────────────────────────────────────────────────
-	"bash.virtualTerminal": {
-		type: "enum",
-		values: ["on", "off"] as const,
-		default: "off",
-		ui: {
-			tab: "bash",
-			label: "Virtual terminal",
-			description: "Use PTY-backed interactive execution for bash",
-			submenu: true,
-		},
-	},
 	"bashInterceptor.enabled": {
 		type: "boolean",
 		default: false,

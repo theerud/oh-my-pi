@@ -7,7 +7,7 @@ import { TodoReminderComponent } from "../../modes/components/todo-reminder";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
-import type { InteractiveModeContext, TodoItem } from "../../modes/types";
+import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { ExitPlanModeDetails } from "../../tools";
 
@@ -16,6 +16,7 @@ export class EventController {
 	#lastThinkingCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
+	#backgroundToolCallIds = new Set<string>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -250,7 +251,18 @@ export class EventController {
 			case "tool_execution_update": {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
 				if (component) {
-					component.updateResult({ ...event.partialResult, isError: false }, true, event.toolCallId);
+					const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async
+						?.state;
+					const isFinalAsyncState = asyncState === "completed" || asyncState === "failed";
+					component.updateResult(
+						{ ...event.partialResult, isError: asyncState === "failed" },
+						!isFinalAsyncState,
+						event.toolCallId,
+					);
+					if (isFinalAsyncState) {
+						this.ctx.pendingTools.delete(event.toolCallId);
+						this.#backgroundToolCallIds.delete(event.toolCallId);
+					}
 					this.ctx.ui.requestRender();
 				}
 				break;
@@ -259,15 +271,26 @@ export class EventController {
 			case "tool_execution_end": {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
 				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-					this.ctx.pendingTools.delete(event.toolCallId);
+					const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
+					const isBackgroundRunning = asyncState === "running";
+					component.updateResult(
+						{ ...event.result, isError: event.isError },
+						isBackgroundRunning,
+						event.toolCallId,
+					);
+					if (isBackgroundRunning) {
+						this.#backgroundToolCallIds.add(event.toolCallId);
+					} else {
+						this.ctx.pendingTools.delete(event.toolCallId);
+						this.#backgroundToolCallIds.delete(event.toolCallId);
+					}
 					this.ctx.ui.requestRender();
 				}
 				// Update todo display when todo_write tool completes
 				if (event.toolName === "todo_write" && !event.isError) {
-					const details = event.result.details as { todos?: TodoItem[] } | undefined;
-					if (details?.todos) {
-						this.ctx.setTodos(details.todos);
+					const details = event.result.details as { phases?: TodoPhase[] } | undefined;
+					if (details?.phases) {
+						this.ctx.setTodos(details.phases);
 					}
 				} else if (event.toolName === "todo_write" && event.isError) {
 					const textContent = event.result.content.find(
@@ -298,7 +321,14 @@ export class EventController {
 					this.ctx.streamingMessage = undefined;
 				}
 				await this.ctx.flushPendingModelSwitch();
-				this.ctx.pendingTools.clear();
+				for (const toolCallId of Array.from(this.ctx.pendingTools.keys())) {
+					if (!this.#backgroundToolCallIds.has(toolCallId)) {
+						this.ctx.pendingTools.delete(toolCallId);
+					}
+				}
+				this.#backgroundToolCallIds = new Set(
+					Array.from(this.#backgroundToolCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
+				);
 				this.ctx.ui.requestRender();
 				this.sendCompletionNotification();
 				break;
