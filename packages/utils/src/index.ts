@@ -8,6 +8,7 @@ export * from "./format";
 export * from "./fs-error";
 export * from "./glob";
 export * from "./indent";
+export * from "./json";
 export * as logger from "./logger";
 export * as postmortem from "./postmortem";
 export * as procmgr from "./procmgr";
