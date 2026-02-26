@@ -197,16 +197,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-	temperature: {
-		type: "number",
-		default: -1,
-		ui: {
-			tab: "agent",
-			label: "Temperature",
-			description: "Sampling temperature (0 = deterministic, 1 = creative, -1 = provider default)",
-			submenu: true,
-		},
-	},
 	hideThinkingBlock: {
 		type: "boolean",
 		default: false,
@@ -532,7 +522,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"async.maxJobs": {
 		type: "number",
-		default: 15,
+		default: 100,
 		ui: {
 			tab: "tools",
 			label: "Async max jobs",
@@ -544,14 +534,46 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	// Task tool settings
 	// ─────────────────────────────────────────────────────────────────────────
-	"task.isolation.enabled": {
+	"task.isolation.mode": {
+		type: "enum",
+		values: ["none", "worktree", "fuse-overlay"] as const,
+		default: "none",
+		ui: {
+			tab: "tools",
+			label: "Task isolation",
+			description: "Isolation mode for subagents (none, git worktree, or fuse-overlay)",
+			submenu: true,
+		},
+	},
+	"task.isolation.merge": {
+		type: "enum",
+		values: ["patch", "branch"] as const,
+		default: "patch",
+		ui: {
+			tab: "tools",
+			label: "Task isolation merge",
+			description: "How isolated task changes are integrated (patch apply or branch merge)",
+			submenu: true,
+		},
+	},
+	"task.isolation.commits": {
+		type: "enum",
+		values: ["generic", "ai"] as const,
+		default: "generic",
+		ui: {
+			tab: "tools",
+			label: "Task isolation commits",
+			description: "Commit message style for nested repo changes (generic or AI-generated)",
+			submenu: true,
+		},
+	},
+	"task.eager": {
 		type: "boolean",
 		default: false,
 		ui: {
 			tab: "tools",
-			label: "Task isolation",
-			description: "Run subagents in isolated git worktrees",
-			submenu: true,
+			label: "Eager task delegation",
+			description: "Encourage the agent to delegate work to subagents unless changes are trivial",
 		},
 	},
 	"task.maxConcurrency": {
@@ -1016,6 +1038,66 @@ export const SETTINGS_SCHEMA = {
 	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
 	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
+	temperature: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Temperature",
+			description: "Sampling temperature (0 = deterministic, 1 = creative, -1 = provider default)",
+			submenu: true,
+		},
+	},
+	topP: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Top P",
+			description: "Nucleus sampling cutoff (0-1, -1 = provider default)",
+			submenu: true,
+		},
+	},
+	topK: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Top K",
+			description: "Sample from top-K tokens (-1 = provider default)",
+			submenu: true,
+		},
+	},
+	minP: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Min P",
+			description: "Minimum probability threshold (0-1, -1 = provider default)",
+			submenu: true,
+		},
+	},
+	presencePenalty: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Presence penalty",
+			description: "Penalty for introducing already-present tokens (-1 = provider default)",
+			submenu: true,
+		},
+	},
+	repetitionPenalty: {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "agent",
+			label: "Repetition penalty",
+			description: "Penalty for repeated tokens (-1 = provider default)",
+			submenu: true,
+		},
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════

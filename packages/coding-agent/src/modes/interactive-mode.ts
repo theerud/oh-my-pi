@@ -51,6 +51,7 @@ import { InputController } from "./controllers/input-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
+import { OAuthManualInputManager } from "./oauth-manual-input";
 import { setMermaidRenderCallback } from "./theme/mermaid-cache";
 import type { Theme } from "./theme/theme";
 import { getEditorTheme, getMarkdownTheme, onThemeChange, theme } from "./theme/theme";
@@ -133,6 +134,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastStatusText: Text | undefined = undefined;
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, string> = new Map();
+	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 
 	#pendingSlashCommands: SlashCommand[] = [];
 	#cleanupUnsubscribe?: () => void;
@@ -674,6 +676,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.#planModePreviousTools ?? this.session.getActiveToolNames();
 		await this.#exitPlanMode({ silent: true, paused: false });
 		await this.handleClearCommand();
+		// The new session has a fresh local:// root — persist the approved plan there
+		// so `local://<title>.md` resolves correctly in the execution session.
+		const newLocalPath = resolveLocalUrlToPath(options.finalPlanFilePath, {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		});
+		await Bun.write(newLocalPath, planContent);
 		if (previousTools.length > 0) {
 			await this.session.setActiveToolsByName(previousTools);
 		}

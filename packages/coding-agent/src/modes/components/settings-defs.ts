@@ -93,6 +93,22 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "2", label: "Double" },
 		{ value: "3", label: "Triple" },
 	],
+	// Task isolation mode
+	"task.isolation.mode": [
+		{ value: "none", label: "None", description: "No isolation" },
+		{ value: "worktree", label: "Worktree", description: "Git worktree isolation" },
+		{ value: "fuse-overlay", label: "Fuse Overlay", description: "COW overlay via fuse-overlayfs" },
+	],
+	// Task isolation merge strategy
+	"task.isolation.merge": [
+		{ value: "patch", label: "Patch", description: "Combine diffs and git apply" },
+		{ value: "branch", label: "Branch", description: "Commit per task, merge with --no-ff" },
+	],
+	// Task isolation commit messages
+	"task.isolation.commits": [
+		{ value: "generic", label: "Generic", description: "Static commit message" },
+		{ value: "ai", label: "AI", description: "AI-generated commit message from diff" },
+	],
 	// Todo max reminders
 	"todo.reminders.max": [
 		{ value: "1", label: "1 reminder" },
@@ -166,7 +182,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
 		{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 		{ value: "kimi", label: "Kimi", description: "Requires MOONSHOT_SEARCH_API_KEY or MOONSHOT_API_KEY" },
-		{ value: "perplexity", label: "Perplexity", description: "Requires PERPLEXITY_API_KEY" },
+		{ value: "perplexity", label: "Perplexity", description: "Requires PERPLEXITY_COOKIES or PERPLEXITY_API_KEY" },
 		{ value: "anthropic", label: "Anthropic", description: "Uses Anthropic web search" },
 		{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 		{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
@@ -197,6 +213,42 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "0.5", label: "0.5", description: "Balanced" },
 		{ value: "0.7", label: "0.7", description: "Creative" },
 		{ value: "1", label: "1", description: "Maximum variety" },
+	],
+	topP: [
+		{ value: "-1", label: "Default", description: "Use provider default" },
+		{ value: "0.1", label: "0.1", description: "Very focused" },
+		{ value: "0.3", label: "0.3", description: "Focused" },
+		{ value: "0.5", label: "0.5", description: "Balanced" },
+		{ value: "0.9", label: "0.9", description: "Broad" },
+		{ value: "1", label: "1", description: "No nucleus filtering" },
+	],
+	topK: [
+		{ value: "-1", label: "Default", description: "Use provider default" },
+		{ value: "1", label: "1", description: "Greedy top token" },
+		{ value: "20", label: "20", description: "Focused" },
+		{ value: "40", label: "40", description: "Balanced" },
+		{ value: "100", label: "100", description: "Broad" },
+	],
+	minP: [
+		{ value: "-1", label: "Default", description: "Use provider default" },
+		{ value: "0.01", label: "0.01", description: "Very permissive" },
+		{ value: "0.05", label: "0.05", description: "Balanced" },
+		{ value: "0.1", label: "0.1", description: "Strict" },
+	],
+	presencePenalty: [
+		{ value: "-1", label: "Default", description: "Use provider default" },
+		{ value: "0", label: "0", description: "No penalty" },
+		{ value: "0.5", label: "0.5", description: "Mild novelty" },
+		{ value: "1", label: "1", description: "Encourage novelty" },
+		{ value: "2", label: "2", description: "Strong novelty" },
+	],
+	repetitionPenalty: [
+		{ value: "-1", label: "Default", description: "Use provider default" },
+		{ value: "0.8", label: "0.8", description: "Allow repetition" },
+		{ value: "1", label: "1", description: "No penalty" },
+		{ value: "1.1", label: "1.1", description: "Mild penalty" },
+		{ value: "1.2", label: "1.2", description: "Balanced" },
+		{ value: "1.5", label: "1.5", description: "Strong penalty" },
 	],
 	// Symbol preset
 	symbolPreset: [

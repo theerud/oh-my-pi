@@ -22,6 +22,7 @@ import {
 	type FindingPriority,
 	getPriorityInfo,
 	PRIORITY_LABELS,
+	parseReportFindingDetails,
 	type ReportFindingDetails,
 	type SubmitReviewDetails,
 } from "../tools/review";
@@ -66,6 +67,16 @@ function formatFindingSummary(findings: ReportFindingDetails[], theme: Theme): s
 	}
 
 	return `${theme.fg("dim", "Findings:")} ${parts.join(theme.sep.dot)}`;
+}
+
+function normalizeReportFindings(value: unknown): ReportFindingDetails[] {
+	if (!Array.isArray(value)) return [];
+	const findings: ReportFindingDetails[] = [];
+	for (const item of value) {
+		const finding = parseReportFindingDetails(item);
+		if (finding) findings.push(finding);
+	}
+	return findings;
 }
 
 function formatJsonScalar(value: unknown, _theme: Theme): string {
@@ -569,13 +580,13 @@ function renderAgentProgress(
 		// For completed tasks, check for review verdict from submit_result tool
 		if (progress.status === "completed") {
 			const completeData = progress.extractedToolData.submit_result as Array<{ data: unknown }> | undefined;
-			const reportFindingData = progress.extractedToolData.report_finding as ReportFindingDetails[] | undefined;
+			const reportFindingData = normalizeReportFindings(progress.extractedToolData.report_finding);
 			const reviewData = completeData
 				?.map(c => c.data as SubmitReviewDetails)
 				.filter(d => d && typeof d === "object" && "overall_correctness" in d);
 			if (reviewData && reviewData.length > 0) {
 				const summary = reviewData[reviewData.length - 1];
-				const findings = reportFindingData ?? [];
+				const findings = reportFindingData;
 				lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
 				return lines; // Review result handles its own rendering
 			}
@@ -583,8 +594,9 @@ function renderAgentProgress(
 
 		for (const [toolName, dataArray] of Object.entries(progress.extractedToolData)) {
 			// Handle report_finding with tree formatting
-			if (toolName === "report_finding" && (dataArray as ReportFindingDetails[]).length > 0) {
-				const findings = dataArray as ReportFindingDetails[];
+			if (toolName === "report_finding") {
+				const findings = normalizeReportFindings(dataArray);
+				if (findings.length === 0) continue;
 				lines.push(`${continuePrefix}${formatFindingSummary(findings, theme)}`);
 				lines.push(...renderFindings(findings, continuePrefix, expanded, theme));
 				continue;
@@ -693,7 +705,7 @@ function renderFindings(
 
 		const { color } = getPriorityInfo(finding.priority);
 		const titleText = finding.title?.replace(/^\[P\d\]\s*/, "") ?? "Untitled";
-		const loc = `${path.basename(finding.file_path)}:${finding.line_start}`;
+		const loc = `${path.basename(finding.file_path || "<unknown>")}:${finding.line_start}`;
 
 		lines.push(
 			`${continuePrefix}${findingPrefix} ${theme.fg(color, `[${finding.priority}]`)} ${titleText} ${theme.fg("dim", loc)}`,
@@ -728,7 +740,8 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 		result.output,
 	);
 	const aborted = result.aborted ?? false;
-	const success = !aborted && result.exitCode === 0;
+	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
+	const success = !aborted && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
 	const icon = aborted
 		? theme.status.aborted
@@ -737,8 +750,16 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 			: success
 				? theme.status.success
 				: theme.status.error;
-	const iconColor = needsWarning ? "warning" : success ? "success" : "error";
-	const statusText = aborted ? "aborted" : needsWarning ? "warning" : success ? "done" : "failed";
+	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
+	const statusText = aborted
+		? "aborted"
+		: needsWarning
+			? "warning"
+			: success
+				? "done"
+				: mergeFailed
+					? "merge failed"
+					: "failed";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
 	const description = result.description?.trim();
@@ -764,7 +785,7 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 
 	// Check for review result (submit_result with review schema + report_finding)
 	const completeData = result.extractedToolData?.submit_result as Array<{ data: unknown }> | undefined;
-	const reportFindingData = result.extractedToolData?.report_finding as ReportFindingDetails[] | undefined;
+	const reportFindingData = normalizeReportFindings(result.extractedToolData?.report_finding);
 
 	// Extract review verdict from submit_result tool's data field if it matches SubmitReviewDetails
 	const reviewData = completeData
@@ -775,11 +796,11 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 	if (submitReviewData && submitReviewData.length > 0) {
 		// Use combined review renderer
 		const summary = submitReviewData[submitReviewData.length - 1];
-		const findings = reportFindingData ?? [];
+		const findings = reportFindingData;
 		lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
 		return lines;
 	}
-	if (reportFindingData && reportFindingData.length > 0) {
+	if (reportFindingData.length > 0) {
 		const hasCompleteData = completeData && completeData.length > 0;
 		const message = hasCompleteData
 			? "Review verdict missing expected fields"
@@ -847,11 +868,13 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 
 	if (result.patchPath && !aborted && result.exitCode === 0) {
 		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
+	} else if (result.branchName && !aborted && result.exitCode === 0) {
+		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
 	}
 
 	// Error message
-	if (result.error && !success) {
-		lines.push(`${continuePrefix}${theme.fg("error", truncateToWidth(result.error, 70))}`);
+	if (result.error && (!success || mergeFailed)) {
+		lines.push(`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", truncateToWidth(result.error, 70))}`);
 	}
 
 	return lines;
@@ -902,15 +925,20 @@ export function renderResult(
 				});
 
 				const abortedCount = details.results.filter(r => r.aborted).length;
-				const successCount = details.results.filter(r => !r.aborted && r.exitCode === 0).length;
-				const failCount = details.results.length - successCount - abortedCount;
+				const mergeFailedCount = details.results.filter(r => !r.aborted && r.exitCode === 0 && r.error).length;
+				const successCount = details.results.filter(r => !r.aborted && r.exitCode === 0 && !r.error).length;
+				const failCount = details.results.length - successCount - mergeFailedCount - abortedCount;
 				let summary = `${theme.fg("dim", "Total:")} `;
 				if (abortedCount > 0) {
 					summary += theme.fg("error", `${abortedCount} aborted`);
-					if (successCount > 0 || failCount > 0) summary += theme.sep.dot;
+					if (successCount > 0 || mergeFailedCount > 0 || failCount > 0) summary += theme.sep.dot;
 				}
 				if (successCount > 0) {
 					summary += theme.fg("success", `${successCount} succeeded`);
+					if (mergeFailedCount > 0 || failCount > 0) summary += theme.sep.dot;
+				}
+				if (mergeFailedCount > 0) {
+					summary += theme.fg("warning", `${mergeFailedCount} merge failed`);
 					if (failCount > 0) summary += theme.sep.dot;
 				}
 				if (failCount > 0) {

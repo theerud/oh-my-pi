@@ -2,7 +2,7 @@
  * Config CLI command handlers.
  *
  * Handles `omp config <command>` subcommands for managing settings.
- * Uses settings-defs as the source of truth for available settings.
+ * Uses the settings schema as the source of truth for available settings.
  */
 
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
@@ -11,12 +11,13 @@ import {
 	getDefault,
 	getEnumValues,
 	getType,
+	getUi,
 	type SettingPath,
 	Settings,
 	type SettingValue,
 	settings,
 } from "../config/settings";
-import { getAllSettingDefs, type SettingDef } from "../modes/components/settings-defs";
+import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
@@ -38,21 +39,32 @@ export interface ConfigCommandArgs {
 // Setting Filtering
 // =============================================================================
 
+type CliSettingDef = {
+	path: SettingPath;
+	type: string;
+	description: string;
+	tab: string;
+};
+
+const ALL_SETTING_PATHS = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
+
 /** Find setting definition by path */
-function findSettingDef(path: string): SettingDef | undefined {
-	return getAllSettingDefs().find(def => def.path === path);
+function findSettingDef(path: string): CliSettingDef | undefined {
+	if (!(path in SETTINGS_SCHEMA)) return undefined;
+	const key = path as SettingPath;
+	const ui = getUi(key);
+	return {
+		path: key,
+		type: getType(key),
+		description: ui?.description ?? "",
+		tab: ui?.tab ?? "internal",
+	};
 }
 
 /** Get available values for a setting */
-function getSettingValues(def: SettingDef): readonly string[] | undefined {
+function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 	if (def.type === "enum") {
-		return def.values;
-	}
-	if (def.type === "submenu") {
-		const options = def.options;
-		if (options.length > 0) {
-			return options.map(o => o.value);
-		}
+		return getEnumValues(def.path);
 	}
 	return undefined;
 }
@@ -122,18 +134,36 @@ function formatValue(value: unknown): string {
 	if (typeof value === "number") {
 		return chalk.cyan(String(value));
 	}
+	if (typeof value === "string") {
+		return chalk.yellow(value);
+	}
+	if (Array.isArray(value) || typeof value === "object") {
+		try {
+			return chalk.yellow(JSON.stringify(value));
+		} catch {
+			return chalk.yellow(String(value));
+		}
+	}
 	return chalk.yellow(String(value));
 }
 
-function getTypeDisplay(def: SettingDef): string {
-	if (def.type === "boolean") {
-		return "(boolean)";
-	}
+function getTypeDisplay(def: CliSettingDef): string {
 	const values = getSettingValues(def);
 	if (values && values.length > 0) {
 		return `(${values.join("|")})`;
 	}
-	return "(string)";
+	switch (def.type) {
+		case "boolean":
+			return "(boolean)";
+		case "number":
+			return "(number)";
+		case "array":
+			return "(array)";
+		case "record":
+			return "(record)";
+		default:
+			return "(string)";
+	}
 }
 
 // =============================================================================
@@ -163,6 +193,32 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 				throw new Error(`Invalid value: ${rawValue}. Valid values: ${valid.join(", ")}`);
 			}
 			parsedValue = trimmed;
+			break;
+		}
+		case "array": {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch {
+				throw new Error(`Invalid array JSON: ${rawValue}`);
+			}
+			if (!Array.isArray(parsed)) {
+				throw new Error(`Invalid array JSON: ${rawValue}`);
+			}
+			parsedValue = parsed;
+			break;
+		}
+		case "record": {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch {
+				throw new Error(`Invalid record JSON: ${rawValue}`);
+			}
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error(`Invalid record JSON: ${rawValue}`);
+			}
+			parsedValue = parsed;
 			break;
 		}
 		default:
@@ -199,13 +255,13 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 }
 
 function handleList(flags: { json?: boolean }): void {
-	const defs = getAllSettingDefs();
+	const defs = ALL_SETTING_PATHS.map(path => findSettingDef(path)).filter((def): def is CliSettingDef => !!def);
 
 	if (flags.json) {
 		const result: Record<string, { value: unknown; type: string; description: string }> = {};
 		for (const def of defs) {
 			result[def.path] = {
-				value: settings.get(def.path as SettingPath),
+				value: settings.get(def.path),
 				type: def.type,
 				description: def.description,
 			};
@@ -216,7 +272,7 @@ function handleList(flags: { json?: boolean }): void {
 
 	console.log(chalk.bold("Settings:\n"));
 
-	const groups: Record<string, SettingDef[]> = {};
+	const groups: Record<string, CliSettingDef[]> = {};
 	for (const def of defs) {
 		if (!groups[def.tab]) {
 			groups[def.tab] = [];
@@ -233,7 +289,7 @@ function handleList(flags: { json?: boolean }): void {
 	for (const group of sortedGroups) {
 		console.log(chalk.bold.blue(`[${group}]`));
 		for (const def of groups[group]) {
-			const value = settings.get(def.path as SettingPath);
+			const value = settings.get(def.path);
 			const valueStr = formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
@@ -256,7 +312,7 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = settings.get(def.path as SettingPath);
+	const value = settings.get(def.path);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
@@ -281,13 +337,13 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	}
 
 	try {
-		parseAndSetValue(def.path as SettingPath, value);
+		parseAndSetValue(def.path, value);
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
 
-	const newValue = settings.get(def.path as SettingPath);
+	const newValue = settings.get(def.path);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: newValue }));

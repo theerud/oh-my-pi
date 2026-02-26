@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+## [13.3.5] - 2026-02-26
+### Added
+
+- Added support for setting array and record configuration values using JSON syntax
+
+### Changed
+
+- Increased default async max jobs limit from 15 to 100 for improved concurrent task handling
+
+### Fixed
+
+- Improved config display formatting to properly render arrays and objects as JSON instead of `[object Object]`
+- Enhanced type display in config list output to show correct type indicators for number, array, and record settings
+
+## [13.3.3] - 2026-02-26
+### Added
+
+- Support for `move` parameter in `computeHashlineDiff` to enable file move operations alongside content edits
+
+### Changed
+
+- Modified no-op detection logic to allow move-only operations when file content remains unchanged
+
+## [13.3.1] - 2026-02-26
+
+### Added
+
+- Added `topP` setting to control nucleus sampling cutoff for model output diversity
+- Added `topK` setting to sample from top-K tokens for controlled generation
+- Added `minP` setting to enforce minimum probability threshold for token selection
+- Added `presencePenalty` setting to penalize introduction of already-present tokens
+- Added `repetitionPenalty` setting to penalize repeated tokens in model output
+
+### Fixed
+
+- Fixed skill discovery to continue loading project skills when user skills directory is missing
+
+## [13.3.0] - 2026-02-26
+
+### Breaking Changes
+
+- Renamed `task.isolation.enabled` (boolean) setting to `task.isolation.mode` (enum: `none`, `worktree`, `fuse-overlay`). Existing `true`/`false` values are auto-migrated to `worktree`/`none`.
+
+### Added
+
+- Added `PERPLEXITY_COOKIES` env var for Perplexity web search via session cookies extracted from desktop app
+- Added `fuse-overlay` isolation mode for subagents using `fuse-overlayfs` (copy-on-write overlay, no baseline patch apply needed)
+- Added `task.isolation.merge` setting (`patch` or `branch`) to control how isolated task changes are integrated back. `branch` mode commits each task to a temp branch and cherry-picks for clean commit history
+- Added `task.isolation.commits` setting (`generic` or `ai`) for commit messages on isolated task branches and nested repos. `ai` mode uses a smol model to generate conventional commit messages from diffs
+- Nested non-submodule git repos are now discovered and handled during task isolation (changes captured and applied independently from parent repo)
+- Added `task.eager` setting to encourage the agent to delegate work to subagents by default
+- Added manual OAuth login flow that lets users paste redirect URLs with /login for callback-server providers and prevents overlapping logins
+
+### Fixed
+
+- Fixed nested repo changes being lost when tasks commit inside the isolation (baseline state is now committed before task runs, so delta correctly excludes it)
+- Fixed nested repo patches conflicting when multiple tasks contribute to the same repo (baseline untracked files no longer leak into patches)
+- Nested repo changes are now committed after patch application (previously left as untracked files)
+- Failed tasks no longer create stale branches or capture garbage patches (gated on exit code)
+- Merge failures (e.g. conflicting patches) are now non-fatal — agent output is preserved with `merge failed` status instead of `failed`
+- Stale branches are cleaned up when `commitToBranch` fails
+- Commit message generator filters lock files from diffs before AI summarization
+
 ## [13.2.1] - 2026-02-24
 
 ### Fixed
@@ -11,7 +74,6 @@
 ### Changed
 
 - Extracted non-interactive environment config from `bash-interactive.ts` into shared `non-interactive-env.ts` module, applied consistently to all bash execution paths
-
 ## [13.2.0] - 2026-02-23
 ### Breaking Changes
 
@@ -34,12 +96,14 @@
 - Removed unused SSH resource cleanup functions `closeAllConnections` and `unmountAll` from session imports
 
 ## [13.1.2] - 2026-02-23
-### Breaking Changes
 
+### Breaking Changes
 - Removed `timeout` parameter from await tool—tool now waits indefinitely until jobs complete or the call is aborted
 - Renamed `job_ids` parameter to `jobs` in await tool schema
 - Removed `timedOut` field from await tool result details
 
+### Changed
+- Resolved docs index generation paths using path.resolve relative to the script directory
 ## [13.1.1] - 2026-02-23
 
 ### Fixed

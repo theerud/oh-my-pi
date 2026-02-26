@@ -56,6 +56,30 @@ function normalizeMistralToolId(id: string, isMistral: boolean): string {
 	return normalized;
 }
 
+function serializeToolArguments(value: unknown): string {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return "{}";
+		}
+	}
+
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return "{}";
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				return JSON.stringify(parsed);
+			}
+		} catch {}
+		return "{}";
+	}
+
+	return "{}";
+}
+
 type ResolvedOpenAICompat = Required<Omit<OpenAICompat, "openRouterRouting" | "vercelGatewayRouting">> & {
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
@@ -84,6 +108,12 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: ToolChoice;
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 }
+
+type OpenAICompletionsSamplingParams = OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & {
+	top_k?: number;
+	min_p?: number;
+	repetition_penalty?: number;
+};
 
 // LIMITATION: The think tag parser uses naive string matching for <think>/<thinking> tags.
 // If MiniMax models output these literal strings in code blocks, XML examples, or explanations,
@@ -506,7 +536,7 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	const isKimi = model.id.includes("moonshotai/kimi");
 	const effectiveMaxTokens = options?.maxTokens ?? (isKimi ? model.maxTokens : undefined);
 
-	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
+	const params: OpenAICompletionsSamplingParams = {
 		model: model.id,
 		messages,
 		stream: true,
@@ -530,6 +560,21 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 
 	if (options?.temperature !== undefined) {
 		params.temperature = options.temperature;
+	}
+	if (options?.topP !== undefined) {
+		params.top_p = options.topP;
+	}
+	if (options?.topK !== undefined) {
+		params.top_k = options.topK;
+	}
+	if (options?.minP !== undefined) {
+		params.min_p = options.minP;
+	}
+	if (options?.presencePenalty !== undefined) {
+		params.presence_penalty = options.presencePenalty;
+	}
+	if (options?.repetitionPenalty !== undefined) {
+		params.repetition_penalty = options.repetitionPenalty;
 	}
 
 	if (context.tools) {
@@ -631,6 +676,40 @@ export function convertMessages(
 		return id;
 	};
 	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
+
+	const remappedToolCallIds = new Map<string, string[]>();
+	let generatedToolCallIdCounter = 0;
+
+	const generateFallbackToolCallId = (seed: string): string => {
+		generatedToolCallIdCounter += 1;
+		const hash = Bun.hash
+			.xxHash64(`${model.provider}:${model.id}:${seed}:${generatedToolCallIdCounter}`)
+			.toString(36);
+		return `call_${hash}`;
+	};
+
+	const rememberToolCallId = (originalId: string, normalizedId: string): void => {
+		const queue = remappedToolCallIds.get(originalId);
+		if (queue) {
+			queue.push(normalizedId);
+			return;
+		}
+		remappedToolCallIds.set(originalId, [normalizedId]);
+	};
+
+	const consumeToolCallId = (originalId: string): string | null => {
+		const queue = remappedToolCallIds.get(originalId);
+		if (!queue || queue.length === 0) return null;
+		const nextId = queue.shift() ?? null;
+		if (queue.length === 0) remappedToolCallIds.delete(originalId);
+		return nextId;
+	};
+
+	const ensureToolCallId = (rawId: string, seed: string): string => {
+		const normalized = normalizeToolCallId(rawId);
+		if (normalized.trim().length > 0) return normalized;
+		return generateFallbackToolCallId(seed);
+	};
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -769,14 +848,18 @@ export function convertMessages(
 				(assistantMsg as any)[reasoningField] = ".";
 			}
 			if (toolCalls.length > 0) {
-				assistantMsg.tool_calls = toolCalls.map(tc => ({
-					id: normalizeMistralToolId(tc.id, compat.requiresMistralToolIds),
-					type: "function" as const,
-					function: {
-						name: tc.name,
-						arguments: JSON.stringify(tc.arguments),
-					},
-				}));
+				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
+					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`);
+					rememberToolCallId(tc.id, toolCallId);
+					return {
+						id: normalizeMistralToolId(toolCallId, compat.requiresMistralToolIds),
+						type: "function" as const,
+						function: {
+							name: tc.name,
+							arguments: serializeToolArguments(tc.arguments),
+						},
+					};
+				});
 				const reasoningDetails = toolCalls
 					.filter(tc => tc.thoughtSignature)
 					.map(tc => {
@@ -825,10 +908,13 @@ export function convertMessages(
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
 				// Some providers (e.g. Mistral) require the 'name' field in tool results
+				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
+				const resolvedToolCallId =
+					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
 				const toolResultMsg: ChatCompletionToolMessageParam = {
 					role: "tool",
 					content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
-					tool_call_id: normalizeMistralToolId(toolMsg.toolCallId, compat.requiresMistralToolIds),
+					tool_call_id: normalizeMistralToolId(resolvedToolCallId, compat.requiresMistralToolIds),
 				};
 				if (compat.requiresToolResultName && toolMsg.toolName) {
 					(toolResultMsg as any).name = toolMsg.toolName;

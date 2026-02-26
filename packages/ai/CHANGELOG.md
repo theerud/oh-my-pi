@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
-## [13.2.0] - 2026-02-23
+## [13.3.1] - 2026-02-26
+### Added
 
+- Added `topP`, `topK`, `minP`, `presencePenalty`, and `repetitionPenalty` options to `StreamOptions` for fine-grained control over model sampling behavior
+
+## [13.3.0] - 2026-02-26
+
+### Changed
+- Allowed OAuth provider logins to supply a manual authorization code handler with a default prompt when none is provided
+## [13.2.0] - 2026-02-23
 ### Added
 
 - Added support for GitHub Copilot provider in strict mode for both openai-completions and openai-responses tool schemas

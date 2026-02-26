@@ -729,7 +729,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const enableLsp = options.enableLsp ?? true;
 	const asyncEnabled = settings.get("async.enabled");
-	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 15));
+	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 	const ASYNC_PREVIEW_MAX_CHARS = 4_000;
 	const formatAsyncResultForFollowUp = async (result: string): Promise<string> => {
@@ -1120,6 +1120,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 
 	const repeatToolDescriptions = settings.get("repeatToolDescriptions");
+	const eagerTasks = settings.get("task.eager");
 	const intentField = settings.get("tools.intentTracing") || $env.PI_INTENT_TRACING === "1" ? INTENT_FIELD : undefined;
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
@@ -1135,6 +1136,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills") as SkillsSettings,
 			appendSystemPrompt: memoryInstructions,
 			repeatToolDescriptions,
+			eagerTasks,
 			intentField,
 		});
 
@@ -1154,6 +1156,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: memoryInstructions,
 				repeatToolDescriptions,
+				eagerTasks,
 				intentField,
 			});
 		}
@@ -1278,6 +1281,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		interruptMode: settings.get("interruptMode") ?? "immediate",
 		thinkingBudgets: settings.getGroup("thinkingBudgets"),
 		temperature: settings.get("temperature") >= 0 ? settings.get("temperature") : undefined,
+		topP: settings.get("topP") >= 0 ? settings.get("topP") : undefined,
+		topK: settings.get("topK") >= 0 ? settings.get("topK") : undefined,
+		minP: settings.get("minP") >= 0 ? settings.get("minP") : undefined,
+		presencePenalty: settings.get("presencePenalty") >= 0 ? settings.get("presencePenalty") : undefined,
+		repetitionPenalty: settings.get("repetitionPenalty") >= 0 ? settings.get("repetitionPenalty") : undefined,
 		kimiApiFormat: settings.get("providers.kimiApiFormat") ?? "anthropic",
 		preferWebsockets: preferOpenAICodexWebsockets,
 		getToolContext: tc => toolContextStore.getContext(tc),
