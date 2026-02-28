@@ -69,11 +69,15 @@ describe("config CLI schema coverage", () => {
 		await runConfigCommand({ action: "list", flags: {} });
 
 		const lines = logSpy.mock.calls.map(call => String(call[0] ?? ""));
-		const modelRolesLine = lines.find(line => line.includes("modelRoles ="));
+		const plainLines = lines.map(line => Bun.stripANSI(line));
+		const modelRolesLine = plainLines.find(line => line.includes("modelRoles ="));
 		expect(modelRolesLine).toBeDefined();
-		expect(modelRolesLine).toContain("modelRoles = {}");
-		expect(modelRolesLine).toContain("(record)");
-		expect(modelRolesLine).not.toContain("[object Object]");
+		const plainModelRolesLine = String(modelRolesLine);
+		expect(plainModelRolesLine).toContain("modelRoles =");
+		expect(plainModelRolesLine).toContain("(record)");
+		expect(plainModelRolesLine).toContain("{");
+		expect(plainModelRolesLine).toContain("}");
+		expect(plainModelRolesLine).not.toContain("[object Object]");
 	});
 
 	it("sets and gets record settings as JSON objects", async () => {

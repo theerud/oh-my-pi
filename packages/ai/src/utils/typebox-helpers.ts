@@ -25,6 +25,142 @@ export function StringEnum<const T extends readonly string[]>(
 
 export const NO_STRICT = Bun.env.PI_NO_STRICT === "1";
 
+const NON_STRUCTURAL_SCHEMA_KEYS = new Set([
+	"format",
+	"pattern",
+	"minLength",
+	"maxLength",
+	"minimum",
+	"maximum",
+	"exclusiveMinimum",
+	"exclusiveMaximum",
+	"minItems",
+	"maxItems",
+	"uniqueItems",
+	"multipleOf",
+	"$schema",
+	"examples",
+	"default",
+	"title",
+	"$comment",
+	"if",
+	"then",
+	"else",
+	"not",
+	"prefixItems",
+	"unevaluatedProperties",
+	"unevaluatedItems",
+	"patternProperties",
+	"$dynamicRef",
+	"$dynamicAnchor",
+]);
+
+const COMBINATOR_KEYS = ["anyOf", "allOf", "oneOf"] as const;
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function sanitizeSchemaForStrictMode(schema: Record<string, unknown>): Record<string, unknown> {
+	const typeValue = schema.type;
+	if (Array.isArray(typeValue)) {
+		const typeVariants = typeValue.filter((entry): entry is string => typeof entry === "string");
+		const schemaWithoutType = { ...schema };
+		delete schemaWithoutType.type;
+
+		const sanitizedWithoutType = sanitizeSchemaForStrictMode(schemaWithoutType);
+		if (typeVariants.length === 0) {
+			return sanitizedWithoutType;
+		}
+
+		const variants = typeVariants.map(variantType => {
+			const variantSchema: Record<string, unknown> = { ...sanitizedWithoutType, type: variantType };
+			if (variantType !== "object") {
+				delete variantSchema.properties;
+				delete variantSchema.required;
+				delete variantSchema.additionalProperties;
+			}
+			if (variantType !== "array") {
+				delete variantSchema.items;
+			}
+			return sanitizeSchemaForStrictMode(variantSchema);
+		});
+
+		if (variants.length === 1) {
+			return variants[0] as Record<string, unknown>;
+		}
+
+		return {
+			anyOf: variants,
+		};
+	}
+
+	const sanitized: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(schema)) {
+		if (NON_STRUCTURAL_SCHEMA_KEYS.has(key) || key === "type" || key === "const") {
+			continue;
+		}
+
+		if (key === "properties" && isObjectRecord(value)) {
+			const properties = Object.fromEntries(
+				Object.entries(value).map(([propertyName, propertySchema]) => [
+					propertyName,
+					isObjectRecord(propertySchema) ? sanitizeSchemaForStrictMode(propertySchema) : propertySchema,
+				]),
+			);
+			sanitized.properties = properties;
+			continue;
+		}
+
+		if (key === "items") {
+			if (isObjectRecord(value)) {
+				sanitized.items = sanitizeSchemaForStrictMode(value);
+			} else if (Array.isArray(value)) {
+				sanitized.items = value.map(entry => (isObjectRecord(entry) ? sanitizeSchemaForStrictMode(entry) : entry));
+			} else {
+				sanitized.items = value;
+			}
+			continue;
+		}
+
+		if (COMBINATOR_KEYS.includes(key as (typeof COMBINATOR_KEYS)[number]) && Array.isArray(value)) {
+			sanitized[key] = value.map(entry => (isObjectRecord(entry) ? sanitizeSchemaForStrictMode(entry) : entry));
+			continue;
+		}
+
+		if ((key === "$defs" || key === "definitions") && isObjectRecord(value)) {
+			sanitized[key] = Object.fromEntries(
+				Object.entries(value).map(([definitionName, definitionSchema]) => [
+					definitionName,
+					isObjectRecord(definitionSchema) ? sanitizeSchemaForStrictMode(definitionSchema) : definitionSchema,
+				]),
+			);
+			continue;
+		}
+
+		if (key === "additionalProperties" && isObjectRecord(value)) {
+			sanitized.additionalProperties = sanitizeSchemaForStrictMode(value);
+			continue;
+		}
+
+		sanitized[key] = value;
+	}
+
+	if (Object.hasOwn(schema, "const")) {
+		sanitized.enum = [schema.const];
+	}
+
+	if (typeof typeValue === "string") {
+		sanitized.type = typeValue;
+	}
+
+	if (sanitized.type === undefined && isObjectRecord(sanitized.properties)) {
+		sanitized.type = "object";
+	}
+
+	return sanitized;
+}
+
 /**
  * Recursively enforces JSON Schema constraints required by OpenAI/Codex strict mode:
  *   - `additionalProperties: false` on every object node
@@ -36,31 +172,60 @@ export const NO_STRICT = Bun.env.PI_NO_STRICT === "1";
  */
 export function enforceStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
 	const result = { ...schema };
-	if (result.type === "object") {
+	const typeDescriptor = result.type;
+	const isObjectType =
+		typeDescriptor === "object" ||
+		(Array.isArray(typeDescriptor) && typeDescriptor.some(value => value === "object"));
+	if (isObjectType) {
 		result.additionalProperties = false;
-		if (result.properties != null && typeof result.properties === "object") {
-			const props = result.properties as Record<string, Record<string, unknown>>;
-			const required = new Set(Array.isArray(result.required) ? (result.required as string[]) : []);
-			result.properties = Object.fromEntries(
-				Object.entries(props).map(([k, v]) => {
-					const processed = enforceStrictSchema(v);
-					// Optional property — wrap as nullable so strict mode accepts it
-					if (!required.has(k)) {
-						return [k, { anyOf: [processed, { type: "null" }] }];
-					}
-					return [k, processed];
-				}),
-			);
-			result.required = Object.keys(props);
-		}
+		const propertiesValue = result.properties;
+		const props =
+			propertiesValue != null && typeof propertiesValue === "object" && !Array.isArray(propertiesValue)
+				? (propertiesValue as Record<string, unknown>)
+				: {};
+		const originalRequired = new Set(
+			Array.isArray(result.required)
+				? result.required.filter((value): value is string => typeof value === "string")
+				: [],
+		);
+		const strictProperties = Object.fromEntries(
+			Object.entries(props).map(([key, value]) => {
+				const processed =
+					value != null && typeof value === "object" && !Array.isArray(value)
+						? enforceStrictSchema(value as Record<string, unknown>)
+						: value;
+				// Optional property — wrap as nullable so strict mode accepts it
+				if (!originalRequired.has(key)) {
+					return [key, { anyOf: [processed, { type: "null" }] }];
+				}
+				return [key, processed];
+			}),
+		);
+		result.properties = strictProperties;
+		result.required = Object.keys(strictProperties);
 	}
 	if (result.items != null && typeof result.items === "object" && !Array.isArray(result.items)) {
 		result.items = enforceStrictSchema(result.items as Record<string, unknown>);
 	}
-	for (const key of ["anyOf", "allOf", "oneOf"] as const) {
+	for (const key of COMBINATOR_KEYS) {
 		if (Array.isArray(result[key])) {
-			result[key] = (result[key] as Record<string, unknown>[]).map(enforceStrictSchema);
+			result[key] = (result[key] as unknown[]).map(entry =>
+				entry != null && typeof entry === "object" && !Array.isArray(entry)
+					? enforceStrictSchema(entry as Record<string, unknown>)
+					: entry,
+			);
 		}
 	}
 	return result;
+}
+
+export function tryEnforceStrictSchema(schema: Record<string, unknown>): {
+	schema: Record<string, unknown>;
+	strict: boolean;
+} {
+	try {
+		return { schema: enforceStrictSchema(schema), strict: true };
+	} catch {
+		return { schema, strict: false };
+	}
 }

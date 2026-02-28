@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [13.3.8] - 2026-02-28
+### Changed
+
+- Changed intent field name from `agent__intent` to `_i` in tool schemas
+
+### Fixed
+
+- Fixed synthetic tool result text formatting so aborted/error tool results no longer emit `Tool execution was aborted.: Request was aborted` style punctuation.
+## [13.3.7] - 2026-02-27
+### Added
+
+- Added `lenientArgValidation` option to tools to allow graceful handling of argument validation errors by passing raw arguments to execute() instead of returning an error to the LLM
+
 ## [13.3.1] - 2026-02-26
 ### Added
 

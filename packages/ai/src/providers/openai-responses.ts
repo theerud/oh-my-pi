@@ -34,8 +34,12 @@ import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-ins
 import { parseStreamingJson } from "../utils/json-parse";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
-import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
+import { NO_STRICT, tryEnforceStrictSchema } from "../utils/typebox-helpers";
+import {
+	buildCopilotDynamicHeaders,
+	getCopilotInitiatorOverride,
+	hasCopilotVisionInput,
+} from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
 
 /**
@@ -394,6 +398,7 @@ function createClient(
 		const copilotHeaders = buildCopilotDynamicHeaders({
 			messages: context.messages,
 			hasImages,
+			initiatorOverride: getCopilotInitiatorOverride(headers),
 		});
 		Object.assign(headers, copilotHeaders);
 	}
@@ -694,15 +699,16 @@ function convertMessages(
 function convertTools(tools: Tool[], strictMode: boolean): OpenAITool[] {
 	return tools.map(tool => {
 		const strict = !NO_STRICT && strictMode && tool.strict !== false;
-		const parameters = strict
-			? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
-			: (tool.parameters as unknown as Record<string, unknown>);
+		const baseParameters = tool.parameters as unknown as Record<string, unknown>;
+		const strictResult = strict ? tryEnforceStrictSchema(baseParameters) : { schema: baseParameters, strict: false };
+		const parameters = strictResult.schema;
+		const effectiveStrict = strict && strictResult.strict;
 		return {
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
 			parameters,
-			...(strict && { strict: true }),
+			...(effectiveStrict && { strict: true }),
 		} as OpenAITool;
 	});
 }

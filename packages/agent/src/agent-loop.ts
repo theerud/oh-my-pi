@@ -123,7 +123,7 @@ function normalizeMessagesForProvider(
 	return changed ? normalized : messages;
 }
 
-export const INTENT_FIELD = "agent__intent";
+export const INTENT_FIELD = "_i";
 
 function injectIntentIntoSchema(schema: unknown): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
@@ -507,7 +507,16 @@ async function executeToolCalls(
 		try {
 			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
 
-			const validatedArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
+			let effectiveArgs: Record<string, unknown>;
+			try {
+				effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
+			} catch (validationError) {
+				if (tool.lenientArgValidation) {
+					effectiveArgs = argsForExecution;
+				} else {
+					throw validationError;
+				}
+			}
 			const toolContext = getToolContext
 				? getToolContext({
 						batchId,
@@ -518,7 +527,7 @@ async function executeToolCalls(
 				: undefined;
 			result = await tool.execute(
 				toolCall.id,
-				transformToolCallArguments ? transformToolCallArguments(validatedArgs, toolCall.name) : validatedArgs,
+				transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs,
 				tool.nonAbortable ? undefined : toolSignal,
 				partialResult => {
 					if (interruptState.triggered) return;
@@ -627,9 +636,9 @@ function createAbortedToolResult(
 	reason: "aborted" | "error",
 	errorMessage?: string,
 ): ToolResultMessage {
-	const message = reason === "aborted" ? "Tool execution was aborted." : "Tool execution failed due to an error.";
+	const message = reason === "aborted" ? "Tool execution was aborted" : "Tool execution failed due to an error";
 	const result: AgentToolResult<any> = {
-		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : message }],
+		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
 		details: {},
 	};
 

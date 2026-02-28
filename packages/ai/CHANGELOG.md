@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [13.3.8] - 2026-02-28
+### Fixed
+
+- Fixed response body reuse error when handling 429 rate limit responses with retry logic
+
+## [13.3.7] - 2026-02-27
+### Added
+
+- Added `tryEnforceStrictSchema` function that gracefully downgrades to non-strict mode when schema enforcement fails, enabling better compatibility with malformed or circular schemas
+- Added `sanitizeSchemaForStrictMode` function to normalize JSON schemas by stripping non-structural keywords, converting `const` to `enum`, and expanding type arrays into `anyOf` variants
+- Added Kilo Gateway provider support with OpenAI-compatible model discovery, OAuth `/login kilo`, and `KILO_API_KEY` environment variable support ([#193](https://github.com/can1357/oh-my-pi/issues/193))
+
+### Changed
+
+- Changed strict mode handling in OpenAI providers to use `tryEnforceStrictSchema` for safer schema enforcement with automatic fallback to non-strict mode
+- Enhanced `enforceStrictSchema` to properly handle schemas with type arrays containing `object` (e.g., `type: ["object", "null"]`)
+
+### Fixed
+
+- Fixed `enforceStrictSchema` to properly handle malformed object schemas with required keys but missing properties
+- Fixed `enforceStrictSchema` to correctly process nested object schemas within `anyOf`, `allOf`, and `oneOf` combinators
+
 ## [13.3.1] - 2026-02-26
 ### Added
 

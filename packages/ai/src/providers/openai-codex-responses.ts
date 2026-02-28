@@ -32,7 +32,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode";
-import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
+import { NO_STRICT, tryEnforceStrictSchema } from "../utils/typebox-helpers";
 import {
 	CODEX_BASE_URL,
 	JWT_CLAIM_PATH,
@@ -187,7 +187,11 @@ function isCodexWebSocketTransportError(error: unknown): boolean {
 function isCodexWebSocketRetryableStreamError(error: unknown): boolean {
 	if (!(error instanceof Error) || !isCodexWebSocketTransportError(error)) return false;
 	const message = error.message.toLowerCase();
-	return message.includes("websocket closed (") || message.includes("websocket closed before response completion");
+	return (
+		message.includes("websocket closed (") ||
+		message.includes("websocket closed before response completion") ||
+		message.includes("websocket connection is unavailable")
+	);
 }
 
 function toCodexHeaderRecord(value: unknown): Record<string, string> | null {
@@ -1440,7 +1444,7 @@ async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSign
 			}
 			if (signal?.aborted) return response;
 			// Read error body for retry delay parsing
-			const errorBody = await response.text();
+			const errorBody = await response.clone().text();
 			const { delay, serverProvided } = getRetryDelayMs(response, attempt, errorBody);
 			// For 429s with a server-provided delay, use a time budget instead of attempt count
 			if (response.status === 429 && serverProvided) {
@@ -1706,15 +1710,17 @@ function convertTools(tools: Tool[]): Array<{
 }> {
 	return tools.map(tool => {
 		const strict = !NO_STRICT && tool.strict;
+		const baseParameters = tool.parameters as unknown as Record<string, unknown>;
+		const strictResult = strict ? tryEnforceStrictSchema(baseParameters) : { schema: baseParameters, strict: false };
+		const parameters = strictResult.schema;
+		const effectiveStrict = strict && strictResult.strict;
 		return {
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
-			parameters: strict
-				? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
-				: (tool.parameters as unknown as Record<string, unknown>),
+			parameters,
 			// Only include strict if provider supports it. Some reject unknown fields.
-			...(strict && { strict: true }),
+			...(effectiveStrict && { strict: true }),
 		};
 	});
 }

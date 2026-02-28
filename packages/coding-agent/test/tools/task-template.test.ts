@@ -31,7 +31,7 @@ describe("renderTemplate", () => {
 			description: "label",
 			assignment: "the real work",
 		});
-		expect(result.task).toStartWith(`${sectionSeparator("Background").trimStart()}\ncontext`);
+		expect(result.task).toStartWith(`${sectionSeparator("Background").trimStart()}\n<context>\ncontext`);
 		expect(result.task).toContain("the real work");
 	});
 
@@ -42,15 +42,5 @@ describe("renderTemplate", () => {
 			assignment: "just the assignment",
 		});
 		expect(result.task).toBe("just the assignment");
-	});
-
-	test("passes through skills", () => {
-		const result = renderTemplate(undefined, {
-			id: "X",
-			description: "label",
-			assignment: "do stuff",
-			skills: ["react", "postgres"],
-		});
-		expect(result.skills).toEqual(["react", "postgres"]);
 	});
 });

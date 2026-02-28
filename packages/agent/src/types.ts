@@ -119,8 +119,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	/**
 	 * Enable intent tracing for tool calls.
-	 * When enabled, the harness injects a `_intent: string` field into tool schemas sent to the model,
-	 * then strips `_intent` from arguments before executing tools.
+	 * When enabled, the harness injects an `_i: string` field into tool schemas sent to the model,
+	 * then strips `_i` from arguments before executing tools.
 	 */
 	intentTracing?: boolean;
 }
@@ -234,6 +234,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * - "exclusive": runs alone; other tools wait until it finishes
 	 */
 	concurrency?: "shared" | "exclusive";
+	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
+	lenientArgValidation?: boolean;
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 
 	/** Optional custom rendering for tool call display (returns UI component) */

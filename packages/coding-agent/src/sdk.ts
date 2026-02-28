@@ -144,8 +144,6 @@ export interface CreateAgentSessionOptions {
 
 	/** Skills. Default: discovered from multiple locations */
 	skills?: Skill[];
-	/** Skills to inline into the system prompt instead of listing available skills. */
-	preloadedSkills?: Skill[];
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
@@ -1128,7 +1126,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const defaultPrompt = await buildSystemPromptInternal({
 			cwd,
 			skills,
-			preloadedSkills: options.preloadedSkills,
 			contextFiles,
 			tools,
 			toolNames,
@@ -1147,7 +1144,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return await buildSystemPromptInternal({
 				cwd,
 				skills,
-				preloadedSkills: options.preloadedSkills,
 				contextFiles,
 				tools,
 				toolNames,
@@ -1299,7 +1295,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return key;
 		},
 		cursorExecHandlers,
-		transformToolCallArguments: obfuscator?.hasSecrets() ? args => obfuscator!.deobfuscateObject(args) : undefined,
+		transformToolCallArguments: (args, _toolName) => {
+			let result = args;
+			const maxTimeout = settings.get("tools.maxTimeout");
+			if (maxTimeout > 0 && typeof result.timeout === "number") {
+				result = { ...result, timeout: Math.min(result.timeout, maxTimeout) };
+			}
+			if (obfuscator?.hasSecrets()) {
+				result = obfuscator.deobfuscateObject(result);
+			}
+			return result;
+		},
 		intentTracing: !!intentField,
 	});
 	cursorEventEmitter = event => agent.emitExternalEvent(event);

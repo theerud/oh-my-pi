@@ -158,7 +158,6 @@ export interface ExecutorOptions {
 	eventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
 	skills?: Skill[];
-	preloadedSkills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
@@ -950,7 +949,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				requireSubmitResultTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
-				preloadedSkills: options.preloadedSkills,
 				promptTemplates: options.promptTemplates,
 				systemPrompt: defaultPrompt =>
 					renderPromptTemplate(subagentSystemPromptTemplate, {
@@ -1072,6 +1070,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			});
 
 			await session.prompt(task);
+			await session.waitForIdle();
 
 			const reminderToolChoice = buildSubmitResultToolChoice(session.model);
 
@@ -1085,6 +1084,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					});
 
 					await session.prompt(reminder, reminderToolChoice ? { toolChoice: reminderToolChoice } : undefined);
+					await session.waitForIdle();
 				} catch (err) {
 					logger.error("Subagent prompt failed", {
 						error: err instanceof Error ? err.message : String(err),
@@ -1092,20 +1092,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
+			await session.waitForIdle();
 			if (!submitResultCalled && !abortSignal.aborted) {
 				aborted = true;
 				exitCode = 1;
 				error ??= SUBAGENT_WARNING_MISSING_SUBMIT_RESULT;
 			}
 
-			const lastMessage = session.state.messages[session.state.messages.length - 1];
-			if (lastMessage?.role === "assistant") {
-				if (lastMessage.stopReason === "aborted") {
+			const lastAssistant = session.getLastAssistantMessage();
+			if (lastAssistant) {
+				if (lastAssistant.stopReason === "aborted") {
 					aborted = abortReason === "signal" || abortReason === undefined;
 					exitCode = 1;
-				} else if (lastMessage.stopReason === "error") {
+				} else if (lastAssistant.stopReason === "error") {
 					exitCode = 1;
-					error ??= lastMessage.errorMessage || "Subagent failed";
+					error ??= lastAssistant.errorMessage || "Subagent failed";
 				}
 			}
 		} catch (err) {
