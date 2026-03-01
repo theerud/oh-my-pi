@@ -2,13 +2,147 @@
 
 ## [Unreleased]
 
+## [13.5.3] - 2026-03-01
+
+### Added
+
+- Auto-include `ast_grep` and `ast_edit` tools when their text-based counterparts (`grep`, `edit`) are requested and the AST tools are enabled
+- Enforced tool decision in plan mode—agent now requires calling either `ask` or `exit_plan_mode` when a turn ends without a required tool call
+- Auto-correction of escaped tab indentation in edits (enabled by default, controllable via `PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS` environment variable)
+- Warning when suspicious Unicode escape placeholder `\uDDDD` is detected in edit content
+
+### Changed
+
+- Updated bash tool description to conditionally show `ast_grep` and `ast_edit` guidance based on tool availability in the session
+- Replaced timeout-based cancellation with AbortSignal-based cancellation in the `ask` tool for more reliable user interaction handling
+- Updated `ask` tool to distinguish between user-initiated cancellation and timeout-driven auto-selection, with only user cancellation aborting the turn
+- Updated hashline documentation to clarify that `\t` in JSON represents a real tab character, not a literal backslash-t sequence
+
+### Fixed
+
+- Fixed race condition in dialog overlay handling where multiple concurrent resolutions could occur
+- Cancelling the `ask` tool now aborts the current turn instead of returning a normal cancelled selection, while timeout-driven auto-cancel still returns without aborting
+
+## [13.5.2] - 2026-03-01
+
+### Added
+
+- Added `checkpoint` tool to create context checkpoints before exploratory work, allowing you to investigate with many intermediate tool calls and minimize context cost afterward
+- Added `rewind` tool to end an active checkpoint and replace intermediate exploration messages with a concise investigation report
+- Added `checkpoint.enabled` setting to control availability of the checkpoint and rewind tools
+- Added `render_mermaid` tool to convert Mermaid graph source into ASCII diagram output
+- Added `renderMermaid.enabled` setting to control availability of the render_mermaid tool
+
+### Changed
+
+- Changed Mermaid rendering from PNG images to ASCII diagrams in theme rendering
+- Changed `prerenderMermaid()` function to synchronously render ASCII instead of asynchronously rendering PNG
+
+## [13.5.0] - 2026-03-01
+
+### Added
+
+- Added `hlinejsonref` Handlebars helper for embedding hashline references inside JSON blocks in prompts
+- Added `librarian` agent for researching external libraries and APIs by reading source code
+- Added `oracle` agent for deep reasoning on debugging, architecture decisions, and technical advice
+- Added `dependencies` and `risks` output fields to explore agent for better context handoff
+- Added support for `lsp`, `fetch`, `web_search`, and `ast_grep` tools to explore, plan, and reviewer agents
+
+### Changed
+
+- Enhanced hashline tool documentation with explicit prohibition on formatting-only edits
+- Added mandatory rule requiring indentation in `lines` to match surrounding context exactly from `read` output
+- Changed explore agent output field `query` to `summary` with expanded description for findings and conclusions
+
+## [13.4.1] - 2026-03-01
+
+### Fixed
+
+- Pending resolve reminders now trigger as soon as a preview action is queued, before the next assistant turn, with regression coverage in `agent-session-resolve-reminder` tests
+
+## [13.4.0] - 2026-03-01
+
+### Breaking Changes
+
+- `ast_grep` parameter `pattern` (string) replaced by `patterns` (string[])
+- `ast_edit` parameters `pattern` + `rewrite` replaced by `ops: Array<{ pat: string; out: string }>`
+
+### Added
+
+- Added `resolve` tool to apply or discard pending preview actions with required reasoning
+- AST edit now registers pending actions after preview, allowing explicit apply/discard workflow via `resolve` tool
+- Custom tools can register pending actions via `pushPendingAction(action)` in `CustomToolAPI`, enabling the `resolve` workflow for custom preview-apply flows
+- `deferrable?: boolean` field added to `AgentTool`, `CustomTool`, and `ToolDefinition` interfaces; tools that set it signal they may stage pending actions
+- `HIDDEN_TOOLS` and `ResolveTool` exported from `@oh-my-pi/pi-coding-agent` SDK for manual tool composition
+- `PendingActionStore` now uses a LIFO stack (`push`/`peek`/`pop`); multiple deferrable tools can stage actions that resolve in reverse order of registration
+- Added `gemini`, `codex`, and `synthetic` as supported values for the `providers.webSearch` setting
+- `ast_grep` tool now accepts a `patterns` array (replaces single `pattern`); multiple patterns run in one native pass and results are merged before offset/limit
+- `ast_edit` tool now accepts an `ops` array of `{ pat, out }` entries (replaces `pattern` + `rewrite`); duplicate patterns are rejected upfront
+- AST find output now uses `>>` prefix on match-start lines and pads line numbers; directory-tree grouping with `# dir` / `## └─ file` headers for directory-scoped searches
+- AST replace output now renders diff-style (`-before` / `+after`) change previews grouped by directory
+- Both AST tools now report `scopePath`, `files`, and per-file match/replacement counts in tool details
+- Task item `id` max length raised from 32 to 48 characters
+- Anthropic web search provider now uses `buildAnthropicSearchHeaders` (dedicated search header builder separate from inference headers)
+- Gemini web search provider: endpoint fallback (daily → sandbox) with retry on 429/5xx
+- Gemini web search now injects Antigravity system instruction and aligned request metadata (`requestType`, `userAgent`, `requestId`) for Antigravity credentials
+- `buildGeminiRequestTools()` helper for composable Gemini tool configuration (googleSearch, codeExecution, urlContext)
+- Web search schema exposes `max_tokens`, `temperature`, and `num_search_results` as tool parameters
+- Web search provider fallback: when an explicit provider is unavailable, resolves the auto chain instead of returning empty results
+
+### Changed
+
+- Simplified `resolve` tool output rendering to use inline highlighted format instead of boxed layout
+- Updated `resolve` tool to parse source tool name from label using colon separator for cleaner display
+- `resolve` tool is now conditionally injected: included only when at least one active tool has `deferrable: true` (previously always included)
+- `discoverAndLoadCustomTools` / `loadCustomTools` accept an optional `pendingActionStore` parameter to wire `pushPendingAction` for custom tools
+- AST edit tool no longer accepts `preview` parameter; all AST edit calls now return previews by default
+- AST edit workflow changed: preview is always shown, then use `resolve` tool to apply or discard changes
+- Agent now suggests calling `resolve` tool after AST edit preview with system reminder
+- `ast_grep`: `include_meta` parameter removed; metavariable captures are now always included in output
+- `ast_edit`: `dry_run` renamed to `preview`; `max_files` removed from schema and capped globally via `$PI_MAX_AST_FILES` (default 1000); `max_replacements` renamed to `limit`
+- `ast_grep` and `ast_edit`: parse errors in tool output are now capped at `PARSE_ERRORS_LIMIT` (20); excess errors are summarised as `N / total parse issues` rather than flooding the context
+- Updated `ast_grep` and `ast_edit` tool prompt examples to use concise, idiomatic patterns
+
+### Removed
+
+- Removed `normativeRewrite` setting that rewrote tool call arguments to normalized format in session history
+- Removed `buildNormativeUpdateInput()` helper and normative patch transformation logic
+
+### Fixed
+
+- `ast_edit` no longer rejects empty `out` values; an empty string now deletes matched nodes
+- `ast_edit` no longer trims `pat` and `out` values, preserving intentional whitespace
+- `gemini_image` tool: corrected `responseModalities` values from `'Image'`/`'Text'` to uppercase `'IMAGE'`/`'TEXT'` matching the API enum
+
+## [13.3.14] - 2026-02-28
+
+### Added
+
+- Expanded AST tool language support from 7 to all 25 ast-grep tree-sitter languages (Bash, C, C++, C#, CSS, Elixir, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Kotlin, Lua, Nix, PHP, Python, Ruby, Rust, Scala, Solidity, Swift, TSX, TypeScript, YAML)
+- AST find now emits all lines of multiline matches with hashline tags (LINE#HASH:content) consistent with read/grep output
+- Added AST pattern syntax reference (metavariables, wildcards, variadics) to system prompt
+- Added examples and scoping guidance to ast-grep and ast-edit tool prompts
+- Added `provider-schema-compatibility.test.ts`: integration test that instantiates every builtin and hidden tool, runs their parameter schemas through `adaptSchemaForStrict`, `sanitizeSchemaForGoogle`, and `prepareSchemaForCCA`, and asserts zero violations against each provider's compatibility rules
+
+### Fixed
+
+- Non-code files (.md, .zip, .bin, .gitignore, etc.) are now silently skipped by AST tools instead of producing misleading parse errors
+- Fixed `grep` path wildcard handling so file patterns passed via `path` (for example `schema-review-*.test.ts`) are resolved as glob filters instead of failing path existence checks
+
+## [13.3.11] - 2026-02-28
+
+### Fixed
+
+- Restored inline rendering for `read` tool image results in assistant transcript components, including streaming and rebuilt session history paths.
+- Fixed shell-escaped read paths (for example, pasted `\ `-escaped screenshot filenames) by resolving unescaped fallback candidates before macOS filename normalization variants.
+
 ## [13.3.8] - 2026-02-28
 
 ### Added
 
-- Added `ast_find` tool for structural code search using AST matching via ast-grep, enabling syntax-aware pattern discovery across codebases
-- Added `ast_replace` tool for structural AST-aware rewrites via ast-grep, enabling safe syntax-level codemods without text-based fragility
-- Added `astFind.enabled` and `astReplace.enabled` settings to control availability of AST tools
+- Added `ast_grep` tool for structural code search using AST matching via ast-grep, enabling syntax-aware pattern discovery across codebases
+- Added `ast_edit` tool for structural AST-aware rewrites via ast-grep, enabling safe syntax-level codemods without text-based fragility
+- Added `astGrep.enabled` and `astEdit.enabled` settings to control availability of AST tools
 - Added system prompt guidance to prefer AST tools over bash text manipulation (grep/sed/awk/perl) for syntax-aware operations
 - Extracted prompt formatting logic into reusable `formatPromptContent()` utility with configurable render phases and formatting options
 - Added `type_definition` action to navigate to symbol type definitions with source context
@@ -35,10 +169,10 @@
 - Updated HTML parsing API calls from `node-html-parser` to `linkedom` across all web scrapers (arXiv, IACR, Go pkg, Read the Docs, Twitter, Wikipedia)
 - Changed element text extraction from `.text` property to `.textContent` property for compatibility with linkedom DOM API
 - Optimized document link extraction to use regex-based parsing with deduplication and a 20-link limit instead of full DOM traversal
-- Unified `path` parameter in ast_find and ast_replace tools to accept files, directories, or glob patterns directly, eliminating the separate `glob` parameter
-- Removed `strictness` parameter from ast_find and ast_replace tools
-- Removed `fail_on_parse_error` parameter from ast_replace tool (now always false)
-- Updated ast_find and ast_replace prompt guidance to clarify that `path` accepts glob patterns and no longer requires separate glob specification
+- Unified `path` parameter in ast_grep and ast_edit tools to accept files, directories, or glob patterns directly, eliminating the separate `glob` parameter
+- Removed `strictness` parameter from ast_grep and ast_edit tools
+- Removed `fail_on_parse_error` parameter from ast_edit tool (now always false)
+- Updated ast_grep and ast_edit prompt guidance to clarify that `path` accepts glob patterns and no longer requires separate glob specification
 - Refactored prompt template rendering to use unified `formatPromptContent()` function with phase-aware formatting (pre-render vs post-render)
 - Updated `format-prompts.ts` script to use centralized prompt formatting utility instead of inline implementation
 - Replaced `column` parameter with `symbol` parameter for more intuitive position specification
@@ -85,6 +219,7 @@
 - Fixed `todo_write` task normalization to auto-activate the first remaining task and include explicit remaining-items output in tool results, removing the need for an immediate follow-up start update
 
 ## [13.3.7] - 2026-02-27
+
 ### Breaking Changes
 
 - Removed `preloadedSkills` option from `CreateAgentSessionOptions`; skills are no longer inlined into system prompts
@@ -118,11 +253,13 @@
 - Fixed handling of union type schemas (e.g., object|null) to normalize them into strict-mode compatible variants
 
 ## [13.3.6] - 2026-02-26
+
 ### Breaking Changes
 
 - Changed `submit_result` tool parameter structure from top-level `data` or `error` fields to nested `result` object containing either `result.data` or `result.error`
 
 ## [13.3.5] - 2026-02-26
+
 ### Added
 
 - Added support for setting array and record configuration values using JSON syntax
@@ -137,6 +274,7 @@
 - Enhanced type display in config list output to show correct type indicators for number, array, and record settings
 
 ## [13.3.3] - 2026-02-26
+
 ### Added
 
 - Support for `move` parameter in `computeHashlineDiff` to enable file move operations alongside content edits
@@ -188,13 +326,16 @@
 ## [13.2.1] - 2026-02-24
 
 ### Fixed
+
 - Fixed changelog tools to enforce category-specific arrays and reuse the shared category list for generation
 - Non-interactive environment variables (pager, editor, prompt suppression) were not applied to non-PTY bash execution, causing commands to potentially block on pagers or prompts
 
 ### Changed
 
 - Extracted non-interactive environment config from `bash-interactive.ts` into shared `non-interactive-env.ts` module, applied consistently to all bash execution paths
+
 ## [13.2.0] - 2026-02-23
+
 ### Breaking Changes
 
 - Made `description` field required in CustomTool interface
@@ -218,19 +359,24 @@
 ## [13.1.2] - 2026-02-23
 
 ### Breaking Changes
+
 - Removed `timeout` parameter from await tool—tool now waits indefinitely until jobs complete or the call is aborted
 - Renamed `job_ids` parameter to `jobs` in await tool schema
 - Removed `timedOut` field from await tool result details
 
 ### Changed
+
 - Resolved docs index generation paths using path.resolve relative to the script directory
+
 ## [13.1.1] - 2026-02-23
 
 ### Fixed
 
 - Fixed bash internal URL expansion to resolve `local://` targets to concrete filesystem paths, including newly created destination files for commands like `mv src.json local://dest.json`
 - Fixed bash local URL resolution to create missing parent directories under the session local root before command execution, preventing `mv` destination failures for new paths
+
 ## [13.1.0] - 2026-02-23
+
 ### Breaking Changes
 
 - Renamed `file` parameter to `path` in replace, patch, and hashline edit operations
@@ -247,6 +393,7 @@
 - Moved intent field documentation from per-tool JSON schema descriptions into a single system prompt block, reducing token overhead proportional to tool count
 
 ## [13.0.1] - 2026-02-22
+
 ### Changed
 
 - Simplified hashline edit schema to use unified `first`/`last` anchor fields instead of operation-specific field names (`tag`, `before`, `after`)
@@ -254,6 +401,7 @@
 - Updated hashline tool documentation to reflect new unified anchor syntax across all operations (replace, append, prepend, insert)
 
 ## [13.0.0] - 2026-02-22
+
 ### Added
 
 - Added `getTodoPhases()` and `setTodoPhases()` methods to ToolSession API for managing todo state programmatically
@@ -294,6 +442,7 @@
 - Fixed todo reminder XML tags from underscore to kebab-case format (`system-reminder`)
 
 ## [12.19.3] - 2026-02-22
+
 ### Added
 
 - Added `pty` parameter to bash tool to enable PTY mode for commands requiring a real terminal (e.g., sudo, ssh, top, less)
@@ -307,12 +456,14 @@
 - Removed `bash.virtualTerminal` setting; use the `pty` parameter on individual bash commands instead
 
 ## [12.19.1] - 2026-02-22
+
 ### Removed
 
 - Removed `replaceText` edit operation from hashline mode (substring-based text replacement)
 - Removed autocorrect heuristics that attempted to detect and fix line merges and formatting rewrites in hashline edits
 
 ## [12.19.0] - 2026-02-22
+
 ### Added
 
 - Added `poll_jobs` tool to block until background jobs complete, providing an alternative to polling `read jobs://` in loops
@@ -360,6 +511,7 @@
 - Fixed `submit_result` schema generation to use valid JSON Schema when no explicit output schema is provided
 
 ## [12.18.1] - 2026-02-21
+
 ### Added
 
 - Added Buffer.toBase64() polyfill for Bun compatibility to enable base64 encoding of buffers
@@ -388,6 +540,7 @@
 - Fixed potential race condition in bash interactive component where output could be appended after the component was closed
 
 ## [12.17.2] - 2026-02-21
+
 ### Changed
 
 - Modified bash command normalization to only apply explicit head/tail parameters from tool input, removing automatic extraction from command pipes
@@ -399,6 +552,7 @@
 - Fixed hard timeout handling to properly interrupt long-running commands that exceed the grace period beyond the configured timeout
 
 ## [12.17.1] - 2026-02-21
+
 ### Added
 
 - Added `filterBrowser` option to filter out browser automation MCP servers when builtin browser tool is enabled
@@ -407,6 +561,7 @@
 - Added `BrowserFilterResult` type for browser MCP server filtering results
 
 ## [12.17.0] - 2026-02-21
+
 ### Added
 
 - Added timeout protection (5 seconds) for system prompt preparation with graceful fallback to minimal context on timeout

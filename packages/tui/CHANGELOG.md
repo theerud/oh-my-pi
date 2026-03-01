@@ -2,6 +2,72 @@
 
 ## [Unreleased]
 
+## [13.5.3] - 2026-03-01
+
+### Fixed
+
+- Fixed append rendering logic to correctly handle offscreen header changes during content overflow growth, preserving scroll history integrity
+- Fixed visible tail line updates when appending new content during viewport overflow conditions
+- Fixed cursor positioning instability when appending content under external cursor relocation by using absolute screen addressing instead of relative cursor movement
+
+## [13.5.2] - 2026-03-01
+### Breaking Changes
+
+- Removed `getMermaidImage` callback from MarkdownTheme; replaced with `getMermaidAscii` that accepts ASCII string instead of image data
+- Removed mermaid module exports (`renderMermaidToPng`, `extractMermaidBlocks`, `prerenderMermaidBlocks`, `MermaidImage` interface)
+
+### Changed
+
+- Mermaid diagrams now render as ASCII text instead of terminal graphics protocol images
+
+## [13.5.1] - 2026-03-01
+### Fixed
+
+- Fixed viewport shift handling to prevent stale content when mixed updates remap screen rows
+
+## [13.5.0] - 2026-03-01
+
+### Breaking Changes
+
+- Removed `PI_TUI_RESIZE_CLEAR_STRATEGY`; resize behavior is no longer configurable between viewport/scrollback modes. The renderer now uses fixed semantics: width changes perform a hard reset (`3J` + full content rewrite), while height changes and diff fallbacks use viewport-scoped repainting.
+
+### Added
+
+- Added a new terminal regression suite in `packages/tui/test/render-regressions.test.ts` covering no-op render stability, targeted middle-line diffs, shrink cleanup, width-resize truncation without ghost rows, shrink/grow viewport tail anchoring, scrollback deduplication across forced redraws, overlay restore behavior, and rapid mutation convergence.
+- Expanded `packages/tui/test/overlay-scroll.test.ts` with stress coverage for overflow shrink/regrow cycles, resize oscillation, overlay toggle churn, no-op render loops, and hardware-cursor-only updates while bounding scrollback growth and blank-run artifacts.
+
+### Changed
+
+- Refactored render orchestration to explicit `hardReset` and `viewportRepaint` paths, with targeted fallbacks for offscreen diff ranges and unsafe row deltas.
+- Switched startup to `requestRender(true)` so the first frame always initializes renderer state with a forced full path.
+- Replaced legacy viewport bookkeeping (`previousViewportTop`) with `viewportTopRow` tracking and consistent screen-relative cursor calculations.
+- Updated stop-sequence cursor placement to target the visible working area and clamp to terminal bounds before final newline emission.
+- Documented the intentional performance policy of not forcing full repaint on every viewport-top shift, relying on narrower safety guards instead.
+
+### Fixed
+
+- Fixed stale/duplicated terminal cursor dedup state by synchronizing `#lastCursorSequence` in all render write paths (hard reset, viewport repaint, deleted-lines clear path, append fast path, and differential path).
+- Fixed scroll overshoot on `stop()` when content fills the viewport by clamping target row movement to valid screen rows.
+## [13.4.0] - 2026-03-01
+
+### Added
+
+- Added `PI_TUI_RESIZE_CLEAR_STRATEGY` environment variable to control terminal behavior on resize: `viewport` (default) clears/redraws the viewport while preserving scrollback, or `scrollback` clears all history
+
+### Changed
+
+- Changed resize redraw behavior to use configurable clear semantics (`viewport` vs `scrollback`) while keeping full content rendering for scrollback navigation
+
+### Fixed
+
+- Fixed loader component rendering lines wider than terminal width, preventing text overflow and display artifacts
+
+## [13.3.11] - 2026-02-28
+
+### Fixed
+
+- Restored terminal image protocol override and fallback detection for image rendering, including `PI_FORCE_IMAGE_PROTOCOL` support and Kitty fallback for screen/tmux/ghostty-style TERM environments.
+
 ## [13.3.8] - 2026-02-28
 ### Breaking Changes
 

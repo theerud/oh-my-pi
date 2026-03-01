@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import {
-	convertTools,
-	sanitizeSchemaForCloudCodeAssistClaude,
-	sanitizeSchemaForGoogle,
-} from "@oh-my-pi/pi-ai/providers/google-shared";
+import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type { Model, Tool } from "@oh-my-pi/pi-ai/types";
+import { sanitizeSchemaForCCA, sanitizeSchemaForGoogle } from "@oh-my-pi/pi-ai/utils/schema";
 import type { TSchema } from "@sinclair/typebox";
 
 function createModel(id: string): Model<"google-gemini-cli"> {
@@ -28,7 +25,7 @@ function createModel(id: string): Model<"google-gemini-cli"> {
 }
 
 describe("Cloud Code Assist Claude tool schema conversion", () => {
-	it("removes nullable keyword while preserving JSON Schema union types", () => {
+	it("strips nullable keyword and collapses type arrays for CCA Claude", () => {
 		const schema = {
 			type: "object",
 			properties: {
@@ -39,11 +36,13 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 			},
 		} as unknown;
 
-		expect(sanitizeSchemaForCloudCodeAssistClaude(schema)).toEqual({
+		// normalizeTypeArrayToNullable converts type array to scalar + nullable,
+		// then stripNullableKeyword removes the nullable marker.
+		expect(sanitizeSchemaForCCA(schema)).toEqual({
 			type: "object",
 			properties: {
 				value: {
-					type: ["string", "null"],
+					type: "string",
 				},
 			},
 		});
@@ -72,7 +71,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 			type: "object",
 			properties: {
 				value: {
-					type: ["string", "null"],
+					type: "string",
 				},
 			},
 			required: ["value"],
@@ -80,7 +79,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		expect(declaration.parametersJsonSchema).toBeUndefined();
 	});
 
-	it("normalizes mixed-type anyOf for claude parameters without emitting combiners", () => {
+	it("collapses mixed-type anyOf to first non-null type for claude parameters", () => {
 		const parameters = {
 			type: "object",
 			properties: {
@@ -103,11 +102,12 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		>;
 
 		expect(claudeFirst).toEqual(claudeSecond);
+		// Lossy collapse: array|string|null narrows to array (first non-null type)
 		expect(claudeDeclaration.parameters).toEqual({
 			type: "object",
 			properties: {
 				lines: {
-					type: ["array", "string", "null"],
+					type: "array",
 					items: { type: "string" },
 				},
 			},
@@ -119,6 +119,143 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		expect(
 			(geminiDeclaration.parametersJsonSchema as { properties?: Record<string, unknown> })?.properties?.lines,
 		).toEqual(parameters.properties.lines);
+	});
+
+	it("collapses mixed anyOf with shared metadata for edit-style lines fields", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				edits: {
+					type: "array",
+					items: {
+						type: "object",
+						properties: {
+							lines: {
+								anyOf: [
+									{
+										type: "array",
+										description: "content (preferred format)",
+										items: { type: "string" },
+									},
+									{ type: "string" },
+									{ type: "null" },
+								],
+							},
+						},
+					},
+				},
+			},
+		} as unknown as TSchema;
+		const tools: Tool[] = [{ name: "edit", description: "Edit tool", parameters }];
+		const model = createModel("claude-sonnet-4-5");
+
+		const declaration = convertTools(tools, model)?.[0]?.functionDeclarations[0] as Record<string, unknown>;
+		const linesSchema = ((
+			(declaration.parameters as { properties?: Record<string, unknown> })?.properties?.edits as {
+				items?: { properties?: Record<string, unknown> };
+			}
+		)?.items?.properties?.lines ?? null) as Record<string, unknown> | null;
+
+		// Lossy collapse: array|string|null narrows to array (first non-null type)
+		expect(linesSchema).toEqual({
+			type: "array",
+			description: "content (preferred format)",
+			items: { type: "string" },
+		});
+		expect(JSON.stringify(declaration.parameters)).not.toContain('"anyOf"');
+	});
+	it("collapses mixed unions for todo_write-style nullable content fields", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				ops: {
+					type: "array",
+					items: {
+						type: "object",
+						properties: {
+							content: {
+								anyOf: [{ type: "string", description: "Updated task description" }, { type: "null" }],
+							},
+						},
+					},
+				},
+			},
+		} as unknown as TSchema;
+		const tools: Tool[] = [{ name: "todo_write", description: "Todo tool", parameters }];
+		const model = createModel("claude-sonnet-4-5");
+
+		const declaration = convertTools(tools, model)?.[0]?.functionDeclarations[0] as Record<string, unknown>;
+		const contentSchema = ((
+			(declaration.parameters as { properties?: Record<string, unknown> })?.properties?.ops as {
+				items?: { properties?: Record<string, unknown> };
+			}
+		)?.items?.properties?.content ?? null) as Record<string, unknown> | null;
+
+		// string|null collapses cleanly to string (single non-null type)
+		expect(contentSchema).toEqual({
+			type: "string",
+			description: "Updated task description",
+		});
+		expect(JSON.stringify(declaration.parameters)).not.toContain('"anyOf"');
+	});
+	it("preserves nullable unions as optional properties instead of full fallback", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				value: {
+					anyOf: [{ enum: ["A", "B"] }, { type: "null" }],
+				},
+			},
+			required: ["value"],
+		} as unknown as TSchema;
+		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
+		const claudeModel = createModel("claude-sonnet-4-5");
+		const geminiModel = createModel("gemini-2.5-pro");
+
+		const claudeDeclaration = convertTools(tools, claudeModel)?.[0]?.functionDeclarations[0] as Record<
+			string,
+			unknown
+		>;
+		const geminiDeclaration = convertTools(tools, geminiModel)?.[0]?.functionDeclarations[0] as Record<
+			string,
+			unknown
+		>;
+
+		expect(claudeDeclaration.parameters).toEqual({
+			type: "object",
+			properties: {
+				value: { enum: ["A", "B"] },
+			},
+			required: [],
+		});
+		expect(JSON.stringify(claudeDeclaration.parameters)).not.toContain('"anyOf"');
+		expect(
+			(geminiDeclaration.parametersJsonSchema as { properties?: Record<string, unknown> })?.properties?.value,
+		).toEqual(parameters.properties.value);
+	});
+
+	it("falls back to minimal object schema when non-null unresolved unions remain for CCA Claude", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				value: {
+					anyOf: [{ enum: ["A", "B"] }, { enum: ["C", "D"] }],
+				},
+			},
+			required: ["value"],
+		} as unknown as TSchema;
+		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
+		const claudeModel = createModel("claude-sonnet-4-5");
+
+		const claudeDeclaration = convertTools(tools, claudeModel)?.[0]?.functionDeclarations[0] as Record<
+			string,
+			unknown
+		>;
+
+		expect(claudeDeclaration.parameters).toEqual({
+			type: "object",
+			properties: {},
+		});
 	});
 	it("keeps google sanitizer behavior for non-claude schema path", () => {
 		const schema = {

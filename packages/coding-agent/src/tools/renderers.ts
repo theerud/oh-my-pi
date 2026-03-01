@@ -11,8 +11,8 @@ import { editToolRenderer } from "../patch";
 import { taskToolRenderer } from "../task/render";
 import { webSearchToolRenderer } from "../web/search/render";
 import { askToolRenderer } from "./ask";
-import { astFindToolRenderer } from "./ast-find";
-import { astReplaceToolRenderer } from "./ast-replace";
+import { astEditToolRenderer } from "./ast-edit";
+import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { calculatorToolRenderer } from "./calculator";
 import { fetchToolRenderer } from "./fetch";
@@ -21,6 +21,7 @@ import { grepToolRenderer } from "./grep";
 import { notebookToolRenderer } from "./notebook";
 import { pythonToolRenderer } from "./python";
 import { readToolRenderer } from "./read";
+import { resolveToolRenderer } from "./resolve";
 import { sshToolRenderer } from "./ssh";
 import { todoWriteToolRenderer } from "./todo-write";
 import { writeToolRenderer } from "./write";
@@ -40,8 +41,8 @@ type ToolRenderer = {
 
 export const toolRenderers: Record<string, ToolRenderer> = {
 	ask: askToolRenderer as ToolRenderer,
-	ast_find: astFindToolRenderer as ToolRenderer,
-	ast_replace: astReplaceToolRenderer as ToolRenderer,
+	ast_grep: astGrepToolRenderer as ToolRenderer,
+	ast_edit: astEditToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
 	python: pythonToolRenderer as ToolRenderer,
 	calc: calculatorToolRenderer as ToolRenderer,
@@ -51,6 +52,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	lsp: lspToolRenderer as ToolRenderer,
 	notebook: notebookToolRenderer as ToolRenderer,
 	read: readToolRenderer as ToolRenderer,
+	resolve: resolveToolRenderer as ToolRenderer,
 	ssh: sshToolRenderer as ToolRenderer,
 	task: taskToolRenderer as ToolRenderer,
 	todo_write: todoWriteToolRenderer as ToolRenderer,

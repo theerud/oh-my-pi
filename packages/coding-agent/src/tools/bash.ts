@@ -98,7 +98,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	constructor(private readonly session: ToolSession) {
 		this.#asyncEnabled = this.session.settings.get("async.enabled");
 		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
-		this.description = renderPromptTemplate(bashDescription, { asyncEnabled: this.#asyncEnabled });
+		this.description = renderPromptTemplate(bashDescription, {
+			asyncEnabled: this.#asyncEnabled,
+			hasAstGrep: this.session.settings.get("astGrep.enabled"),
+			hasAstEdit: this.session.settings.get("astEdit.enabled"),
+		});
 	}
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult, headLines?: number, tailLines?: number): string {
@@ -377,7 +381,8 @@ export const bashToolRenderer = {
 	): Component {
 		const cmdText = args ? formatBashCommand(args, uiTheme) : undefined;
 		const isError = result.isError === true;
-		const header = renderStatusLine({ icon: isError ? "error" : "success", title: "Bash" }, uiTheme);
+		const icon = options.isPartial ? "pending" : isError ? "error" : "success";
+		const header = renderStatusLine({ icon, title: "Bash" }, uiTheme);
 		const details = result.details;
 		const outputBlock = new CachedOutputBlock();
 
@@ -438,7 +443,7 @@ export const bashToolRenderer = {
 				return outputBlock.render(
 					{
 						header,
-						state: isError ? "error" : "success",
+						state: options.isPartial ? "pending" : isError ? "error" : "success",
 						sections: [
 							{ lines: cmdText ? [uiTheme.fg("dim", cmdText)] : [] },
 							{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },

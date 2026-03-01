@@ -75,8 +75,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	{
 		name: "plan",
 		description: "Toggle plan mode (agent plans before executing)",
-		handle: async (_command, runtime) => {
-			await runtime.ctx.handlePlanModeCommand();
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -392,7 +394,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	},
 	{
 		name: "debug",
-		description: "Write debug log (TUI state and messages)",
+		description: "Open debug tools selector",
 		handle: (_command, runtime) => {
 			runtime.ctx.showDebugSelector();
 			runtime.ctx.editor.setText("");

@@ -15,6 +15,7 @@ import { googleGeminiCliUsageProvider } from "./providers/google-gemini-cli-usag
 import { getEnvApiKey } from "./stream";
 import type { Provider } from "./types";
 import type {
+	CredentialRankingStrategy,
 	UsageCache,
 	UsageCacheEntry,
 	UsageCredential,
@@ -23,11 +24,11 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "./usage";
-import { claudeUsageProvider } from "./usage/claude";
+import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiUsageProvider } from "./usage/kimi";
-import { openaiCodexUsageProvider } from "./usage/openai-codex";
+import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
 import { zaiUsageProvider } from "./usage/zai";
 import { getOAuthApiKey, getOAuthProvider } from "./utils/oauth";
 // Re-export login functions so consumers of AuthStorage.login() have access
@@ -114,6 +115,7 @@ export interface StoredAuthCredential {
 
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
+	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	usageCache?: UsageCache;
 	usageFetch?: typeof fetch;
 	usageNow?: () => number;
@@ -161,6 +163,15 @@ const USAGE_CACHE_PREFIX = "usage_cache:";
 
 function resolveDefaultUsageProvider(provider: Provider): UsageProvider | undefined {
 	return DEFAULT_USAGE_PROVIDER_MAP.get(provider);
+}
+
+const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>([
+	["openai-codex", codexRankingStrategy],
+	["anthropic", claudeRankingStrategy],
+]);
+
+function resolveDefaultRankingStrategy(provider: Provider): CredentialRankingStrategy | undefined {
+	return DEFAULT_RANKING_STRATEGIES.get(provider);
 }
 
 function parseUsageCacheEntry(raw: string): UsageCacheEntry | undefined {
@@ -228,6 +239,7 @@ export class AuthStorage {
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
 	#credentialBackoff: Map<string, Map<number, number>> = new Map();
 	#usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
+	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	#usageCache?: UsageCache;
 	#usageFetch: typeof fetch;
 	#usageNow: () => number;
@@ -240,6 +252,7 @@ export class AuthStorage {
 		this.#store = store;
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
+		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
 		this.#usageCache = options.usageCache ?? new AuthStorageUsageCache(this.#store);
 		this.#usageFetch = options.usageFetch ?? fetch;
 		this.#usageNow = options.usageNow ?? Date.now;
@@ -499,20 +512,25 @@ export class AuthStorage {
 		return order;
 	}
 
-	/** Checks if a credential is temporarily blocked due to usage limits. */
-	#isCredentialBlocked(providerKey: string, credentialIndex: number): boolean {
+	/** Returns block expiry timestamp for a credential, cleaning up expired entries. */
+	#getCredentialBlockedUntil(providerKey: string, credentialIndex: number): number | undefined {
 		const backoffMap = this.#credentialBackoff.get(providerKey);
-		if (!backoffMap) return false;
+		if (!backoffMap) return undefined;
 		const blockedUntil = backoffMap.get(credentialIndex);
-		if (!blockedUntil) return false;
+		if (!blockedUntil) return undefined;
 		if (blockedUntil <= Date.now()) {
 			backoffMap.delete(credentialIndex);
 			if (backoffMap.size === 0) {
 				this.#credentialBackoff.delete(providerKey);
 			}
-			return false;
+			return undefined;
 		}
-		return true;
+		return blockedUntil;
+	}
+
+	/** Checks if a credential is temporarily blocked due to usage limits. */
+	#isCredentialBlocked(providerKey: string, credentialIndex: number): boolean {
+		return this.#getCredentialBlockedUntil(providerKey, credentialIndex) !== undefined;
 	}
 
 	/** Marks a credential as blocked until the specified time. */
@@ -965,7 +983,7 @@ export class AuthStorage {
 		const identifiers: string[] = [];
 		const email = this.#getUsageReportMetadataValue(report, "email");
 		if (email) identifiers.push(`email:${email.toLowerCase()}`);
-		if (report.provider === "openai-codex") {
+		if (report.provider === "openai-codex" || report.provider === "anthropic") {
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 		}
 		const accountId = this.#getUsageReportMetadataValue(report, "accountId");
@@ -1273,7 +1291,7 @@ export class AuthStorage {
 		const now = this.#usageNow();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
-		if (provider === "openai-codex" && sessionCredential.type === "oauth") {
+		if (sessionCredential.type === "oauth" && this.#rankingStrategyResolver?.(provider)) {
 			const credential = this.#getCredentialsForProvider(provider)[sessionCredential.index];
 			if (credential?.type === "oauth") {
 				const report = await this.#getUsageReport(provider, credential, options);
@@ -1298,6 +1316,148 @@ export class AuthStorage {
 		return remainingCredentials.some(candidate => !this.#isCredentialBlocked(providerKey, candidate.index));
 	}
 
+	#resolveWindowResetInMs(window: UsageLimit["window"], nowMs: number): number | undefined {
+		if (!window) return undefined;
+		if (typeof window.resetInMs === "number" && Number.isFinite(window.resetInMs)) {
+			return window.resetInMs;
+		}
+		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
+			return window.resetsAt - nowMs;
+		}
+		return undefined;
+	}
+
+	#normalizeUsageFraction(limit: UsageLimit | undefined): number {
+		const usedFraction = limit?.amount.usedFraction;
+		if (typeof usedFraction !== "number" || !Number.isFinite(usedFraction)) {
+			return 0.5;
+		}
+		return Math.min(Math.max(usedFraction, 0), 1);
+	}
+
+	/** Computes `usedFraction / elapsedHours` — consumption rate per hour within the current window. Lower drain rate = less pressure = preferred. */
+	#computeWindowDrainRate(limit: UsageLimit | undefined, nowMs: number, fallbackDurationMs: number): number {
+		const usedFraction = this.#normalizeUsageFraction(limit);
+		const durationMs = limit?.window?.durationMs ?? fallbackDurationMs;
+		if (!Number.isFinite(durationMs) || durationMs <= 0) {
+			return usedFraction;
+		}
+		const resetInMs = this.#resolveWindowResetInMs(limit?.window, nowMs);
+		if (!Number.isFinite(resetInMs)) {
+			return usedFraction;
+		}
+		const clampedResetInMs = Math.min(Math.max(resetInMs as number, 0), durationMs);
+		const elapsedMs = durationMs - clampedResetInMs;
+		if (elapsedMs <= 0) {
+			return usedFraction;
+		}
+		const elapsedHours = elapsedMs / (60 * 60 * 1000);
+		if (!Number.isFinite(elapsedHours) || elapsedHours <= 0) {
+			return usedFraction;
+		}
+		return usedFraction / elapsedHours;
+	}
+
+	async #rankOAuthSelections(args: {
+		providerKey: string;
+		provider: string;
+		order: number[];
+		credentials: Array<{ credential: OAuthCredential; index: number }>;
+		options?: { baseUrl?: string };
+		strategy: CredentialRankingStrategy;
+	}): Promise<
+		Array<{
+			selection: { credential: OAuthCredential; index: number };
+			usage: UsageReport | null;
+			usageChecked: boolean;
+		}>
+	> {
+		const nowMs = this.#usageNow();
+		const { strategy } = args;
+		const ranked: Array<{
+			selection: { credential: OAuthCredential; index: number };
+			usage: UsageReport | null;
+			usageChecked: boolean;
+			blocked: boolean;
+			blockedUntil?: number;
+			hasPriorityBoost: boolean;
+			secondaryUsed: number;
+			secondaryDrainRate: number;
+			primaryUsed: number;
+			primaryDrainRate: number;
+			orderPos: number;
+		}> = [];
+		// Pre-fetch usage reports in parallel for non-blocked credentials
+		const usageResults = await Promise.all(
+			args.order.map(async idx => {
+				const selection = args.credentials[idx];
+				if (!selection) return null;
+				const blockedUntil = this.#getCredentialBlockedUntil(args.providerKey, selection.index);
+				if (blockedUntil !== undefined) return { selection, usage: null, usageChecked: false, blockedUntil };
+				const usage = await this.#getUsageReport(args.provider, selection.credential, args.options);
+				return { selection, usage, usageChecked: true, blockedUntil: undefined as number | undefined };
+			}),
+		);
+
+		for (let orderPos = 0; orderPos < usageResults.length; orderPos += 1) {
+			const result = usageResults[orderPos];
+			if (!result) continue;
+			const { selection, usage, usageChecked } = result;
+			let { blockedUntil } = result;
+			let blocked = blockedUntil !== undefined;
+			if (!blocked && usage && this.#isUsageLimitReached(usage)) {
+				const resetAtMs = this.#getUsageResetAtMs(usage, nowMs);
+				blockedUntil = resetAtMs ?? nowMs + AuthStorage.#defaultBackoffMs;
+				this.#markCredentialBlocked(args.providerKey, selection.index, blockedUntil);
+				blocked = true;
+			}
+			const windows = usage ? strategy.findWindowLimits(usage) : undefined;
+			const primary = windows?.primary;
+			const secondary = windows?.secondary;
+			const secondaryTarget = secondary ?? primary;
+			ranked.push({
+				selection,
+				usage,
+				usageChecked,
+				blocked,
+				blockedUntil,
+				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				secondaryUsed: this.#normalizeUsageFraction(secondaryTarget),
+				secondaryDrainRate: this.#computeWindowDrainRate(
+					secondaryTarget,
+					nowMs,
+					strategy.windowDefaults.secondaryMs,
+				),
+				primaryUsed: this.#normalizeUsageFraction(primary),
+				primaryDrainRate: this.#computeWindowDrainRate(primary, nowMs, strategy.windowDefaults.primaryMs),
+				orderPos,
+			});
+		}
+		ranked.sort((left, right) => {
+			if (left.blocked !== right.blocked) return left.blocked ? 1 : -1;
+			if (left.blocked && right.blocked) {
+				const leftBlockedUntil = left.blockedUntil ?? Number.POSITIVE_INFINITY;
+				const rightBlockedUntil = right.blockedUntil ?? Number.POSITIVE_INFINITY;
+				if (leftBlockedUntil !== rightBlockedUntil) return leftBlockedUntil - rightBlockedUntil;
+				return left.orderPos - right.orderPos;
+			}
+			if (left.hasPriorityBoost !== right.hasPriorityBoost) {
+				return left.hasPriorityBoost ? -1 : 1;
+			}
+			if (left.secondaryDrainRate !== right.secondaryDrainRate)
+				return left.secondaryDrainRate - right.secondaryDrainRate;
+			if (left.secondaryUsed !== right.secondaryUsed) return left.secondaryUsed - right.secondaryUsed;
+			if (left.primaryDrainRate !== right.primaryDrainRate) return left.primaryDrainRate - right.primaryDrainRate;
+			if (left.primaryUsed !== right.primaryUsed) return left.primaryUsed - right.primaryUsed;
+			return left.orderPos - right.orderPos;
+		});
+		return ranked.map(candidate => ({
+			selection: candidate.selection,
+			usage: candidate.usage,
+			usageChecked: candidate.usageChecked,
+		}));
+	}
+
 	/**
 	 * Resolves an OAuth API key, trying credentials in priority order.
 	 * Skips blocked credentials and checks usage limits for providers with usage data.
@@ -1316,25 +1476,33 @@ export class AuthStorage {
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
-		const checkUsage = provider === "openai-codex" && credentials.length > 1;
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const checkUsage = strategy !== undefined && credentials.length > 1;
+		const candidates = checkUsage
+			? await this.#rankOAuthSelections({ providerKey, provider, order, credentials, options, strategy })
+			: order
+					.map(idx => credentials[idx])
+					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
+					.map(selection => ({ selection, usage: null, usageChecked: false }));
+		const fallback = candidates[0];
 
-		for (const idx of order) {
-			const selection = credentials[idx];
-			const apiKey = await this.#tryOAuthCredential(
-				provider,
-				selection,
-				providerKey,
-				sessionId,
-				options,
+		for (const candidate of candidates) {
+			const apiKey = await this.#tryOAuthCredential(provider, candidate.selection, providerKey, sessionId, options, {
 				checkUsage,
-				false,
-			);
+				allowBlocked: false,
+				prefetchedUsage: candidate.usage,
+				usagePrechecked: candidate.usageChecked,
+			});
 			if (apiKey) return apiKey;
 		}
 
-		if (fallback && this.#isCredentialBlocked(providerKey, fallback.index)) {
-			return this.#tryOAuthCredential(provider, fallback, providerKey, sessionId, options, checkUsage, true);
+		if (fallback && this.#isCredentialBlocked(providerKey, fallback.selection.index)) {
+			return this.#tryOAuthCredential(provider, fallback.selection, providerKey, sessionId, options, {
+				checkUsage,
+				allowBlocked: true,
+				prefetchedUsage: fallback.usage,
+				usagePrechecked: fallback.usageChecked,
+			});
 		}
 
 		return undefined;
@@ -1342,14 +1510,19 @@ export class AuthStorage {
 
 	/** Attempts to use a single OAuth credential, checking usage and refreshing token. */
 	async #tryOAuthCredential(
-		provider: string,
+		provider: Provider,
 		selection: { credential: OAuthCredential; index: number },
 		providerKey: string,
 		sessionId: string | undefined,
 		options: { baseUrl?: string } | undefined,
-		checkUsage: boolean,
-		allowBlocked: boolean,
+		usageOptions: {
+			checkUsage: boolean;
+			allowBlocked: boolean;
+			prefetchedUsage?: UsageReport | null;
+			usagePrechecked?: boolean;
+		},
 	): Promise<string | undefined> {
+		const { checkUsage, allowBlocked, prefetchedUsage = null, usagePrechecked = false } = usageOptions;
 		if (!allowBlocked && this.#isCredentialBlocked(providerKey, selection.index)) {
 			return undefined;
 		}
@@ -1358,8 +1531,13 @@ export class AuthStorage {
 		let usageChecked = false;
 
 		if (checkUsage && !allowBlocked) {
-			usage = await this.#getUsageReport(provider, selection.credential, options);
-			usageChecked = true;
+			if (usagePrechecked) {
+				usage = prefetchedUsage;
+				usageChecked = true;
+			} else {
+				usage = await this.#getUsageReport(provider, selection.credential, options);
+				usageChecked = true;
+			}
 			if (usage && this.#isUsageLimitReached(usage)) {
 				const resetAtMs = this.#getUsageResetAtMs(usage, this.#usageNow());
 				this.#markCredentialBlocked(

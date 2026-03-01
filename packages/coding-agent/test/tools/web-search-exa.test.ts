@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { runSearchQuery } from "../../src/web/search";
 import {
 	buildExaRequestBody,
 	normalizeSearchType,
@@ -215,7 +216,6 @@ function makeMockExaResponse(overrides: Record<string, unknown> = {}) {
 }
 
 describe("searchExa", () => {
-	const originalFetch = globalThis.fetch;
 	let capturedRequestBody: Record<string, unknown> | null = null;
 
 	beforeEach(() => {
@@ -224,12 +224,13 @@ describe("searchExa", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		vi.restoreAllMocks();
 		delete process.env.EXA_API_KEY;
 	});
 
 	function mockFetch(responseBody: unknown, status = 200) {
-		globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: string | URL | Request, init?: RequestInit) => {
 			if (init?.body) {
 				capturedRequestBody = JSON.parse(init.body as string);
 			}
@@ -237,7 +238,7 @@ describe("searchExa", () => {
 				status,
 				headers: { "Content-Type": "application/json" },
 			});
-		}) as unknown as typeof fetch;
+		});
 	}
 
 	it("populates answer from per-result summaries", async () => {
@@ -370,9 +371,112 @@ describe("searchExa", () => {
 		expect(result.answer).toContain("**Has URL**: real summary");
 	});
 
-	it("throws on missing API key", async () => {
+	it("uses Exa MCP when API key is missing", async () => {
 		delete process.env.EXA_API_KEY;
-		await expect(searchExa({ query: "no key" })).rejects.toThrow("EXA_API_KEY not found");
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: "mcp-1", result: makeMockExaResponse() }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const result = await searchExa({ query: "no key" });
+		expect(result.provider).toBe("exa");
+		expect(result.sources).toHaveLength(3);
+
+		const calledUrl = String(fetchSpy.mock.calls[0][0]);
+		expect(calledUrl).toContain("https://mcp.exa.ai/mcp");
+		expect(calledUrl).toContain("tools=web_search_exa");
+		expect(calledUrl).not.toContain("exaApiKey=");
+	});
+
+	it("accepts MCP structuredContent search payloads when API key is missing", async () => {
+		delete process.env.EXA_API_KEY;
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					id: "mcp-structured",
+					result: { structuredContent: makeMockExaResponse() },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const result = await searchExa({ query: "structured payload" });
+		expect(result.provider).toBe("exa");
+		expect(result.sources).toHaveLength(3);
+		expect(result.answer).toContain("**Page Alpha**: Alpha is about X.");
+	});
+
+	it("accepts MCP text content JSON payloads when API key is missing", async () => {
+		delete process.env.EXA_API_KEY;
+		const payload = makeMockExaResponse();
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					id: "mcp-content",
+					result: {
+						content: [{ type: "text", text: JSON.stringify(payload) }],
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const result = await searchExa({ query: "content payload" });
+		expect(result.provider).toBe("exa");
+		expect(result.sources).toHaveLength(3);
+		expect(result.answer).toContain("**Page Beta**: Beta covers Y.");
+
+		const calledUrl = String(fetchSpy.mock.calls[0][0]);
+		expect(calledUrl).not.toContain("exaApiKey=");
+	});
+
+	it("runSearchQuery with provider=exa succeeds without EXA_API_KEY for MCP structuredContent", async () => {
+		delete process.env.EXA_API_KEY;
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					id: "mcp-tool",
+					result: { structuredContent: makeMockExaResponse() },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const result = await runSearchQuery({ query: "provider exa", provider: "exa" });
+		expect(result.details.error).toBeUndefined();
+		expect(result.details.response.provider).toBe("exa");
+		expect(result.content[0]?.text).toContain("Provider: exa");
+		expect(result.content[0]?.text).toContain("3 sources");
+	});
+
+	it("throws clear error when MCP content payload is not parseable JSON", async () => {
+		delete process.env.EXA_API_KEY;
+		// @ts-expect-error - test mock doesn't need fetch.preconnect
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					id: "mcp-bad-content",
+					result: {
+						content: [{ type: "text", text: "not-json" }],
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		await expect(searchExa({ query: "bad content" })).rejects.toThrow(
+			"Exa MCP search returned unexpected response shape.",
+		);
 	});
 
 	it("throws SearchProviderError on non-ok HTTP response", async () => {

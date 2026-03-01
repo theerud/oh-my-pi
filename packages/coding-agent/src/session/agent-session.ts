@@ -82,10 +82,15 @@ import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from
 import type { PlanModeState } from "../plan-mode/state";
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
+import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
+	type: "text",
+};
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
+import type { PendingActionStore } from "../tools/pending-action";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -177,6 +182,8 @@ export interface AgentSessionConfig {
 	forceCopilotAgentInitiator?: boolean;
 	/** Secret obfuscator for deobfuscating streaming edit content */
 	obfuscator?: SecretObfuscator;
+	/** Pending action store for preview/apply workflows */
+	pendingActionStore?: PendingActionStore;
 }
 
 /** Options for AgentSession.prompt() */
@@ -288,6 +295,7 @@ export class AgentSession {
 
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
+	#unsubscribePendingActionPush?: () => void;
 	#eventListeners: AgentSessionEventListener[] = [];
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
@@ -368,6 +376,9 @@ export class AgentSession {
 	#streamingEditFileCache = new Map<string, string>();
 	#promptInFlight = false;
 	#obfuscator: SecretObfuscator | undefined;
+	#pendingActionStore: PendingActionStore | undefined;
+	#checkpointState: CheckpointState | undefined = undefined;
+	#pendingRewindReport: string | undefined = undefined;
 	#promptGeneration = 0;
 	#providerSessionState = new Map<string, ProviderSessionState>();
 
@@ -392,6 +403,22 @@ export class AgentSession {
 		this.#forceCopilotAgentInitiator = config.forceCopilotAgentInitiator ?? false;
 		this.#obfuscator = config.obfuscator;
 		this.agent.providerSessionState = this.#providerSessionState;
+		this.#pendingActionStore = config.pendingActionStore;
+		this.#unsubscribePendingActionPush = this.#pendingActionStore?.subscribePush(action => {
+			const reminderText = [
+				"<system-reminder>",
+				"This is a preview. Call the `resolve` tool to apply or discard these changes.",
+				"</system-reminder>",
+			].join("\n");
+			this.agent.steer({
+				role: "custom",
+				customType: "resolve-reminder",
+				content: reminderText,
+				display: false,
+				details: { toolName: action.sourceToolName },
+				timestamp: Date.now(),
+			});
+		});
 		this.#syncTodoPhasesFromBranch();
 
 		// Always subscribe to agent events for internal handling
@@ -491,6 +518,11 @@ export class AgentSession {
 		// TTSR: Increment message count on turn end (for repeat-after-gap tracking)
 		if (event.type === "turn_end" && this.#ttsrManager) {
 			this.#ttsrManager.incrementMessageCount();
+		}
+		if (event.type === "turn_end" && this.#pendingRewindReport) {
+			const report = this.#pendingRewindReport;
+			this.#pendingRewindReport = undefined;
+			await this.#applyRewind(report);
 		}
 
 		// TTSR: Check for pattern matches on assistant text/thinking and tool argument deltas
@@ -651,17 +683,12 @@ export class AgentSession {
 			}
 
 			if (event.message.role === "toolResult") {
-				const { toolName, $normative, toolCallId, details, isError, content } = event.message as {
+				const { toolName, details, isError, content } = event.message as {
 					toolName?: string;
-					toolCallId?: string;
-					details?: { path?: string; phases?: TodoPhase[] };
-					$normative?: Record<string, unknown>;
+					details?: { path?: string; phases?: TodoPhase[]; report?: string; startedAt?: string };
 					isError?: boolean;
 					content?: Array<TextContent | ImageContent>;
 				};
-				if ($normative && toolCallId && this.settings.get("normativeRewrite")) {
-					await this.#rewriteToolCallArgs(toolCallId, $normative);
-				}
 				// Invalidate streaming edit cache when edit tool completes to prevent stale data
 				if (toolName === "edit" && details?.path) {
 					this.#invalidateFileCacheForPath(details.path);
@@ -688,13 +715,34 @@ export class AgentSession {
 						{ deliverAs: "nextTurn" },
 					);
 				}
+				if (toolName === "checkpoint" && !isError) {
+					const checkpointEntryId = this.sessionManager.getEntries().at(-1)?.id ?? null;
+					this.#checkpointState = {
+						checkpointMessageCount: this.agent.state.messages.length,
+						checkpointEntryId,
+						startedAt: details?.startedAt ?? new Date().toISOString(),
+					};
+					this.#pendingRewindReport = undefined;
+				}
+				if (toolName === "rewind" && !isError && this.#checkpointState) {
+					const detailReport = typeof details?.report === "string" ? details.report.trim() : "";
+					const textReport = content?.find(part => part.type === "text")?.text?.trim() ?? "";
+					const report = detailReport || textReport;
+					if (report.length > 0) {
+						this.#pendingRewindReport = report;
+					}
+				}
 			}
 		}
 
 		// Check auto-retry and auto-compaction after agent completes
-		if (event.type === "agent_end" && this.#lastAssistantMessage) {
-			const msg = this.#lastAssistantMessage;
+		if (event.type === "agent_end") {
+			const fallbackAssistant = [...event.messages]
+				.reverse()
+				.find((message): message is AssistantMessage => message.role === "assistant");
+			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
+			if (!msg) return;
 
 			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
 				this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
@@ -707,11 +755,18 @@ export class AgentSession {
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
+			if (msg.stopReason === "aborted" && this.#checkpointState) {
+				this.#checkpointState = undefined;
+				this.#pendingRewindReport = undefined;
+			}
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			await compactionTask;
 			// Check for incomplete todos (unless there was an error or abort)
 			if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
+				if (this.#enforceRewindBeforeYield()) {
+					return;
+				}
 				await this.#checkTodoCompletion();
 			}
 		}
@@ -1259,33 +1314,6 @@ export class AgentSession {
 		}
 	}
 
-	/** Rewrite tool call arguments in agent state and persisted session history. */
-	async #rewriteToolCallArgs(toolCallId: string, args: Record<string, unknown>): Promise<void> {
-		let updated = false;
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role !== "assistant") continue;
-			const assistantMsg = msg as AssistantMessage;
-			if (!Array.isArray(assistantMsg.content)) continue;
-			for (const block of assistantMsg.content) {
-				if (typeof block !== "object" || block === null) continue;
-				if (!("type" in block) || (block as { type?: string }).type !== "toolCall") continue;
-				const toolCall = block as { id?: string; arguments?: Record<string, unknown> };
-				if (toolCall.id === toolCallId) {
-					toolCall.arguments = args;
-					updated = true;
-					break;
-				}
-			}
-			if (updated) break;
-		}
-
-		if (updated) {
-			await this.sessionManager.rewriteAssistantToolCallArgs(toolCallId, args);
-		}
-	}
-
 	/** Emit extension events based on session events */
 	async #emitExtensionEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.#extensionRunner) return;
@@ -1454,6 +1482,8 @@ export class AgentSession {
 			state.close();
 		}
 		this.#providerSessionState.clear();
+		this.#unsubscribePendingActionPush?.();
+		this.#unsubscribePendingActionPush = undefined;
 		this.#disconnectFromAgent();
 		this.#eventListeners = [];
 	}
@@ -1687,6 +1717,17 @@ export class AgentSession {
 		this.#planReferencePath = path;
 	}
 
+	getCheckpointState(): CheckpointState | undefined {
+		return this.#checkpointState;
+	}
+
+	setCheckpointState(state: CheckpointState | undefined): void {
+		this.#checkpointState = state;
+		if (!state) {
+			this.#pendingRewindReport = undefined;
+		}
+	}
+
 	/**
 	 * Inject the plan mode context message into the conversation history.
 	 */
@@ -1867,6 +1908,9 @@ export class AgentSession {
 			: { role: "user" as const, content: userContent, timestamp: Date.now() };
 
 		await this.#promptWithMessage(message, expandedText, options);
+		if (!options?.synthetic) {
+			await this.#enforcePlanModeToolDecision();
+		}
 	}
 
 	async promptCustomMessage<T = unknown>(
@@ -3200,7 +3244,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
 		// This handles the case where an error was kept after compaction (in the "kept" region).
 		// The error shouldn't trigger another compaction since we already compacted.
-		// Example: opus fails \u2192 switch to codex \u2192 compact \u2192 switch back to opus \u2192 opus error
+		// Example: opus fails -> switch to codex -> compact -> switch back to opus -> opus error
 		// is still in context but shouldn't trigger compaction again.
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
@@ -3213,7 +3257,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				this.agent.replaceMessages(messages.slice(0, -1));
 			}
 
-			// Try context promotion first \u2014 switch to a larger model and retry without compacting
+			// Try context promotion first - switch to a larger model and retry without compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				// Retry on the promoted (larger) model without compacting
@@ -3221,7 +3265,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				return;
 			}
 
-			// No promotion target available \u2014 fall through to compaction
+			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
 			if (compactionSettings.enabled) {
 				await this.#runAutoCompaction("overflow", true);
@@ -3245,6 +3289,100 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (!promoted) {
 				await this.#runAutoCompaction("threshold", false);
 			}
+		}
+	}
+	#enforceRewindBeforeYield(): boolean {
+		if (!this.#checkpointState || this.#pendingRewindReport) {
+			return false;
+		}
+		const reminder = [
+			"<system-warning>",
+			"You are in an active checkpoint. You MUST call rewind with your investigation findings before yielding. Do NOT yield without completing the checkpoint.",
+			"</system-warning>",
+		].join("\n");
+		this.agent.appendMessage({
+			role: "developer",
+			content: [{ type: "text", text: reminder }],
+			timestamp: Date.now(),
+		});
+		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
+		return true;
+	}
+
+	async #applyRewind(report: string): Promise<void> {
+		const checkpointState = this.#checkpointState;
+		if (!checkpointState) {
+			return;
+		}
+		const safeCount = Math.max(0, Math.min(checkpointState.checkpointMessageCount, this.agent.state.messages.length));
+		this.agent.replaceMessages(this.agent.state.messages.slice(0, safeCount));
+		try {
+			this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
+				startedAt: checkpointState.startedAt,
+			});
+		} catch (error) {
+			logger.warn("Rewind branch checkpoint missing, falling back to root", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
+		}
+		const details = { startedAt: checkpointState.startedAt, rewoundAt: new Date().toISOString() };
+		this.agent.appendMessage({
+			role: "custom",
+			customType: "rewind-report",
+			content: report,
+			display: false,
+			details,
+			timestamp: Date.now(),
+		});
+		this.sessionManager.appendCustomMessageEntry("rewind-report", report, false, details);
+		this.#checkpointState = undefined;
+		this.#pendingRewindReport = undefined;
+	}
+	async #enforcePlanModeToolDecision(): Promise<void> {
+		if (!this.#planModeState?.enabled) {
+			return;
+		}
+		const assistantMessage = this.#findLastAssistantMessage();
+		if (!assistantMessage) {
+			return;
+		}
+		if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
+			return;
+		}
+
+		const calledRequiredTool = assistantMessage.content.some(
+			content => content.type === "toolCall" && (content.name === "ask" || content.name === "exit_plan_mode"),
+		);
+		if (calledRequiredTool) {
+			return;
+		}
+
+		const askTool = this.#toolRegistry.get("ask");
+		const exitPlanModeTool = this.#toolRegistry.get("exit_plan_mode");
+		if (!askTool || !exitPlanModeTool) {
+			logger.warn("Plan mode enforcement skipped because ask/exit tools are unavailable", {
+				activeToolNames: this.agent.state.tools.map(tool => tool.name),
+			});
+			return;
+		}
+		const forcedTools = [askTool, exitPlanModeTool];
+
+		const reminder = renderPromptTemplate(planModeToolDecisionReminderPrompt, {
+			askToolName: "ask",
+			exitToolName: "exit_plan_mode",
+		});
+
+		const previousTools = this.agent.state.tools;
+		this.agent.setTools(forcedTools);
+		try {
+			await this.prompt(reminder, {
+				synthetic: true,
+				expandPromptTemplates: false,
+				toolChoice: "required",
+			});
+		} finally {
+			this.agent.setTools(previousTools);
 		}
 	}
 	/**

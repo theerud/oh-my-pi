@@ -2,12 +2,11 @@
  * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
  */
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { AnySchema } from "ajv";
-import Ajv2020 from "ajv/dist/2020.js";
 import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import { prepareSchemaForCCA, sanitizeSchemaForGoogle } from "../utils/schema";
 import { transformMessages } from "./transform-messages";
 
+export { sanitizeSchemaForGoogle };
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
 /**
@@ -89,12 +88,12 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				if (!msg.content || msg.content.trim() === "") continue;
 				contents.push({
 					role: "user",
-					parts: [{ text: sanitizeSurrogates(msg.content) }],
+					parts: [{ text: msg.content.toWellFormed() }],
 				});
 			} else {
 				const parts: Part[] = msg.content.map(item => {
 					if (item.type === "text") {
-						return { text: sanitizeSurrogates(item.text) };
+						return { text: item.text.toWellFormed() };
 					} else {
 						return {
 							inlineData: {
@@ -129,7 +128,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					if (!block.text || block.text.trim() === "") continue;
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
 					parts.push({
-						text: sanitizeSurrogates(block.text),
+						text: block.text.toWellFormed(),
 						...(thoughtSignature && { thoughtSignature }),
 					});
 				} else if (block.type === "thinking") {
@@ -141,12 +140,12 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
 						parts.push({
 							thought: true,
-							text: sanitizeSurrogates(block.thinking),
+							text: block.thinking.toWellFormed(),
 							...(thoughtSignature && { thoughtSignature }),
 						});
 					} else {
 						parts.push({
-							text: sanitizeSurrogates(block.thinking),
+							text: block.thinking.toWellFormed(),
 						});
 					}
 				} else if (block.type === "toolCall") {
@@ -160,12 +159,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 							.join("\n");
 
 						parts.push({
-							text: sanitizeSurrogates(
-								`<call_record tool="${block.name}">
+							text: `<call_record tool="${block.name}">
 <critical>Historical context only. You cannot invoke tools this way—use proper function calling.</critical>
 ${params}
-</call_record>`,
-							),
+</call_record>`.toWellFormed(),
 						});
 						continue;
 					}
@@ -209,7 +206,7 @@ ${params}
 			const supportsMultimodalFunctionResponse = model.id.includes("gemini-3");
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
-			const responseValue = hasText ? sanitizeSurrogates(textResult) : hasImages ? "(see attached image)" : "";
+			const responseValue = hasText ? textResult.toWellFormed() : hasImages ? "(see attached image)" : "";
 
 			const imageParts: Part[] = imageContent.map(imageBlock => ({
 				inlineData: {
@@ -258,438 +255,6 @@ ${params}
 	return contents;
 }
 
-const UNSUPPORTED_SCHEMA_FIELDS = new Set([
-	"$schema",
-	"$ref",
-	"$defs",
-	"$dynamicRef",
-	"$dynamicAnchor",
-	"examples",
-	"prefixItems",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"patternProperties",
-	"additionalProperties",
-	"minItems",
-	"maxItems",
-	"minLength",
-	"maxLength",
-	"minimum",
-	"maximum",
-	"exclusiveMinimum",
-	"exclusiveMaximum",
-	"pattern",
-	"format",
-]);
-
-interface SanitizeSchemaOptions {
-	insideProperties: boolean;
-	normalizeTypeArrayToNullable: boolean;
-	stripNullableKeyword: boolean;
-}
-
-type JsonObject = Record<string, unknown>;
-
-function isJsonObject(value: unknown): value is JsonObject {
-	return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function areJsonValuesEqual(left: unknown, right: unknown): boolean {
-	if (Object.is(left, right)) {
-		return true;
-	}
-	if (Array.isArray(left) || Array.isArray(right)) {
-		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
-			return false;
-		}
-		for (let i = 0; i < left.length; i += 1) {
-			if (!areJsonValuesEqual(left[i], right[i])) {
-				return false;
-			}
-		}
-		return true;
-	}
-	if (!isJsonObject(left) || !isJsonObject(right)) {
-		return false;
-	}
-	const leftKeys = Object.keys(left);
-	const rightKeys = Object.keys(right);
-	if (leftKeys.length !== rightKeys.length) {
-		return false;
-	}
-	for (const key of leftKeys) {
-		if (!(key in right) || !areJsonValuesEqual(left[key], right[key])) {
-			return false;
-		}
-	}
-	return true;
-}
-
-function mergeCompatibleEnumSchemas(existing: unknown, incoming: unknown): JsonObject | null {
-	if (!isJsonObject(existing) || !isJsonObject(incoming)) {
-		return null;
-	}
-	const existingEnum = Array.isArray(existing.enum) ? existing.enum : null;
-	const incomingEnum = Array.isArray(incoming.enum) ? incoming.enum : null;
-	if (!existingEnum || !incomingEnum) {
-		return null;
-	}
-	if (!areJsonValuesEqual(existing.type, incoming.type)) {
-		return null;
-	}
-	const existingKeys = Object.keys(existing).filter(key => key !== "enum");
-	const incomingKeys = Object.keys(incoming).filter(key => key !== "enum");
-	if (existingKeys.length !== incomingKeys.length) {
-		return null;
-	}
-	for (const key of existingKeys) {
-		if (!(key in incoming) || !areJsonValuesEqual(existing[key], incoming[key])) {
-			return null;
-		}
-	}
-
-	const mergedEnum = [...existingEnum];
-	for (const enumValue of incomingEnum) {
-		if (!mergedEnum.some(existingValue => Object.is(existingValue, enumValue))) {
-			mergedEnum.push(enumValue);
-		}
-	}
-	return {
-		...existing,
-		enum: mergedEnum,
-	};
-}
-
-function getAnyOfVariants(schema: unknown): unknown[] {
-	if (isJsonObject(schema) && Array.isArray(schema.anyOf)) {
-		return schema.anyOf;
-	}
-	return [schema];
-}
-
-function mergePropertySchemas(existing: unknown, incoming: unknown): unknown {
-	if (areJsonValuesEqual(existing, incoming)) {
-		return existing;
-	}
-	const mergedEnumSchema = mergeCompatibleEnumSchemas(existing, incoming);
-	if (mergedEnumSchema !== null) {
-		return mergedEnumSchema;
-	}
-
-	const mergedAnyOf = [...getAnyOfVariants(existing)];
-	for (const variant of getAnyOfVariants(incoming)) {
-		if (!mergedAnyOf.some(existingVariant => areJsonValuesEqual(existingVariant, variant))) {
-			mergedAnyOf.push(variant);
-		}
-	}
-	return mergedAnyOf.length === 1 ? mergedAnyOf[0] : { anyOf: mergedAnyOf };
-}
-
-function sanitizeSchemaImpl(value: unknown, options: SanitizeSchemaOptions): unknown {
-	if (Array.isArray(value)) {
-		return value.map(entry => sanitizeSchemaImpl(entry, options));
-	}
-	if (!value || typeof value !== "object") {
-		return value;
-	}
-	const obj = value as Record<string, unknown>;
-	const result: Record<string, unknown> = {};
-	for (const combiner of ["anyOf", "oneOf"] as const) {
-		if (Array.isArray(obj[combiner])) {
-			const variants = obj[combiner] as Record<string, unknown>[];
-			const allHaveConst = variants.every(v => v && typeof v === "object" && "const" in v);
-			if (allHaveConst && variants.length > 0) {
-				result.enum = variants.map(v => v.const);
-				const firstType = variants[0]?.type;
-				if (firstType) {
-					result.type = firstType;
-				}
-				// Copy description and other top-level fields (not the combiner)
-				for (const [key, entry] of Object.entries(obj)) {
-					if (key !== combiner && !(key in result)) {
-						result[key] = sanitizeSchemaImpl(entry, {
-							insideProperties: false,
-							normalizeTypeArrayToNullable: options.normalizeTypeArrayToNullable,
-							stripNullableKeyword: options.stripNullableKeyword,
-						});
-					}
-				}
-				return result;
-			}
-		}
-	}
-	// Regular field processing
-	let constValue: unknown;
-	for (const [key, entry] of Object.entries(obj)) {
-		// Only strip unsupported schema keywords when NOT inside "properties" object
-		// Inside "properties", keys are property names (e.g., "pattern") not schema keywords
-		if (!options.insideProperties && UNSUPPORTED_SCHEMA_FIELDS.has(key)) continue;
-		if (options.stripNullableKeyword && key === "nullable") continue;
-		if (key === "const") {
-			constValue = entry;
-			continue;
-		}
-		if (key === "additionalProperties" && entry === false) continue;
-		// When key is "properties", child keys are property names, not schema keywords
-		result[key] = sanitizeSchemaImpl(entry, {
-			insideProperties: key === "properties",
-			normalizeTypeArrayToNullable: options.normalizeTypeArrayToNullable,
-			stripNullableKeyword: options.stripNullableKeyword,
-		});
-	}
-	// Normalize array-valued "type" (e.g. ["string", "null"]) to a single type + nullable.
-	// Google's Schema proto expects type to be a single enum string, not an array.
-	if (options.normalizeTypeArrayToNullable && Array.isArray(result.type)) {
-		const types = result.type as string[];
-		const nonNull = types.filter(t => t !== "null");
-		if (types.includes("null")) {
-			result.nullable = true;
-		}
-		result.type = nonNull[0] ?? types[0];
-	}
-	if (constValue !== undefined) {
-		// Convert const to enum, merging with existing enum if present
-		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
-		if (!existingEnum.some(item => Object.is(item, constValue))) {
-			existingEnum.push(constValue);
-		}
-		result.enum = existingEnum;
-		if (!result.type) {
-			result.type =
-				typeof constValue === "string"
-					? "string"
-					: typeof constValue === "number"
-						? "number"
-						: typeof constValue === "boolean"
-							? "boolean"
-							: undefined;
-		}
-	}
-
-	return result;
-}
-export function sanitizeSchemaForGoogle(value: unknown): unknown {
-	return sanitizeSchemaImpl(value, {
-		insideProperties: false,
-		normalizeTypeArrayToNullable: true,
-		stripNullableKeyword: false,
-	});
-}
-
-export function sanitizeSchemaForCloudCodeAssistClaude(value: unknown): unknown {
-	return sanitizeSchemaImpl(value, {
-		insideProperties: false,
-		normalizeTypeArrayToNullable: false,
-		stripNullableKeyword: true,
-	});
-}
-
-/**
- * Claude via Cloud Code Assist (`parameters` path) can reject schemas that keep
- * object variant combiners, so flatten object-only unions into one object shape.
- */
-function mergeObjectCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
-	const variantsRaw = schema[combiner];
-	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) {
-		return schema;
-	}
-
-	const variants: JsonObject[] = [];
-	for (const entry of variantsRaw) {
-		if (!isJsonObject(entry)) {
-			return schema;
-		}
-		const variantType = entry.type;
-		if (variantType !== undefined && variantType !== "object") {
-			return schema;
-		}
-		if (entry.properties !== undefined && !isJsonObject(entry.properties)) {
-			return schema;
-		}
-		variants.push(entry);
-	}
-
-	const mergedProperties: JsonObject = {};
-	const ownProperties = isJsonObject(schema.properties) ? schema.properties : {};
-	for (const [name, propertySchema] of Object.entries(ownProperties)) {
-		mergedProperties[name] = propertySchema;
-	}
-
-	for (const variant of variants) {
-		const properties = isJsonObject(variant.properties) ? variant.properties : {};
-		for (const [name, propertySchema] of Object.entries(properties)) {
-			const existingSchema = mergedProperties[name];
-			mergedProperties[name] =
-				existingSchema === undefined ? propertySchema : mergePropertySchemas(existingSchema, propertySchema);
-		}
-	}
-
-	const nextSchema: JsonObject = {};
-	for (const [key, entry] of Object.entries(schema)) {
-		if (key === combiner) continue;
-		nextSchema[key] = entry;
-	}
-
-	nextSchema.type = "object";
-	nextSchema.properties = mergedProperties;
-	return nextSchema;
-}
-
-const CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS: Record<string, ReadonlySet<string>> = {
-	array: new Set([
-		"items",
-		"prefixItems",
-		"contains",
-		"minContains",
-		"maxContains",
-		"minItems",
-		"maxItems",
-		"uniqueItems",
-		"unevaluatedItems",
-	]),
-	object: new Set([
-		"properties",
-		"required",
-		"additionalProperties",
-		"patternProperties",
-		"propertyNames",
-		"minProperties",
-		"maxProperties",
-		"dependentRequired",
-		"dependentSchemas",
-		"unevaluatedProperties",
-	]),
-	string: new Set(["minLength", "maxLength", "pattern", "format", "contentEncoding", "contentMediaType"]),
-	number: new Set(["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"]),
-	integer: new Set(["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"]),
-	boolean: new Set(),
-	null: new Set(),
-};
-
-function collapseMixedTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
-	const variantsRaw = schema[combiner];
-	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) {
-		return schema;
-	}
-
-	const seenTypes = new Set<string>();
-	const variantTypes: string[] = [];
-	const mergedVariantFields: JsonObject = {};
-	for (const entry of variantsRaw) {
-		if (!isJsonObject(entry) || typeof entry.type !== "string") {
-			return schema;
-		}
-
-		const variantType = entry.type;
-		if (seenTypes.has(variantType)) {
-			return schema;
-		}
-
-		const allowedKeys = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[variantType];
-		if (!allowedKeys) {
-			return schema;
-		}
-
-		for (const [key, variantValue] of Object.entries(entry)) {
-			if (key === "type") continue;
-			if (!allowedKeys.has(key)) {
-				return schema;
-			}
-
-			const existingValue = mergedVariantFields[key];
-			if (existingValue !== undefined && !areJsonValuesEqual(existingValue, variantValue)) {
-				return schema;
-			}
-			mergedVariantFields[key] = variantValue;
-		}
-
-		seenTypes.add(variantType);
-		variantTypes.push(variantType);
-	}
-
-	if (variantTypes.length < 2 || variantTypes.every(type => type === "object")) {
-		return schema;
-	}
-
-	const nextSchema: JsonObject = {};
-	for (const [key, entry] of Object.entries(schema)) {
-		if (key === combiner) continue;
-		nextSchema[key] = entry;
-	}
-
-	nextSchema.type = variantTypes;
-	for (const [key, value] of Object.entries(mergedVariantFields)) {
-		nextSchema[key] = value;
-	}
-	return nextSchema;
-}
-
-function normalizeSchemaForCloudCodeAssistClaude(value: unknown): unknown {
-	if (Array.isArray(value)) {
-		return value.map(entry => normalizeSchemaForCloudCodeAssistClaude(entry));
-	}
-	if (!isJsonObject(value)) {
-		return value;
-	}
-
-	const normalized: JsonObject = {};
-	for (const [key, entry] of Object.entries(value)) {
-		normalized[key] = normalizeSchemaForCloudCodeAssistClaude(entry);
-	}
-
-	const mergedAnyOf = mergeObjectCombinerVariants(normalized, "anyOf");
-	const collapsedAnyOf = collapseMixedTypeCombinerVariants(mergedAnyOf, "anyOf");
-	const mergedOneOf = mergeObjectCombinerVariants(collapsedAnyOf, "oneOf");
-	return collapseMixedTypeCombinerVariants(mergedOneOf, "oneOf");
-}
-
-let cloudCodeAssistSchemaValidator: Ajv2020 | null = null;
-function getCloudCodeAssistSchemaValidator(): Ajv2020 {
-	if (cloudCodeAssistSchemaValidator) {
-		return cloudCodeAssistSchemaValidator;
-	}
-
-	cloudCodeAssistSchemaValidator = new Ajv2020({
-		allErrors: true,
-		strict: false,
-		validateSchema: true,
-	});
-	return cloudCodeAssistSchemaValidator;
-}
-
-/**
- * Keep validation synchronous in this request path.
- */
-function isValidCloudCodeAssistClaudeSchema(schema: unknown): boolean {
-	try {
-		const result = getCloudCodeAssistSchemaValidator().validateSchema(schema as AnySchema);
-		return typeof result === "boolean" ? result : false;
-	} catch {
-		return false;
-	}
-}
-
-const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
-	type: "object",
-	properties: {},
-} as const;
-
-/**
- * Prepare schema for Claude on Cloud Code Assist:
- * sanitize -> normalize union objects -> validate -> fallback.
- *
- * Fallback is per-tool and fail-open to avoid rejecting the entire request when
- * one tool schema is invalid.
- */
-export function prepareSchemaForCloudCodeAssistClaude(value: unknown): unknown {
-	const sanitized = sanitizeSchemaForCloudCodeAssistClaude(value);
-	const normalized = normalizeSchemaForCloudCodeAssistClaude(sanitized);
-	if (isValidCloudCodeAssistClaudeSchema(normalized)) {
-		return normalized;
-	}
-	return CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA;
-}
-
 /**
  * Convert tools to Gemini function declarations format.
  *
@@ -717,7 +282,7 @@ export function convertTools(
 				name: tool.name,
 				description: tool.description || "",
 				...(useParameters
-					? { parameters: prepareSchemaForCloudCodeAssistClaude(tool.parameters) }
+					? { parameters: prepareSchemaForCCA(tool.parameters) }
 					: { parametersJsonSchema: tool.parameters }),
 			})),
 		},

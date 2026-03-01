@@ -37,5 +37,5 @@ export * from "./utils/oauth";
 export * from "./providers/openai-codex-responses";
 export * from "./utils/overflow";
 export * from "./utils/retry";
-export * from "./utils/typebox-helpers";
+export * from "./utils/schema";
 export * from "./utils/validation";

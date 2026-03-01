@@ -15,13 +15,14 @@ import type { AgentOutputManager } from "../task/output-manager";
 import type { EventBus } from "../utils/event-bus";
 import { SearchTool } from "../web/search";
 import { AskTool } from "./ask";
-import { AstFindTool } from "./ast-find";
-import { AstReplaceTool } from "./ast-replace";
+import { AstEditTool } from "./ast-edit";
+import { AstGrepTool } from "./ast-grep";
 import { AwaitTool } from "./await-tool";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { CalculatorTool } from "./calculator";
 import { CancelJobTool } from "./cancel-job";
+import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FetchTool } from "./fetch";
 import { FindTool } from "./find";
@@ -30,6 +31,8 @@ import { NotebookTool } from "./notebook";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { PythonTool } from "./python";
 import { ReadTool } from "./read";
+import { RenderMermaidTool } from "./render-mermaid";
+import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
 import { loadSshTool } from "./ssh";
 import { SubmitResultTool } from "./submit-result";
@@ -38,50 +41,38 @@ import { WriteTool } from "./write";
 
 // Exa MCP tools (22 tools)
 
-export { exaTools } from "../exa";
-export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "../exa/types";
-export {
-	type FileDiagnosticsResult,
-	type FileFormatResult,
-	getLspStatus,
-	type LspServerStatus,
-	LspTool,
-	type LspToolDetails,
-	type LspWarmupOptions,
-	type LspWarmupResult,
-	warmupLspServers,
-} from "../lsp";
-export { EditTool, type EditToolDetails } from "../patch";
+export * from "../exa";
+export type * from "../exa/types";
+export * from "../lsp";
+export * from "../patch";
 export * from "../session/streaming-output";
-export { BUNDLED_AGENTS, TaskTool } from "../task";
+export * from "../task";
 export * from "../web/search";
-export { AskTool, type AskToolDetails } from "./ask";
-export { AstFindTool, type AstFindToolDetails } from "./ast-find";
-export { AstReplaceTool, type AstReplaceToolDetails } from "./ast-replace";
-export { AwaitTool, type AwaitToolDetails } from "./await-tool";
-export { BashTool, type BashToolDetails, type BashToolInput, type BashToolOptions } from "./bash";
-export { BrowserTool, type BrowserToolDetails } from "./browser";
-export { CalculatorTool, type CalculatorToolDetails } from "./calculator";
-export { CancelJobTool, type CancelJobToolDetails } from "./cancel-job";
-export { type ExitPlanModeDetails, ExitPlanModeTool } from "./exit-plan-mode";
-export { FetchTool, type FetchToolDetails } from "./fetch";
-export { type FindOperations, FindTool, type FindToolDetails, type FindToolInput, type FindToolOptions } from "./find";
-export { setPreferredImageProvider } from "./gemini-image";
-export { GrepTool, type GrepToolDetails, type GrepToolInput } from "./grep";
-export { NotebookTool, type NotebookToolDetails } from "./notebook";
-export { PythonTool, type PythonToolDetails, type PythonToolOptions } from "./python";
-export { ReadTool, type ReadToolDetails, type ReadToolInput } from "./read";
-export { reportFindingTool, type SubmitReviewDetails } from "./review";
-export { loadSshTool, type SSHToolDetails, SshTool } from "./ssh";
-export { SubmitResultTool } from "./submit-result";
-export {
-	getLatestTodoPhasesFromEntries,
-	type TodoItem,
-	type TodoPhase,
-	TodoWriteTool,
-	type TodoWriteToolDetails,
-} from "./todo-write";
-export { WriteTool, type WriteToolDetails, type WriteToolInput } from "./write";
+export * from "./ask";
+export * from "./ast-edit";
+export * from "./ast-grep";
+export * from "./await-tool";
+export * from "./bash";
+export * from "./browser";
+export * from "./calculator";
+export * from "./cancel-job";
+export * from "./checkpoint";
+export * from "./exit-plan-mode";
+export * from "./fetch";
+export * from "./find";
+export * from "./gemini-image";
+export * from "./grep";
+export * from "./notebook";
+export * from "./pending-action";
+export * from "./python";
+export * from "./read";
+export * from "./render-mermaid";
+export * from "./resolve";
+export * from "./review";
+export * from "./ssh";
+export * from "./submit-result";
+export * from "./todo-write";
+export * from "./write";
 
 /** Tool type (AgentTool from pi-ai) */
 export type Tool = AgentTool<any, any, any>;
@@ -154,13 +145,20 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Pending action store for preview/apply workflows */
+	pendingActionStore?: import("./pending-action").PendingActionStore;
+	/** Get active checkpoint state if any. */
+	getCheckpointState?: () => CheckpointState | undefined;
+	/** Set or clear active checkpoint state. */
+	setCheckpointState?: (state: CheckpointState | null) => void;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
 
 export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
-	ast_find: s => new AstFindTool(s),
-	ast_replace: s => new AstReplaceTool(s),
+	ast_grep: s => new AstGrepTool(s),
+	ast_edit: s => new AstEditTool(s),
+	render_mermaid: s => new RenderMermaidTool(s),
 	ask: AskTool.createIf,
 	bash: s => new BashTool(s),
 	python: s => new PythonTool(s),
@@ -173,6 +171,8 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	notebook: s => new NotebookTool(s),
 	read: s => new ReadTool(s),
 	browser: s => new BrowserTool(s),
+	checkpoint: CheckpointTool.createIf,
+	rewind: RewindTool.createIf,
 	task: TaskTool.create,
 	cancel_job: CancelJobTool.createIf,
 	await: AwaitTool.createIf,
@@ -186,6 +186,7 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	submit_result: s => new SubmitResultTool(s),
 	report_finding: () => reportFindingTool,
 	exit_plan_mode: s => new ExitPlanModeTool(s),
+	resolve: s => new ResolveTool(s),
 };
 
 export type ToolName = keyof typeof BUILTIN_TOOLS;
@@ -281,6 +282,24 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	) {
 		requestedTools.push("bash");
 	}
+
+	// Auto-include AST counterparts when their text-based sibling is present
+	if (requestedTools) {
+		if (
+			requestedTools.includes("grep") &&
+			!requestedTools.includes("ast_grep") &&
+			session.settings.get("astGrep.enabled")
+		) {
+			requestedTools.push("ast_grep");
+		}
+		if (
+			requestedTools.includes("edit") &&
+			!requestedTools.includes("ast_edit") &&
+			session.settings.get("astEdit.enabled")
+		) {
+			requestedTools.push("ast_edit");
+		}
+	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
 		if (name === "lsp") return enableLsp;
@@ -289,14 +308,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "todo_write") return !includeSubmitResult && session.settings.get("todo.enabled");
 		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "ast_find") return session.settings.get("astFind.enabled");
-		if (name === "ast_replace") return session.settings.get("astReplace.enabled");
+		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
+		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
+		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "notebook") return session.settings.get("notebook.enabled");
 		if (name === "fetch") return session.settings.get("fetch.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "lsp") return session.settings.get("lsp.enabled");
 		if (name === "calc") return session.settings.get("calc.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
+		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "task") {
 			const maxDepth = session.settings.get("task.maxRecursionDepth") ?? 2;
 			const currentDepth = session.taskDepth ?? 0;
@@ -309,24 +330,32 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 
 	const filteredRequestedTools = requestedTools?.filter(name => name in allTools && isToolAllowed(name));
-
-	const entries =
+	const baseEntries =
 		filteredRequestedTools !== undefined
-			? filteredRequestedTools.map(name => [name, allTools[name]] as const)
+			? filteredRequestedTools.filter(name => name !== "resolve").map(name => [name, allTools[name]] as const)
 			: [
 					...Object.entries(BUILTIN_TOOLS).filter(([name]) => isToolAllowed(name)),
 					...(includeSubmitResult ? ([["submit_result", HIDDEN_TOOLS.submit_result]] as const) : []),
 					...([["exit_plan_mode", HIDDEN_TOOLS.exit_plan_mode]] as const),
 				];
 
-	const results = await Promise.all(
-		entries.map(async ([name, factory]) => {
-			if (filteredRequestedTools && !filteredRequestedTools.includes(name)) {
-				return null;
-			}
+	const baseResults = await Promise.all(
+		baseEntries.map(async ([name, factory]) => {
 			const tool = await logger.timeAsync(`createTools:${name}`, factory, session);
 			return tool ? wrapToolWithMetaNotice(tool) : null;
 		}),
 	);
-	return results.filter((r): r is Tool => r !== null);
+	const tools = baseResults.filter((r): r is Tool => r !== null);
+	const hasDeferrableTools = tools.some(tool => tool.deferrable === true);
+	if (!hasDeferrableTools) {
+		return tools;
+	}
+	if (tools.some(tool => tool.name === "resolve")) {
+		return tools;
+	}
+	const resolveTool = await logger.timeAsync("createTools:resolve", HIDDEN_TOOLS.resolve, session);
+	if (resolveTool) {
+		tools.push(wrapToolWithMetaNotice(resolveTool));
+	}
+	return tools;
 }

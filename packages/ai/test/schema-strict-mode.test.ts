@@ -1,9 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	enforceStrictSchema,
-	sanitizeSchemaForStrictMode,
-	tryEnforceStrictSchema,
-} from "@oh-my-pi/pi-ai/utils/typebox-helpers";
+import { enforceStrictSchema, sanitizeSchemaForStrictMode, tryEnforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Type } from "@sinclair/typebox";
 
 describe("sanitizeSchemaForStrictMode", () => {
@@ -34,6 +30,30 @@ describe("sanitizeSchemaForStrictMode", () => {
 		expect(tokenSchema.format).toBeUndefined();
 	});
 
+	it("strips unsupported object-key constraints like propertyNames", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				metadata: {
+					type: "object",
+					properties: { value: { type: "string" } },
+					required: ["value"],
+					propertyNames: { type: "string" },
+					minProperties: 1,
+				},
+			},
+			required: ["metadata"],
+			propertyNames: { type: "string" },
+		} as Record<string, unknown>;
+
+		const sanitized = sanitizeSchemaForStrictMode(schema);
+		const properties = sanitized.properties as Record<string, Record<string, unknown>>;
+		const metadataSchema = properties.metadata;
+
+		expect(sanitized.propertyNames).toBeUndefined();
+		expect((metadataSchema as Record<string, unknown>).propertyNames).toBeUndefined();
+		expect((metadataSchema as Record<string, unknown>).minProperties).toBeUndefined();
+	});
 	it("normalizes type arrays into anyOf variants and cleans non-object branches", () => {
 		const schema = {
 			type: ["object", "null"],
@@ -158,23 +178,75 @@ describe("enforceStrictSchema", () => {
 		expect(validBranch.additionalProperties).toBe(false);
 	});
 
-	it("treats type arrays containing object as object schemas", () => {
+	it("treats type arrays containing object as object schemas via tryEnforceStrictSchema", () => {
 		const schema = {
 			type: ["object", "null"],
 			properties: { value: { type: "string" } },
 			required: ["value"],
 		} as Record<string, unknown>;
 
-		const strict = enforceStrictSchema(schema);
-		const properties = strict.properties as Record<string, Record<string, unknown>>;
+		const result = tryEnforceStrictSchema(schema);
 
-		expect(strict.additionalProperties).toBe(false);
-		expect(strict.required).toEqual(["value"]);
+		expect(result.strict).toBe(true);
+		// sanitizeSchemaForStrictMode splits type arrays into anyOf variants
+		const branches = result.schema.anyOf as Array<Record<string, unknown>>;
+		expect(branches).toHaveLength(2);
+
+		const objectBranch = branches.find(b => b.type === "object") as Record<string, unknown>;
+		const nullBranch = branches.find(b => b.type === "null");
+		expect(objectBranch).toBeDefined();
+		expect(nullBranch).toBeDefined();
+
+		// enforceStrictSchema applied object constraints to the object variant
+		expect(objectBranch.additionalProperties).toBe(false);
+		expect(objectBranch.required).toEqual(["value"]);
+		const properties = objectBranch.properties as Record<string, Record<string, unknown>>;
 		expect(properties.value.type).toBe("string");
 	});
 });
 
 describe("tryEnforceStrictSchema", () => {
+	it("sanitizes strict schemas by stripping unsupported format keywords", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				url: { type: "string", format: "uri" },
+			},
+			required: ["url"],
+			format: "uuid",
+		} as Record<string, unknown>;
+
+		const result = tryEnforceStrictSchema(schema);
+		const properties = result.schema.properties as Record<string, Record<string, unknown>>;
+
+		expect(result.strict).toBe(true);
+		expect(result.schema.format).toBeUndefined();
+		expect(properties.url.format).toBeUndefined();
+		expect(properties.url.type).toBe("string");
+	});
+	it("sanitizes propertyNames so strict mode stays enabled", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "object",
+					properties: { key: { type: "string" } },
+					required: ["key"],
+					propertyNames: { type: "string" },
+				},
+			},
+			required: ["tags"],
+			propertyNames: { type: "string" },
+		} as Record<string, unknown>;
+
+		const result = tryEnforceStrictSchema(schema);
+		const properties = result.schema.properties as Record<string, Record<string, unknown>>;
+		const tagsSchema = properties.tags;
+
+		expect(result.strict).toBe(true);
+		expect(result.schema.propertyNames).toBeUndefined();
+		expect((tagsSchema as Record<string, unknown>).propertyNames).toBeUndefined();
+	});
 	it("downgrades to non-strict mode when strict enforcement throws", () => {
 		const circularSchema: Record<string, unknown> = {
 			type: "object",
@@ -200,5 +272,19 @@ describe("tryEnforceStrictSchema", () => {
 		expect(result.strict).toBe(true);
 		expect(result.schema.additionalProperties).toBe(false);
 		expect(result.schema.required).toEqual(["value"]);
+	});
+	it("degrades to non-strict when array items is an empty schema", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				slide_instructions: { items: {}, type: "array" },
+			},
+			required: ["slide_instructions"],
+		} as Record<string, unknown>;
+
+		const result = tryEnforceStrictSchema(schema);
+
+		expect(result.strict).toBe(false);
+		expect(result.schema).toBe(schema);
 	});
 });

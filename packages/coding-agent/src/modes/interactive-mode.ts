@@ -702,7 +702,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.session.prompt(prompt, { synthetic: true });
 	}
 
-	async handlePlanModeCommand(): Promise<void> {
+	async handlePlanModeCommand(initialPrompt?: string): Promise<void> {
 		if (this.planModeEnabled) {
 			const confirmed = await this.showHookConfirm(
 				"Exit plan mode?",
@@ -713,6 +713,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#enterPlanMode();
+		if (initialPrompt) {
+			this.onInputCallback?.({ text: initialPrompt });
+		}
 	}
 
 	async handleExitPlanModeTool(details: ExitPlanModeDetails): Promise<void> {
@@ -942,6 +945,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleDumpCommand(): Promise<void> {
 		return this.#commandController.handleDumpCommand();
+	}
+
+	handleDebugTranscriptCommand(): Promise<void> {
+		return this.#commandController.handleDebugTranscriptCommand();
 	}
 
 	handleShareCommand(): Promise<void> {

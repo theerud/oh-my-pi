@@ -46,7 +46,7 @@ export { loginCloudflareAiGateway } from "./cloudflare-ai-gateway";
 // Cursor
 export {
 	generateCursorAuthParams,
-	isTokenExpiringSoon as isCursorTokenExpiringSoon,
+	isCursorTokenExpiringSoon,
 	loginCursor,
 	pollCursorAuth,
 	refreshCursorToken,
@@ -376,8 +376,8 @@ function getPerplexityJwtExpiryMs(token: string): number | undefined {
  * Get API key for a provider from OAuth credentials.
  * Automatically refreshes expired tokens.
  *
- * For google-gemini-cli and antigravity, returns JSON-encoded { token, projectId }
- *
+ * For google-gemini-cli and antigravity, returns JSON-encoded credentials including token/projectId
+ * plus refresh/expiry metadata for proactive refresh support.
  * @returns API key string, or null if no credentials
  * @throws Error if refresh fails
  */
@@ -417,7 +417,16 @@ export async function getOAuthApiKey(
 	}
 	// For providers that need projectId, return JSON
 	const needsProjectId = provider === "google-gemini-cli" || provider === "google-antigravity";
-	const apiKey = needsProjectId ? JSON.stringify({ token: creds.access, projectId: creds.projectId }) : creds.access;
+	const apiKey = needsProjectId
+		? JSON.stringify({
+				token: creds.access,
+				projectId: creds.projectId,
+				refreshToken: creds.refresh,
+				expiresAt: creds.expires,
+				email: creds.email,
+				accountId: creds.accountId,
+			})
+		: creds.access;
 	return { newCredentials: creds, apiKey };
 }
 

@@ -254,15 +254,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-	normativeRewrite: {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "agent",
-			label: "Normative rewrite",
-			description: "Rewrite tool call arguments to normalized format in session history",
-		},
-	},
 	repeatToolDescriptions: {
 		type: "boolean",
 		default: false,
@@ -455,24 +446,42 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-	"astFind.enabled": {
+	"astGrep.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable AST Find", description: "Enable the ast_find tool for structural AST search" },
+		ui: { tab: "tools", label: "Enable AST Grep", description: "Enable the ast_grep tool for structural AST search" },
 	},
-	"astReplace.enabled": {
+	"astEdit.enabled": {
 		type: "boolean",
 		default: true,
 		ui: {
 			tab: "tools",
-			label: "Enable AST Replace",
-			description: "Enable the ast_replace tool for structural AST rewrites",
+			label: "Enable AST Edit",
+			description: "Enable the ast_edit tool for structural AST rewrites",
+		},
+	},
+	"renderMermaid.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Enable Render Mermaid",
+			description: "Enable the render_mermaid tool for Mermaid-to-ASCII rendering",
 		},
 	},
 	"notebook.enabled": {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "Enable Notebook", description: "Enable the notebook tool for notebook editing" },
+	},
+	"checkpoint.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Enable Checkpoint/Rewind",
+			description: "Enable the checkpoint and rewind tools for context checkpointing",
+		},
 	},
 	"fetch.enabled": {
 		type: "boolean",
@@ -737,7 +746,19 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	"providers.webSearch": {
 		type: "enum",
-		values: ["auto", "exa", "brave", "jina", "kimi", "zai", "perplexity", "anthropic"] as const,
+		values: [
+			"auto",
+			"exa",
+			"brave",
+			"jina",
+			"kimi",
+			"zai",
+			"perplexity",
+			"anthropic",
+			"gemini",
+			"codex",
+			"synthetic",
+		] as const,
 		default: "auto",
 		ui: { tab: "services", label: "Web search provider", description: "Provider for web search tool", submenu: true },
 	},

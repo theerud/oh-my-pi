@@ -2,12 +2,132 @@
 
 ## [Unreleased]
 
+## [13.5.3] - 2026-03-01
+### Fixed
+
+- Fixed tool argument coercion to handle malformed JSON with trailing wrapper braces by parsing leading JSON containers
+
+## [13.4.0] - 2026-03-01
+
+### Breaking Changes
+
+- Removed `TInput` generic parameter from `ToolResultMessage` interface and removed `$normative` property
+
+### Added
+
+- `hasUnrepresentableStrictObjectMap()` pre-flight check in `tryEnforceStrictSchema`: schemas with `patternProperties` or schema-valued `additionalProperties` now degrade gracefully to non-strict mode instead of throwing during enforcement
+- `generateClaudeCloakingUserId()` generates structured user IDs for Anthropic OAuth metadata (`user_{hex64}_account_{uuid}_session_{uuid}`)
+- `isClaudeCloakingUserId()` validates whether a string matches the cloaking user-ID format
+- `mapStainlessOs()` and `mapStainlessArch()` map `process.platform`/`process.arch` to Stainless header values; X-Stainless-Os and X-Stainless-Arch in `claudeCodeHeaders` are now runtime-computed
+- `buildClaudeCodeTlsFetchOptions()` attaches SNI and default TLS ciphers for direct `api.anthropic.com` connections
+- `createClaudeBillingHeader()` generates the `x-anthropic-billing-header` block (SHA-256 payload fingerprint + random build hash)
+- `buildAnthropicSystemBlocks()` now injects a billing header block and the Claude Agent SDK identity block with `ephemeral` 1h cache-control when `includeClaudeCodeInstruction` is set
+- `resolveAnthropicMetadataUserId()` auto-generates a cloaking user ID for OAuth requests when `metadata.user_id` is absent or invalid
+- `AnthropicOAuthFlow` is now exported for direct use
+- OAuth callback server timeout extended from 2 min to 5 min
+- `parseGeminiCliCredentials()` parses Google Cloud credential JSON with support for legacy (`{token,projectId}`), alias (`project_id`/`refresh`/`expires`), and enriched formats
+- `shouldRefreshGeminiCliCredentials()` and proactive token refresh before requests for both Gemini CLI and Antigravity providers (60s pre-expiry buffer)
+- `normalizeAntigravityTools()` converts `parametersJsonSchema` → `parameters` in function declarations for Antigravity compatibility
+- `ANTIGRAVITY_SYSTEM_INSTRUCTION` is now exported for use by search and other consumers
+- `ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA` constant exported from OAuth module with `ANTIGRAVITY` ideType
+- Antigravity project onboarding: `onboardProjectWithRetries()` provisions a new project via `onboardUser` LRO when `loadCodeAssist` returns no existing project (up to 5 attempts, 2s interval)
+- `getOAuthApiKey` now includes `refreshToken`, `expiresAt`, `email`, and `accountId` in the Gemini/Antigravity JSON credential payload to enable proactive refresh
+- Antigravity model discovery now tries the production daily endpoint first, with sandbox as fallback
+- `ANTIGRAVITY_DISCOVERY_DENYLIST` filters low-quality/internal models from discovery results
+
+### Changed
+
+- Replaced `sanitizeSurrogates()` utility with native `String.prototype.toWellFormed()` for handling unpaired Unicode surrogates across all providers
+- Extended `ANTHROPIC_OAUTH_BETA` constant in the OpenAI-compat Anthropic route with `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, and `prompt-caching-scope-2026-01-05` beta flags
+- `claudeCodeVersion` bumped to `2.1.63`; `claudeCodeSystemInstruction` updated to identify as Claude Agent SDK
+- `claudeCodeHeaders`: removed `X-Stainless-Helper-Method`, updated package version to `0.74.0`, runtime version to `v24.3.0`
+- `applyClaudeToolPrefix` / `stripClaudeToolPrefix` now accept an optional prefix override and skip Anthropic built-in tool names (`web_search`, `code_execution`, `text_editor`, `computer`)
+- Accept-Encoding header updated to `gzip, deflate, br, zstd`
+- Non-Anthropic base URLs now receive `Authorization: Bearer` regardless of OAuth status
+- Prompt-caching logic now skips applying breakpoints when any block already carries `cache_control`, instead of stripping then re-applying
+- `fine-grained-tool-streaming-2025-05-14` removed from default beta set
+- Anthropic OAuth token URL changed from `platform.claude.com` to `api.anthropic.com`
+- Anthropic OAuth scopes reduced to `org:create_api_key user:profile user:inference`
+- OAuth code exchange now strips URL fragment from callback code, using the fragment as state override when present
+- Claude usage headers aligned: user-agent updated to `claude-cli/2.1.63 (external, cli)`, anthropic-beta extended with full beta set
+- Antigravity session ID format changed to signed decimal (negative int63 derived from SHA-256 of first user message, or random bounded int63)
+- Antigravity `requestId` now uses `agent-{uuid}` format; non-Antigravity requests no longer include requestId/userAgent/requestType in the payload
+- `ANTIGRAVITY_DAILY_ENDPOINT` corrected to `daily-cloudcode-pa.googleapis.com`; sandbox endpoint kept as fallback only
+- Antigravity discovery: removed `recommended`/`agentModelSorts` filter; now includes all non-internal, non-denylisted models
+- Antigravity discovery no longer sends `project` in the request body
+- Gemini/Antigravity OAuth flows no longer use PKCE (code_challenge removed)
+- Antigravity `loadCodeAssist` metadata ideType changed from `IDE_UNSPECIFIED` to `ANTIGRAVITY`
+- Antigravity `discoverProject` now uses a single canonical production endpoint; falls back to project onboarding instead of a hardcoded default project ID
+- `VALIDATED` tool calling config applied to Antigravity requests with Claude models
+- `maxOutputTokens` removed from Antigravity generation config for non-Claude models
+- System instruction injection for Antigravity scoped to Claude and `gemini-3-pro-high` models only
+
+### Removed
+
+- Removed `sanitizeSurrogates()` utility function; use native `String.prototype.toWellFormed()` instead
+
+## [13.3.14] - 2026-02-28
+
+### Added
+
+- Exported schema utilities from new `./utils/schema` module, consolidating JSON Schema handling across providers
+- Added `CredentialRankingStrategy` interface for providers to implement usage-based credential selection
+- Added `claudeRankingStrategy` for Anthropic OAuth credentials to enable smart multi-account selection based on usage windows
+- Added `codexRankingStrategy` for OpenAI Codex OAuth credentials with priority boost for fresh 5-hour window starts
+- Added `adaptSchemaForStrict()` helper for unified OpenAI strict schema enforcement across providers
+- Added schema equality and merging utilities: `areJsonValuesEqual()`, `mergeCompatibleEnumSchemas()`, `mergePropertySchemas()`
+- Added Cloud Code Assist schema normalization: `copySchemaWithout()`, `stripResidualCombiners()`, `prepareSchemaForCCA()`
+- Added `sanitizeSchemaForGoogle()` and `sanitizeSchemaForCCA()` for provider-specific schema sanitization
+- Added `StringEnum()` helper for creating string enum schemas compatible with Google and other providers
+- Added `enforceStrictSchema()` and `sanitizeSchemaForStrictMode()` for OpenAI strict mode schema validation
+- Added package exports for `./utils/schema` and `./utils/schema/*` subpaths
+- Added `validateSchemaCompatibility()` to statically audit a JSON Schema against provider-specific rules (`openai-strict`, `google`, `cloud-code-assist-claude`) and return structured violations
+- Added `validateStrictSchemaEnforcement()` to verify the strict-fail-open contract: enforced schemas pass strict validation, failed schemas return the original object identity
+- Added `COMBINATOR_KEYS` (`anyOf`, `allOf`, `oneOf`) and `CCA_UNSUPPORTED_SCHEMA_FIELDS` as exported constants in `fields.ts` to eliminate duplication across modules
+- Added `tryEnforceStrictSchema` result cache (`WeakMap`) to avoid redundant sanitize + enforce work for the same schema object
+- Added comprehensive schema normalization test suite (`schema-normalization.test.ts`) covering strict mode, Google, and Cloud Code Assist normalization paths
+- Added schema compatibility validation test suite (`schema-compatibility.test.ts`) covering all three provider targets
+
+### Changed
+
+- Moved schema utilities from `./utils/typebox-helpers` to new `./utils/schema` module with expanded functionality
+- Refactored OpenAI provider tool conversion to use unified `adaptSchemaForStrict()` helper across codex, completions, and responses
+- Updated `AuthStorage` to support generic credential ranking via `CredentialRankingStrategy` instead of Codex-only logic
+- Moved Google schema sanitization functions from `google-shared.ts` to `./utils/schema` module
+- Changed export path: `./utils/typebox-helpers` → `./utils/schema` in main index
+- `sanitizeSchemaForGoogle()` / `sanitizeSchemaForCCA()` now accept a parameterized `unsupportedFields` set internally, enabling code reuse between the two sanitizers
+- `copySchemaWithout()` rewritten using object-rest destructuring for clarity
+
+### Fixed
+
+- Fixed cycle detection: `WeakSet` guards added to all recursive schema traversals (`sanitizeSchemaForStrictMode`, `enforceStrictSchema`, `normalizeSchemaForCCA`, `normalizeNullablePropertiesForCloudCodeAssist`, `stripResidualCombiners`, `sanitizeSchemaImpl`, `hasResidualCloudCodeAssistIncompatibilities`) — circular schemas no longer cause infinite loops or stack overflows
+- Fixed `hasResidualCloudCodeAssistIncompatibilities`: cycle detection now returns `false` (not `true`) for already-visited nodes, eliminating false positives that forced the CCA fallback schema on valid recursive inputs
+- Fixed `stripResidualCombiners` to iterate to a fixpoint rather than making a single pass, ensuring chained combiner reductions (where one reduction enables another) are fully resolved
+- Fixed `mergeObjectCombinerVariants` required-field computation: the flattened object now takes the intersection of all variants' `required` arrays (unioned with own-level required properties that exist in the merged schema), preventing required fields from being silently dropped or over-included
+- Fixed `mergeCompatibleEnumSchemas` to use deep structural equality (`areJsonValuesEqual`) instead of `Object.is` when deduplicating object-valued enum members
+- Fixed `sanitizeSchemaForGoogle` const-to-enum deduplication to use deep equality instead of reference equality
+- Fixed `sanitizeSchemaForGoogle` type inference for `anyOf`/`oneOf`-flattened const enums: type is now derived from all variants (must agree), falling back to inference from enum values; mixed null/non-null infers the non-null type and sets `nullable`
+- Fixed `sanitizeSchemaForGoogle` recursion to spread options when descending (previously only `insideProperties`, `normalizeTypeArrayToNullable`, `stripNullableKeyword` were forwarded; new fields `unsupportedFields` and `seen` were silently dropped)
+- Fixed `sanitizeSchemaForGoogle` array-valued `type` filtering to exclude non-string entries before processing
+- Removed incorrect `additionalProperties: false` stripping from `sanitizeSchemaForGoogle` (the field is valid in Google schemas when `false`)
+- Fixed `sanitizeSchemaForStrictMode` to strip the `nullable` keyword and expand it into `anyOf: [schema, {type: "null"}]` in the output, matching what OpenAI strict mode actually expects
+- Fixed `sanitizeSchemaForStrictMode` to infer `type: "array"` when `items` is present but `type` is absent
+- Fixed `sanitizeSchemaForStrictMode` to infer a scalar `type` from uniform `enum` values when `type` is not explicitly set
+- Fixed `sanitizeSchemaForStrictMode` const-to-enum merge to use deep equality, preventing duplicate enum entries when `const` and `enum` both exist with the same value
+- Fixed `enforceStrictSchema` to drop `additionalProperties` unconditionally (previously only object-valued `additionalProperties` was recursed into; non-object values were passed through, violating strict schema requirements)
+- Fixed `enforceStrictSchema` to recurse into `$defs` and `definitions` blocks so referenced sub-schemas are also made strict-compliant
+- Fixed `enforceStrictSchema` to handle tuple-style `items` arrays (previously only single-schema `items` objects were recursed)
+- Fixed `enforceStrictSchema` double-wrapping: optional properties already expressed as `anyOf: [..., {type: "null"}]` are not wrapped again
+- Fixed `enforceStrictSchema` `Array.isArray` type-narrowing for `type` field to filter non-string entries before checking for `"object"`
+
 ## [13.3.8] - 2026-02-28
+
 ### Fixed
 
 - Fixed response body reuse error when handling 429 rate limit responses with retry logic
 
 ## [13.3.7] - 2026-02-27
+
 ### Added
 
 - Added `tryEnforceStrictSchema` function that gracefully downgrades to non-strict mode when schema enforcement fails, enabling better compatibility with malformed or circular schemas
@@ -25,6 +145,7 @@
 - Fixed `enforceStrictSchema` to correctly process nested object schemas within `anyOf`, `allOf`, and `oneOf` combinators
 
 ## [13.3.1] - 2026-02-26
+
 ### Added
 
 - Added `topP`, `topK`, `minP`, `presencePenalty`, and `repetitionPenalty` options to `StreamOptions` for fine-grained control over model sampling behavior
@@ -32,8 +153,11 @@
 ## [13.3.0] - 2026-02-26
 
 ### Changed
+
 - Allowed OAuth provider logins to supply a manual authorization code handler with a default prompt when none is provided
+
 ## [13.2.0] - 2026-02-23
+
 ### Added
 
 - Added support for GitHub Copilot provider in strict mode for both openai-completions and openai-responses tool schemas
@@ -43,6 +167,7 @@
 - Fixed tool descriptions being rejected when undefined by providing empty string fallback across all providers
 
 ## [12.19.1] - 2026-02-22
+
 ### Added
 
 - Exported `isProviderRetryableError` function for detecting rate-limit and transient stream errors
@@ -53,6 +178,7 @@
 - Expanded retry detection to include JSON parse errors (unterminated strings, unexpected end of input) in addition to rate-limit errors
 
 ## [12.19.0] - 2026-02-22
+
 ### Added
 
 - Added GitLab Duo provider with support for Claude, GPT-5, and other models via GitLab AI Gateway
@@ -78,6 +204,7 @@
 - Removed `CliAuthStorage` class in favor of new `AuthCredentialStore` with enhanced functionality
 
 ## [12.17.2] - 2026-02-21
+
 ### Added
 
 - Exported `getAntigravityUserAgent()` function for constructing Antigravity User-Agent headers
@@ -88,6 +215,7 @@
 - Unified User-Agent header generation across Antigravity API calls to use centralized `getAntigravityUserAgent()` function
 
 ## [12.17.1] - 2026-02-21
+
 ### Added
 
 - Added new export paths for provider models via `./provider-models` and `./provider-models/*`
@@ -102,10 +230,13 @@
 - Reorganized package.json field ordering for improved readability
 
 ## [12.17.0] - 2026-02-21
+
 ### Fixed
+
 - Cursor provider: bind `execHandlers` when passing handler methods to the exec protocol so handlers receive correct `this` context (fixes "undefined is not an object (evaluating 'this.options')" when using exec tools such as web search with Cursor)
 
 ## [12.16.0] - 2026-02-21
+
 ### Added
 
 - Exported `readModelCache` and `writeModelCache` functions for direct SQLite-backed model cache access
@@ -123,6 +254,7 @@
 - Updated tool call tracking to use status map (Resolved/Aborted) instead of separate sets for better handling of duplicate and aborted tool results
 
 ## [12.15.0] - 2026-02-20
+
 ### Fixed
 
 - Improved error messages for OAuth token refresh failures by including detailed error information from the provider
@@ -134,6 +266,7 @@
 - Changed 429 retry strategy for OpenAI Codex and Google Gemini CLI to use a 5-minute time budget when the server provides a retry delay, instead of a fixed attempt cap
 
 ## [12.14.0] - 2026-02-19
+
 ### Added
 
 - Added `gemini-3.1-pro` model to opencode provider with text and image input support
@@ -161,6 +294,7 @@
 - Added NanoGPT provider support with API-key login, dynamic model discovery from `https://nano-gpt.com/api/v1/models`, and text-model filtering for catalog/runtime discovery ([#111](https://github.com/can1357/oh-my-pi/issues/111))
 
 ## [12.12.3] - 2026-02-19
+
 ### Fixed
 
 - Fixed retry logic to recognize 'unable to connect' errors as transient failures
@@ -173,6 +307,7 @@
 - Fixed Codex websocket append fallback by resetting stale turn-state/model-etag session metadata when request shape diverges from appendable history.
 
 ## [12.11.1] - 2026-02-19
+
 ### Added
 
 - Added support for Claude 4.6 Opus and Sonnet models via Cursor API
@@ -224,6 +359,7 @@
 - Updated README documentation to list all newly supported providers and their authentication requirements
 
 ## [12.10.1] - 2026-02-18
+
 - Added Synthetic provider
 - Added API-key login helpers for Synthetic and Cerebras providers
 
@@ -279,6 +415,7 @@
 - Updated Qwen model context window and max token limits for improved accuracy
 
 ## [12.7.0] - 2026-02-16
+
 ### Added
 
 - Added DeepSeek-V3.2 model support via Amazon Bedrock
@@ -391,6 +528,7 @@
 - Added deprecation filter in model generation script to prevent re-adding deprecated Anthropic models ([#33](https://github.com/can1357/oh-my-pi/issues/33))
 
 ## [11.14.1] - 2026-02-12
+
 ### Added
 
 - Added prompt-caching-scope-2026-01-05 beta feature support
@@ -410,6 +548,7 @@
 - Removed fine-grained-tool-streaming-2025-05-14 beta feature
 
 ## [11.13.1] - 2026-02-12
+
 ### Added
 
 - Added Perplexity (Pro/Max) OAuth login support via native macOS app extraction or email OTP authentication
@@ -417,6 +556,7 @@
 - Added Socket.IO v4 client implementation for authenticated WebSocket communication with Perplexity API
 
 ## [11.12.0] - 2026-02-11
+
 ### Changed
 
 - Increased maximum retry attempts for Codex requests from 2 to 5 to improve reliability on transient failures
@@ -444,6 +584,7 @@
 - Updated `@anthropic-ai/sdk` dependency from ^0.72.1 to ^0.74.0
 
 ## [11.10.0] - 2026-02-10
+
 ### Added
 
 - Added support for Kimi K2, K2 Turbo Preview, and K2.5 models with reasoning capabilities
@@ -454,6 +595,7 @@
 - Fixed Claude Sonnet 4 context window to 200K across multiple providers (was incorrectly set to 1M)
 
 ## [11.8.0] - 2026-02-10
+
 ### Added
 
 - Added `auto` model alias for OpenRouter with automatic model routing
@@ -532,11 +674,13 @@
 - Fixed Bedrock `supportsPromptCaching` to also check model cost fields
 
 ## [11.5.1] - 2026-02-07
+
 ### Fixed
 
 - Fixed schema normalization to handle array-valued `type` fields by converting them to a single type with nullable flag for Google provider compatibility
 
 ## [11.3.0] - 2026-02-06
+
 ### Added
 
 - Added `cacheRetention` option to control prompt cache retention preference ('none', 'short', 'long') across providers
@@ -562,6 +706,7 @@
 - Fixed handling of conversations ending with assistant messages on Anthropic-routed models that reject assistant prefill requests
 
 ## [11.2.3] - 2026-02-05
+
 ### Added
 
 - Added Claude Opus 4.6 model support across multiple providers (Anthropic, Amazon Bedrock, GitHub Copilot, OpenRouter, OpenCode, Vercel AI Gateway)

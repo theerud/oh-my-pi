@@ -8,6 +8,7 @@ import type {
 	streamSimple,
 	TextContent,
 	Tool,
+	ToolChoice,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Static, TSchema } from "@sinclair/typebox";
@@ -123,6 +124,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * then strips `_i` from arguments before executing tools.
 	 */
 	intentTracing?: boolean;
+
+	/**
+	 * Dynamic tool choice override, resolved per LLM call.
+	 * When set and returns a value, overrides the static `toolChoice`.
+	 */
+	getToolChoice?: () => ToolChoice | undefined;
 }
 
 export interface ToolCallContext {
@@ -178,19 +185,15 @@ export interface AgentState {
 	error?: string;
 }
 
-export interface AgentToolResult<T = any, TNormative extends TSchema = any> {
+export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Content blocks supporting text and images
 	content: (TextContent | ImageContent)[];
 	// Details to be displayed in a UI or logged
 	details?: T;
-	/** Normative input for the tool result */
-	$normative?: Static<TNormative>;
 }
 
 // Callback for streaming tool execution updates
-export type AgentToolUpdateCallback<T = any, TNormative extends TSchema = any> = (
-	partialResult: AgentToolResult<T, TNormative>,
-) => void;
+export type AgentToolUpdateCallback<T = any, TInput = unknown> = (partialResult: AgentToolResult<T, TInput>) => void;
 
 /** Options passed to renderResult */
 export interface RenderResultOptions {
@@ -226,6 +229,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	label: string;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
+	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */
+	deferrable?: boolean;
 	/** If true, tool execution ignores abort signals (runs to completion) */
 	nonAbortable?: boolean;
 	/**

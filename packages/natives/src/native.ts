@@ -12,6 +12,7 @@ import { $env, getNativesDir, logger } from "@oh-my-pi/pi-utils";
 import packageJson from "../package.json";
 import type { NativeBindings } from "./bindings";
 import { embeddedAddon } from "./embedded-addon";
+import "./appearance/types";
 import "./ast/types";
 import "./clipboard/types";
 import "./glob/types";
@@ -286,8 +287,10 @@ function validateNative(bindings: NativeBindings, source: string): void {
 	checkFn("listDescendants");
 	checkFn("getWorkProfile");
 	checkFn("invalidateFsScanCache");
-	checkFn("astFind");
-	checkFn("astReplace");
+	checkFn("astGrep");
+	checkFn("astEdit");
+	checkFn("detectMacOSAppearance");
+	checkFn("MacAppearanceObserver");
 	if (missing.length) {
 		throw new Error(
 			`Native addon missing exports (${source}). Missing: ${missing.join(", ")}. ` +

@@ -10,7 +10,8 @@ import {
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
-const ANTHROPIC_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
+const ANTHROPIC_OAUTH_BETA =
+	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05";
 
 export interface ModelsDevModel {
 	id?: string;
@@ -1231,6 +1232,27 @@ function inferCopilotApi(modelId: string): Api {
 	return "openai-completions";
 }
 
+function extractCopilotLimits(entry: OpenAICompatibleModelRecord): {
+	maxPromptTokens?: number;
+	maxContextWindowTokens?: number;
+	maxOutputTokens?: number;
+	maxNonStreamingOutputTokens?: number;
+} {
+	if (!isRecord(entry.capabilities)) {
+		return {};
+	}
+	const limitsValue = entry.capabilities.limits;
+	if (!isRecord(limitsValue)) {
+		return {};
+	}
+	return {
+		maxPromptTokens: toNumber(limitsValue.max_prompt_tokens),
+		maxContextWindowTokens: toNumber(limitsValue.max_context_window_tokens),
+		maxOutputTokens: toNumber(limitsValue.max_output_tokens),
+		maxNonStreamingOutputTokens: toNumber(limitsValue.max_non_streaming_output_tokens),
+	};
+}
+
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? "https://api.individual.githubcopilot.com";
@@ -1259,14 +1281,30 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									? providerReference
 									: globalReference
 								: (providerReference ?? globalReference);
-						const contextWindow =
-							typeof entry.context_length === "number"
-								? entry.context_length
-								: (reference?.contextWindow ?? defaults.contextWindow);
-						const maxTokens =
-							typeof entry.max_completion_tokens === "number"
-								? entry.max_completion_tokens
-								: (reference?.maxTokens ?? defaults.maxTokens);
+						const copilotLimits = extractCopilotLimits(entry);
+						// Copilot currently exposes token limits under capabilities.limits.*.
+						// Keep OpenAI-compatible fields as outer fallbacks for forward compatibility if
+						// `/models` starts returning context_length/max_completion_tokens in the future.
+						const contextWindow = toPositiveNumber(
+							entry.context_length,
+							toPositiveNumber(
+								copilotLimits.maxPromptTokens,
+								toPositiveNumber(
+									copilotLimits.maxContextWindowTokens,
+									reference?.contextWindow ?? defaults.contextWindow,
+								),
+							),
+						);
+						const maxTokens = toPositiveNumber(
+							entry.max_completion_tokens,
+							toPositiveNumber(
+								copilotLimits.maxOutputTokens,
+								toPositiveNumber(
+									copilotLimits.maxNonStreamingOutputTokens,
+									reference?.maxTokens ?? defaults.maxTokens,
+								),
+							),
+						);
 						const name =
 							typeof entry.name === "string" && entry.name.trim().length > 0
 								? entry.name

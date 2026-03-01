@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-ai",
-	"version": "13.3.8",
+	"version": "13.5.3",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"homepage": "https://github.com/can1357/oh-my-pi",
 	"author": "Can Boluk",
@@ -117,6 +117,14 @@
 		"./utils/oauth/*": {
 			"types": "./src/utils/oauth/*.ts",
 			"import": "./src/utils/oauth/*.ts"
+		},
+		"./utils/schema": {
+			"types": "./src/utils/schema/index.ts",
+			"import": "./src/utils/schema/index.ts"
+		},
+		"./utils/schema/*": {
+			"types": "./src/utils/schema/*.ts",
+			"import": "./src/utils/schema/*.ts"
 		}
 	}
 }

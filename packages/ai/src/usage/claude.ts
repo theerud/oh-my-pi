@@ -1,4 +1,5 @@
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -21,9 +22,10 @@ const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CLAUDE_HEADERS = {
 	accept: "application/json, text/plain, */*",
 	"accept-encoding": "gzip, compress, deflate, br",
-	"anthropic-beta": "oauth-2025-04-20",
+	"anthropic-beta":
+		"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
 	"content-type": "application/json",
-	"user-agent": "claude-code/2.0.20",
+	"user-agent": "claude-cli/2.1.63 (external, cli)",
 	connection: "keep-alive",
 } as const;
 
@@ -399,4 +401,13 @@ export const claudeUsageProvider: UsageProvider = {
 	id: "anthropic",
 	fetchUsage: fetchClaudeUsage,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
+};
+
+export const claudeRankingStrategy: CredentialRankingStrategy = {
+	findWindowLimits(report) {
+		const primary = report.limits.find(l => l.id === "anthropic:5h");
+		const secondary = report.limits.find(l => l.id === "anthropic:7d");
+		return { primary, secondary };
+	},
+	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

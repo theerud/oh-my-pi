@@ -39,7 +39,8 @@
 		"clean": "rm -rf target dist node_modules packages/*/node_modules packages/*/dist",
 		"generate-models": "bun --cwd=packages/ai scripts/generate-models.ts",
 		"generate-docs-index": "bun --cwd=packages/coding-agent run generate-docs-index",
-		"sync-exports": "bun scripts/sync-exports.ts"
+		"sync-exports": "bun scripts/sync-exports.ts",
+		"mermaid-build": "bun scripts/mermaid-build.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2",

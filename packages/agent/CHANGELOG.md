@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [13.4.0] - 2026-03-01
+### Added
+
+- Added `getToolChoice` option to dynamically override tool choice per LLM call
+
 ## [13.3.8] - 2026-02-28
 ### Changed
 
