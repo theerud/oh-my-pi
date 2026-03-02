@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [13.5.6] - 2026-03-01
+### Changed
+
+- Updated OAuth client name from 'oh-my-pi MCP' to 'Codex' for dynamic client registration
+### Fixed
+
+- Fixed exit_plan_mode handler to abort active agent turn before opening plan approval selector, ensuring proper session cleanup
+
+## [13.5.5] - 2026-03-01
+
+### Added
+
+- Added Kagi web search provider (Search API v0) with related searches support and automatic `KAGI_API_KEY` detection
+
+## [13.5.4] - 2026-03-01
+### Added
+
+- Added `authServerUrl` field to `AuthDetectionResult` to capture OAuth server metadata from `Mcp-Auth-Server` headers
+- Added `extractMcpAuthServerUrl()` function to parse and validate `Mcp-Auth-Server` URLs from error messages
+- Added support for `/.well-known/oauth-protected-resource` discovery endpoint to resolve authorization servers
+- Added recursive auth server discovery to follow `authorization_servers` references when discovering OAuth endpoints
+
+- Added `omp agents unpack` CLI subcommand to export bundled subagent definitions to `~/.omp/agent/agents` by default, with `--project` support for `./.omp/agents`
+### Changed
+
+- Enhanced `discoverOAuthEndpoints()` to accept optional `authServerUrl` parameter and query both auth server and resource server for OAuth metadata
+- Improved OAuth metadata extraction to handle additional field name variations (`clientId`, `default_client_id`, `public_client_id`)
+- Refactored OAuth endpoint discovery logic into reusable `findEndpoints()` helper for consistent metadata parsing across multiple sources
+- Task subagents now strip inherited `AGENTS.md` context files and the task tool prompt no longer warns against repeating AGENTS guidance, aligning subagent context with explicit task inputs ([#233](https://github.com/can1357/oh-my-pi/issues/233))
+
+### Fixed
+
+- Fixed MCP OAuth discovery to honor `Mcp-Auth-Server` metadata and resolve authorization endpoints from the declared auth server, restoring Figma MCP login URLs with `client_id` ([#235](https://github.com/can1357/oh-my-pi/issues/235))
+
 ## [13.5.3] - 2026-03-01
 
 ### Added
