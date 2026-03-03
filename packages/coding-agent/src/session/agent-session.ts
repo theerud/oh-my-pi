@@ -237,6 +237,7 @@ export interface SessionStats {
 		cacheWrite: number;
 		total: number;
 	};
+	premiumRequests: number;
 	cost: number;
 }
 
@@ -352,6 +353,8 @@ export class AgentSession {
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
+	/** MCP prompt commands (updated dynamically when prompts are loaded) */
+	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
 	#skillsSettings: Required<SkillsSettings> | undefined;
 
@@ -422,6 +425,7 @@ export class AgentSession {
 				content: reminderText,
 				display: false,
 				details: { toolName: action.sourceToolName },
+				attribution: "agent",
 				timestamp: Date.now(),
 			});
 		});
@@ -597,6 +601,7 @@ export class AgentSession {
 										content: injection.content,
 										display: false,
 										details,
+										attribution: "agent",
 										timestamp: Date.now(),
 									});
 									this.sessionManager.appendCustomMessageEntry(
@@ -604,6 +609,7 @@ export class AgentSession {
 										injection.content,
 										false,
 										details,
+										"agent",
 									);
 									this.#markTtsrInjected(details.rules);
 								}
@@ -642,6 +648,7 @@ export class AgentSession {
 					event.message.content,
 					event.message.display,
 					event.message.details,
+					event.message.attribution ?? "agent",
 				);
 				if (event.message.role === "custom" && event.message.customType === "ttsr-injection") {
 					this.#markTtsrInjected(this.#extractTtsrRuleNames(event.message.details));
@@ -1011,6 +1018,7 @@ export class AgentSession {
 			content: injection.content,
 			display: false,
 			details: { rules: injection.rules.map(rule => rule.name) },
+			attribution: "agent",
 			timestamp: Date.now(),
 		});
 		this.#ensureTtsrResumePromise();
@@ -1764,9 +1772,15 @@ export class AgentSession {
 		this.#slashCommands = [...slashCommands];
 	}
 
-	/** Custom commands (TypeScript slash commands) */
+	/** Custom commands (TypeScript slash commands and MCP prompts) */
 	get customCommands(): ReadonlyArray<LoadedCustomCommand> {
-		return this.#customCommands;
+		if (this.#mcpPromptCommands.length === 0) return this.#customCommands;
+		return [...this.#customCommands, ...this.#mcpPromptCommands];
+	}
+
+	/** Update the MCP prompt commands list. Called when server prompts are (re)loaded. */
+	setMCPPromptCommands(commands: LoadedCustomCommand[]): void {
+		this.#mcpPromptCommands = commands;
 	}
 
 	// =========================================================================
@@ -1809,6 +1823,7 @@ export class AgentSession {
 			customType: "plan-mode-reference",
 			content,
 			display: false,
+			attribution: "agent",
 			timestamp: Date.now(),
 		};
 	}
@@ -1849,6 +1864,7 @@ export class AgentSession {
 			customType: "plan-mode-context",
 			content,
 			display: false,
+			attribution: "agent",
 			timestamp: Date.now(),
 		};
 	}
@@ -1910,8 +1926,8 @@ export class AgentSession {
 		}
 
 		const message = options?.synthetic
-			? { role: "developer" as const, content: userContent, timestamp: Date.now() }
-			: { role: "user" as const, content: userContent, timestamp: Date.now() };
+			? { role: "developer" as const, content: userContent, attribution: "agent" as const, timestamp: Date.now() }
+			: { role: "user" as const, content: userContent, attribution: "user" as const, timestamp: Date.now() };
 
 		await this.#promptWithMessage(message, expandedText, options);
 		if (!options?.synthetic) {
@@ -1920,7 +1936,7 @@ export class AgentSession {
 	}
 
 	async promptCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice">,
 	): Promise<void> {
 		const textContent =
@@ -1945,6 +1961,7 @@ export class AgentSession {
 			content: message.content,
 			display: message.display,
 			details: message.details,
+			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
 
@@ -2033,6 +2050,8 @@ export class AgentSession {
 					this.#baseSystemPrompt,
 				);
 				if (result?.messages) {
+					const promptAttribution: "user" | "agent" | undefined =
+						"attribution" in message ? message.attribution : undefined;
 					for (const msg of result.messages) {
 						messages.push({
 							role: "custom",
@@ -2040,6 +2059,7 @@ export class AgentSession {
 							content: msg.content,
 							display: msg.display,
 							details: msg.details,
+							attribution: msg.attribution ?? promptAttribution ?? (message.role === "user" ? "user" : "agent"),
 							timestamp: Date.now(),
 						});
 					}
@@ -2162,7 +2182,7 @@ export class AgentSession {
 	 * If the command returns void, returns empty string to indicate it was handled.
 	 */
 	async #tryExecuteCustomCommand(text: string): Promise<string | null> {
-		if (this.#customCommands.length === 0) return null;
+		if (this.#customCommands.length === 0 && this.#mcpPromptCommands.length === 0) return null;
 
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
@@ -2170,7 +2190,9 @@ export class AgentSession {
 		const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
 		// Find matching command
-		const loaded = this.#customCommands.find(c => c.command.name === commandName);
+		const loaded =
+			this.#customCommands.find(c => c.command.name === commandName) ??
+			this.#mcpPromptCommands.find(c => c.command.name === commandName);
 		if (!loaded) return null;
 
 		// Get command context from extension runner (includes session control methods)
@@ -2239,6 +2261,7 @@ export class AgentSession {
 		this.agent.steer({
 			role: "user",
 			content,
+			attribution: "user",
 			timestamp: Date.now(),
 		});
 	}
@@ -2256,6 +2279,7 @@ export class AgentSession {
 		this.agent.followUp({
 			role: "user",
 			content,
+			attribution: "user",
 			timestamp: Date.now(),
 		});
 	}
@@ -2286,7 +2310,7 @@ export class AgentSession {
 	 * - Not streaming + no trigger: appends to state/session, no turn
 	 */
 	async sendCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
 		const appMessage: CustomMessage<T> = {
@@ -2295,6 +2319,7 @@ export class AgentSession {
 			content: message.content,
 			display: message.display,
 			details: message.details,
+			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
 		if (this.isStreaming) {
@@ -2322,6 +2347,7 @@ export class AgentSession {
 			message.content,
 			message.display,
 			message.details,
+			message.attribution ?? "agent",
 		);
 	}
 
@@ -3212,7 +3238,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 			// Inject the handoff document as a custom message
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
-			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true);
+			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 
 			// Rebuild agent messages from session
 			const sessionContext = this.sessionManager.buildSessionContext();
@@ -3309,6 +3335,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		this.agent.appendMessage({
 			role: "developer",
 			content: [{ type: "text", text: reminder }],
+			attribution: "agent",
 			timestamp: Date.now(),
 		});
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
@@ -3339,9 +3366,10 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			content: report,
 			display: false,
 			details,
+			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.sessionManager.appendCustomMessageEntry("rewind-report", report, false, details);
+		this.sessionManager.appendCustomMessageEntry("rewind-report", report, false, details, "agent");
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
 	}
@@ -3460,6 +3488,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		this.agent.appendMessage({
 			role: "developer",
 			content: [{ type: "text", text: reminder }],
+			attribution: "agent",
 			timestamp: Date.now(),
 		});
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
@@ -3876,6 +3905,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					{
 						role: "developer",
 						content: [{ type: "text", text: "Continue if you have next steps." }],
+						attribution: "agent",
 						timestamp: Date.now(),
 					},
 					"Continue if you have next steps.",
@@ -4762,6 +4792,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
+		let totalPremiumRequests = 0;
 		const getTaskToolUsage = (details: unknown): Usage | undefined => {
 			if (!details || typeof details !== "object") return undefined;
 			const record = details as Record<string, unknown>;
@@ -4778,6 +4809,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				totalOutput += assistantMsg.usage.output;
 				totalCacheRead += assistantMsg.usage.cacheRead;
 				totalCacheWrite += assistantMsg.usage.cacheWrite;
+				totalPremiumRequests += assistantMsg.usage.premiumRequests ?? 0;
 				totalCost += assistantMsg.usage.cost.total;
 			}
 
@@ -4788,6 +4820,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					totalOutput += usage.output;
 					totalCacheRead += usage.cacheRead;
 					totalCacheWrite += usage.cacheWrite;
+					totalPremiumRequests += usage.premiumRequests ?? 0;
 					totalCost += usage.cost.total;
 				}
 			}
@@ -4809,6 +4842,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
+			premiumRequests: totalPremiumRequests,
 		};
 	}
 

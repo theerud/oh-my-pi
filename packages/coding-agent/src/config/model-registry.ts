@@ -3,15 +3,14 @@ import {
 	type AssistantMessageEventStream,
 	type Context,
 	createModelManager,
+	DEFAULT_LOCAL_TOKEN,
 	getBundledModels,
 	getBundledProviders,
-	getGitHubCopilotBaseUrl,
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	type Model,
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
-	normalizeDomain,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	openaiCodexModelManagerOptions,
@@ -99,6 +98,7 @@ const ModelDefinitionSchema = Type.Object({
 			cacheWrite: Type.Number(),
 		}),
 	),
+	premiumMultiplier: Type.Optional(Type.Number()),
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
@@ -119,6 +119,7 @@ const ModelOverrideSchema = Type.Object({
 			cacheWrite: Type.Optional(Type.Number()),
 		}),
 	),
+	premiumMultiplier: Type.Optional(Type.Number()),
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
@@ -129,7 +130,7 @@ const ModelOverrideSchema = Type.Object({
 type ModelOverride = Static<typeof ModelOverrideSchema>;
 
 const ProviderDiscoverySchema = Type.Object({
-	type: Type.Union([Type.Literal("ollama")]),
+	type: Type.Union([Type.Literal("ollama"), Type.Literal("lm-studio")]),
 });
 
 const ProviderAuthSchema = Type.Union([Type.Literal("apiKey"), Type.Literal("none")]);
@@ -378,6 +379,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 	if (override.contextPromotionTarget !== undefined) result.contextPromotionTarget = override.contextPromotionTarget;
+	if (override.premiumMultiplier !== undefined) result.premiumMultiplier = override.premiumMultiplier;
 	if (override.cost) {
 		result.cost = {
 			input: override.cost.input ?? model.cost.input,
@@ -405,6 +407,7 @@ interface CustomModelDefinitionLike {
 	headers?: Record<string, string>;
 	compat?: Model<Api>["compat"];
 	contextPromotionTarget?: string;
+	premiumMultiplier?: number;
 }
 
 interface CustomModelBuildOptions {
@@ -456,6 +459,7 @@ function buildCustomModel(
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: modelDef.compat,
 		contextPromotionTarget: modelDef.contextPromotionTarget,
+		premiumMultiplier: modelDef.premiumMultiplier,
 	} as Model<Api>;
 }
 
@@ -533,17 +537,7 @@ export class ModelRegistry {
 		const builtInModels = this.#loadBuiltInModels(overrides, modelOverrides);
 		const combined = this.#mergeCustomModels(builtInModels, customModels);
 
-		// Update github-copilot base URL based on OAuth credentials
-		const copilotCred = this.authStorage.getOAuthCredential("github-copilot");
-		if (copilotCred) {
-			const domain = copilotCred.enterpriseUrl
-				? (normalizeDomain(copilotCred.enterpriseUrl) ?? undefined)
-				: undefined;
-			const baseUrl = getGitHubCopilotBaseUrl(copilotCred.access, domain);
-			this.#models = combined.map(m => (m.provider === "github-copilot" ? { ...m, baseUrl } : m));
-		} else {
-			this.#models = combined;
-		}
+		this.#models = combined;
 	}
 
 	/** Load built-in models, applying provider and per-model overrides */
@@ -589,14 +583,24 @@ export class ModelRegistry {
 	}
 
 	#addImplicitDiscoverableProviders(configuredProviders: Set<string>): void {
-		if (configuredProviders.has("ollama")) return;
-		this.#discoverableProviders.push({
-			provider: "ollama",
-			api: "openai-completions",
-			baseUrl: Bun.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
-			discovery: { type: "ollama" },
-		});
-		this.#keylessProviders.add("ollama");
+		if (!configuredProviders.has("ollama")) {
+			this.#discoverableProviders.push({
+				provider: "ollama",
+				api: "openai-completions",
+				baseUrl: Bun.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
+				discovery: { type: "ollama" },
+			});
+			this.#keylessProviders.add("ollama");
+		}
+		if (!configuredProviders.has("lm-studio")) {
+			this.#discoverableProviders.push({
+				provider: "lm-studio",
+				api: "openai-completions",
+				baseUrl: Bun.env.LM_STUDIO_BASE_URL || "http://127.0.0.1:1234/v1",
+				discovery: { type: "lm-studio" },
+			});
+			this.#keylessProviders.add("lm-studio");
+		}
 	}
 
 	#loadCustomModels(): CustomModelsResult {
@@ -719,6 +723,8 @@ export class ModelRegistry {
 		switch (providerConfig.discovery.type) {
 			case "ollama":
 				return this.#discoverOllamaModels(providerConfig);
+			case "lm-studio":
+				return this.#discoverLmStudioModels(providerConfig);
 		}
 	}
 
@@ -872,6 +878,77 @@ export class ModelRegistry {
 		}
 	}
 
+	async #discoverLmStudioModels(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
+		const baseUrl = this.#normalizeLmStudioBaseUrl(providerConfig.baseUrl);
+		const modelsUrl = `${baseUrl}/models`;
+
+		const headers: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+		const apiKey = await this.authStorage.getApiKey(providerConfig.provider);
+		if (apiKey && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== kNoAuth) {
+			headers.Authorization = `Bearer ${apiKey}`;
+		}
+
+		try {
+			const response = await fetch(modelsUrl, {
+				headers,
+				signal: AbortSignal.timeout(3000),
+			});
+			if (!response.ok) {
+				logger.warn("model discovery failed for provider", {
+					provider: providerConfig.provider,
+					status: response.status,
+					url: modelsUrl,
+				});
+				return [];
+			}
+			const payload = (await response.json()) as { data?: Array<{ id: string }> };
+			const models = payload.data ?? [];
+			const discovered: Model<Api>[] = [];
+			for (const item of models) {
+				const id = item.id;
+				if (!id) continue;
+				discovered.push({
+					id,
+					name: id,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+					headers,
+					compat: {
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+					},
+				});
+			}
+			return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
+		} catch (error) {
+			logger.warn("model discovery failed for provider", {
+				provider: providerConfig.provider,
+				url: modelsUrl,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return [];
+		}
+	}
+
+	#normalizeLmStudioBaseUrl(baseUrl?: string): string {
+		const defaultBaseUrl = "http://127.0.0.1:1234/v1";
+		const raw = baseUrl || defaultBaseUrl;
+		try {
+			const parsed = new URL(raw);
+			const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
+			parsed.pathname = trimmedPath.endsWith("/v1") ? trimmedPath || "/v1" : `${trimmedPath}/v1`;
+			return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+		} catch {
+			return raw;
+		}
+	}
 	#normalizeOllamaBaseUrl(baseUrl?: string): string {
 		const raw = baseUrl || "http://127.0.0.1:11434";
 		try {
@@ -1136,5 +1213,6 @@ export interface ProviderConfigInput {
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];
 		contextPromotionTarget?: string;
+		premiumMultiplier?: number;
 	}>;
 }

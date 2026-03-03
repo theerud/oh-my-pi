@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [13.6.2] - 2026-03-03
+### Fixed
+
+- Fixed LM Studio API key retrieval to use configured provider name instead of hardcoded 'lm-studio'
+- Fixed resource content handling to properly check for empty text values (null/undefined)
+- Fixed resource refresh tracking to prevent stale promise reuse when server connection changes
+- Fixed update target resolution to properly handle cases where binary path cannot be resolved
+
+## [13.6.1] - 2026-03-03
+
+### Fixed
+
+- Fixed `omp update` silently succeeding without actually updating the binary when the update channel (bun global vs compiled binary) doesn't match the installation method ([#247](https://github.com/can1357/oh-my-pi/issues/247))
+- Added post-update verification that checks the resolved `omp` binary reports the expected version, with actionable warnings on mismatch
+- `omp update` now detects when the `omp` in PATH is not managed by bun and falls back to binary replacement instead of updating the wrong location
+## [13.6.0] - 2026-03-03
+### Added
+
+- Added `mcp://` internal URL protocol for reading MCP server resources directly via the read tool (e.g., `read(path="mcp://resource-uri")`)
+- Added LM Studio integration to the model registry and discovery flow.
+- Added support for authenticating with LM Studio using the `/login lm-studio` command.
+- Added `fuse-projfs` task isolation mode for Windows ProjFS-backed overlays.
+- Added `/mcp registry search <keyword>` integration with Smithery, including interactive result selection, editable server naming before deploy, Smithery `configSchema` prompts, and immediate runtime reload so selected MCP tools are available without restarting
+- Added OAuth failure fallback in `/mcp registry search` deploy flow to prompt for manual bearer tokens and validate them before saving configuration
+- Added Smithery auth support for `/mcp registry search` with cached API key login (`/mcp registry login`, `/mcp registry logout`) and automatic login prompt/retry on auth or rate-limit responses
+
+### Changed
+
+- Updated MCP resource update notifications to recommend using `read(path="mcp://<uri>")` instead of the deprecated `read_resource` tool
+- Updated Anthropic Foundry environment variable documentation and CLI help text to the canonical names: `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_CLIENT_CERT`, and `CLAUDE_CODE_CLIENT_KEY`
+- Documented Foundry-specific Anthropic runtime configuration (`FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `NODE_EXTRA_CA_CERTS`) in environment variable reference docs
+- `fuse-overlay` task isolation now targets `fuse-overlayfs` on Unix hosts only; on Windows it falls back to `worktree` with a `<system-notification>` suggesting `fuse-projfs`.
+- `fuse-projfs` now performs Windows ProjFS preflight checks and falls back to `worktree` when host or repository prerequisites are unavailable.
+- Cross-repo patch capture now uses the platform null device (`NUL` on Windows, `/dev/null` elsewhere) for `git diff --no-index`.
+
+### Removed
+
+- Removed `read_resource` tool; MCP resource reading is now integrated into the `read` tool via `mcp://` URLs
+
+### Fixed
+
+- Fixed MCP resource subscription handling to prevent unsubscribing when notifications are re-enabled after being disabled
+- Fixed LM Studio base URL validation to preserve invalid configured URLs instead of silently falling back to localhost
+- Fixed URI template matching to correctly handle expressions that expand to empty strings
+
 ## [13.5.6] - 2026-03-01
 ### Changed
 
@@ -1051,7 +1096,6 @@
 - Improved error reporting in fetch tool to include HTTP status codes when URL fetching fails
 - Fixed fetch tool to preserve actual response metadata (finalUrl, contentType) instead of defaults when requests fail
 
-||||||| parent of a70a34c8b (fix(coding-agent/debug): Sanitized debug log rendering)
 
 ## [12.1.0] - 2026-02-13
 

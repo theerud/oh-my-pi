@@ -10,12 +10,36 @@ import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
-import { connectToServer, disconnectServer, listTools } from "./client";
+import {
+	connectToServer,
+	disconnectServer,
+	getPrompt,
+	listPrompts,
+	listResources,
+	listResourceTemplates,
+	listTools,
+	readResource,
+	serverSupportsPrompts,
+	serverSupportsResources,
+	subscribeToResources,
+	unsubscribeFromResources,
+} from "./client";
 import { loadAllMCPConfigs, validateServerConfig } from "./config";
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
-import type { MCPServerConfig, MCPServerConnection, MCPToolDefinition } from "./types";
+import type {
+	MCPGetPromptResult,
+	MCPPrompt,
+	MCPRequestOptions,
+	MCPResource,
+	MCPResourceReadResult,
+	MCPResourceTemplate,
+	MCPServerConfig,
+	MCPServerConnection,
+	MCPToolDefinition,
+} from "./types";
+import { MCPNotificationMethods } from "./types";
 
 type ToolLoadResult = {
 	connection: MCPServerConnection;
@@ -50,6 +74,15 @@ function delay(ms: number): Promise<void> {
 	return Bun.sleep(ms);
 }
 
+export function resolveSubscriptionPostAction(
+	notificationsEnabled: boolean,
+	currentEpoch: number,
+	subscriptionEpoch: number,
+): "rollback" | "ignore" | "apply" {
+	if (!notificationsEnabled) return "rollback";
+	if (currentEpoch !== subscriptionEpoch) return "ignore";
+	return "apply";
+}
 /** Result of loading MCP tools */
 export interface MCPLoadResult {
 	/** Loaded tools as CustomTool instances */
@@ -86,11 +119,107 @@ export class MCPManager {
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
+	#onNotification?: (serverName: string, method: string, params: unknown) => void;
+	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
+	#onResourcesChanged?: (serverName: string, uri: string) => void;
+	#onPromptsChanged?: (serverName: string) => void;
+	#notificationsEnabled = false;
+	#notificationsEpoch = 0;
+	#subscribedResources = new Map<string, Set<string>>();
+	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
 
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 	) {}
+
+	/**
+	 * Set a callback to receive all server notifications.
+	 */
+	setOnNotification(handler: (serverName: string, method: string, params: unknown) => void): void {
+		this.#onNotification = handler;
+	}
+
+	/**
+	 * Set a callback to fire when any server's tools change.
+	 */
+	setOnToolsChanged(handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void): void {
+		this.#onToolsChanged = handler;
+	}
+
+	/**
+	 * Set a callback to fire when any server's resources change.
+	 */
+	setOnResourcesChanged(handler: (serverName: string, uri: string) => void): void {
+		this.#onResourcesChanged = handler;
+	}
+
+	/**
+	 * Set a callback to fire when any server's prompts change.
+	 */
+	setOnPromptsChanged(handler: (serverName: string) => void): void {
+		this.#onPromptsChanged = handler;
+		// Fire immediately for servers that already have prompts loaded
+		for (const [name, connection] of this.#connections) {
+			if (connection.prompts?.length) {
+				handler(name);
+			}
+		}
+	}
+
+	setNotificationsEnabled(enabled: boolean): void {
+		const wasEnabled = this.#notificationsEnabled;
+		this.#notificationsEnabled = enabled;
+		if (enabled === wasEnabled) return;
+
+		this.#notificationsEpoch += 1;
+		const notificationEpoch = this.#notificationsEpoch;
+
+		if (enabled) {
+			// Subscribe to all connected servers that support it
+			for (const [name, connection] of this.#connections) {
+				if (connection.capabilities.resources?.subscribe && connection.resources) {
+					const uris = connection.resources.map(r => r.uri);
+					void subscribeToResources(connection, uris)
+						.then(() => {
+							const action = resolveSubscriptionPostAction(
+								this.#notificationsEnabled,
+								this.#notificationsEpoch,
+								notificationEpoch,
+							);
+							if (action === "rollback") {
+								void unsubscribeFromResources(connection, uris).catch(error => {
+									logger.debug("Failed to rollback stale MCP resource subscription", {
+										path: `mcp:${name}`,
+										error,
+									});
+								});
+								return;
+							}
+							if (action === "ignore") {
+								return;
+							}
+							this.#subscribedResources.set(name, new Set(uris));
+						})
+						.catch(error => {
+							logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
+						});
+				}
+			}
+			return;
+		}
+
+		// Unsubscribe from all servers
+		for (const [name, connection] of this.#connections) {
+			const uris = this.#subscribedResources.get(name);
+			if (uris && uris.size > 0) {
+				void unsubscribeFromResources(connection, Array.from(uris)).catch(error => {
+					logger.debug("Failed to unsubscribe MCP resources", { path: `mcp:${name}`, error });
+				});
+			}
+		}
+		this.#subscribedResources.clear();
+	}
 
 	/**
 	 * Set the auth storage for resolving OAuth credentials.
@@ -169,7 +298,11 @@ export class MCPManager {
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
-				return connectToServer(name, resolvedConfig);
+				return connectToServer(name, resolvedConfig, {
+					onNotification: (method, params) => {
+						this.#handleServerNotification(name, method, params);
+					},
+				});
 			})().then(
 				connection => {
 					// Store original config (without resolved tokens) to keep
@@ -203,12 +336,64 @@ export class MCPManager {
 			connectionTasks.push({ name, config, tracked, toolsPromise });
 
 			void toolsPromise
-				.then(({ connection, serverTools }) => {
+				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const customTools = MCPTool.fromTools(connection, serverTools);
 					this.#replaceServerTools(name, customTools);
+					this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
+
+					// Load resources and create resource tool (best-effort)
+					if (serverSupportsResources(connection.capabilities)) {
+						try {
+							const [resources] = await Promise.all([
+								listResources(connection),
+								listResourceTemplates(connection),
+							]);
+
+							if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
+								const uris = resources.map(r => r.uri);
+								const notificationEpoch = this.#notificationsEpoch;
+								void subscribeToResources(connection, uris)
+									.then(() => {
+										const action = resolveSubscriptionPostAction(
+											this.#notificationsEnabled,
+											this.#notificationsEpoch,
+											notificationEpoch,
+										);
+										if (action === "rollback") {
+											void unsubscribeFromResources(connection, uris).catch(error => {
+												logger.debug("Failed to rollback stale MCP resource subscription", {
+													path: `mcp:${name}`,
+													error,
+												});
+											});
+											return;
+										}
+										if (action === "ignore") {
+											return;
+										}
+										this.#subscribedResources.set(name, new Set(uris));
+									})
+									.catch(error => {
+										logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
+									});
+							}
+						} catch (error) {
+							logger.debug("Failed to load MCP resources", { path: `mcp:${name}`, error });
+						}
+					}
+
+					// Load prompts (best-effort)
+					if (serverSupportsPrompts(connection.capabilities)) {
+						try {
+							await listPrompts(connection);
+							this.#onPromptsChanged?.(name);
+						} catch (error) {
+							logger.debug("Failed to load MCP prompts", { path: `mcp:${name}`, error });
+						}
+					}
 				})
 				.catch(error => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
@@ -291,6 +476,49 @@ export class MCPManager {
 		this.#tools.push(...tools);
 	}
 
+	#triggerNotificationRefresh(serverName: string, kind: "tools" | "resources" | "prompts"): void {
+		const refresh = (() => {
+			switch (kind) {
+				case "tools":
+					return this.refreshServerTools(serverName);
+				case "resources":
+					return this.refreshServerResources(serverName);
+				case "prompts":
+					return this.refreshServerPrompts(serverName);
+			}
+		})();
+		void refresh.catch(error => {
+			logger.debug("Failed MCP notification refresh", { path: `mcp:${serverName}`, kind, error });
+		});
+	}
+	#handleServerNotification(serverName: string, method: string, params: unknown): void {
+		logger.debug("MCP notification received", { path: `mcp:${serverName}`, method });
+
+		switch (method) {
+			case MCPNotificationMethods.TOOLS_LIST_CHANGED:
+				this.#triggerNotificationRefresh(serverName, "tools");
+				break;
+			case MCPNotificationMethods.RESOURCES_LIST_CHANGED:
+				this.#triggerNotificationRefresh(serverName, "resources");
+				break;
+			case MCPNotificationMethods.RESOURCES_UPDATED: {
+				const uri = (params as { uri?: string })?.uri;
+				const subscribed = this.#subscribedResources.get(serverName);
+				if (uri && subscribed?.has(uri)) {
+					this.#onResourcesChanged?.(serverName, uri);
+				}
+				break;
+			}
+			case MCPNotificationMethods.PROMPTS_LIST_CHANGED:
+				this.#triggerNotificationRefresh(serverName, "prompts");
+				break;
+			default:
+				break;
+		}
+
+		this.#onNotification?.(serverName, method, params);
+	}
+
 	/**
 	 * Get all loaded tools.
 	 */
@@ -362,15 +590,28 @@ export class MCPManager {
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#sources.delete(name);
+		this.#pendingResourceRefresh.delete(name);
 
 		const connection = this.#connections.get(name);
+
+		const subscribedUris = this.#subscribedResources.get(name);
+		if (subscribedUris && subscribedUris.size > 0 && connection) {
+			void unsubscribeFromResources(connection, Array.from(subscribedUris)).catch(() => {});
+		}
+		this.#subscribedResources.delete(name);
+
 		if (connection) {
 			await disconnectServer(connection);
 			this.#connections.delete(name);
 		}
 
-		// Remove tools from this server
+		// Remove tools from this server and notify consumers
+		const hadTools = this.#tools.some(t => t.name.startsWith(`mcp_${name}_`));
 		this.#tools = this.#tools.filter(t => !t.name.startsWith(`mcp_${name}_`));
+		if (hadTools) this.#onToolsChanged?.(this.#tools);
+
+		// Notify prompt consumers so stale commands are cleared
+		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
 	}
 
 	/**
@@ -382,9 +623,11 @@ export class MCPManager {
 
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
+		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
 		this.#connections.clear();
 		this.#tools = [];
+		this.#subscribedResources.clear();
 	}
 
 	/**
@@ -404,6 +647,7 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
+		this.#onToolsChanged?.(this.#tools);
 	}
 
 	/**
@@ -412,6 +656,159 @@ export class MCPManager {
 	async refreshAllTools(): Promise<void> {
 		const promises = Array.from(this.#connections.keys()).map(name => this.refreshServerTools(name));
 		await Promise.allSettled(promises);
+	}
+
+	/**
+	 * Refresh resources from a specific server.
+	 */
+	async refreshServerResources(name: string): Promise<void> {
+		const connection = this.#connections.get(name);
+		if (!connection || !serverSupportsResources(connection.capabilities)) return;
+
+		const existing = this.#pendingResourceRefresh.get(name);
+		if (existing && existing.connection === connection) return existing.promise;
+
+		const doRefresh = async (): Promise<void> => {
+			// Clear cached resources
+			connection.resources = undefined;
+			connection.resourceTemplates = undefined;
+
+			// Reload
+			const [resources] = await Promise.all([listResources(connection), listResourceTemplates(connection)]);
+			if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
+				const newUris = new Set(resources.map(r => r.uri));
+				const oldUris = this.#subscribedResources.get(name);
+				const notificationEpoch = this.#notificationsEpoch;
+
+				// Unsubscribe URIs that were removed
+				if (oldUris) {
+					const removed = [...oldUris].filter(uri => !newUris.has(uri));
+					if (removed.length > 0) {
+						try {
+							await unsubscribeFromResources(connection, removed);
+						} catch (error) {
+							logger.debug("Failed to unsubscribe stale MCP resources", { path: `mcp:${name}`, error });
+						}
+					}
+				}
+
+				// Subscribe to the current set and update tracking atomically
+				try {
+					const allUris = [...newUris];
+					await subscribeToResources(connection, allUris);
+					const action = resolveSubscriptionPostAction(
+						this.#notificationsEnabled,
+						this.#notificationsEpoch,
+						notificationEpoch,
+					);
+					if (action === "rollback") {
+						await unsubscribeFromResources(connection, allUris).catch(error => {
+							logger.debug("Failed to rollback stale MCP resource subscription", { path: `mcp:${name}`, error });
+						});
+						return;
+					}
+					if (action === "ignore") {
+						return;
+					}
+					this.#subscribedResources.set(name, newUris);
+				} catch (error) {
+					logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
+				}
+			}
+		};
+
+		const promise = doRefresh().finally(() => {
+			const pending = this.#pendingResourceRefresh.get(name);
+			if (pending?.promise === promise) {
+				this.#pendingResourceRefresh.delete(name);
+			}
+		});
+		this.#pendingResourceRefresh.set(name, { connection, promise });
+		return promise;
+	}
+
+	/**
+	 * Refresh prompts from a specific server.
+	 */
+	async refreshServerPrompts(name: string): Promise<void> {
+		const connection = this.#connections.get(name);
+		if (!connection || !serverSupportsPrompts(connection.capabilities)) return;
+
+		connection.prompts = undefined;
+		await listPrompts(connection);
+
+		this.#onPromptsChanged?.(name);
+	}
+
+	/**
+	 * Get resources and templates for a specific server.
+	 */
+	getServerResources(name: string): { resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined {
+		const connection = this.#connections.get(name);
+		if (!connection) return undefined;
+		return {
+			resources: connection.resources ?? [],
+			templates: connection.resourceTemplates ?? [],
+		};
+	}
+
+	/**
+	 * Read a specific resource from a server.
+	 */
+	async readServerResource(
+		name: string,
+		uri: string,
+		options?: MCPRequestOptions,
+	): Promise<MCPResourceReadResult | undefined> {
+		const connection = this.#connections.get(name);
+		if (!connection) return undefined;
+		return readResource(connection, uri, options);
+	}
+
+	/**
+	 * Get prompts for a specific server.
+	 */
+	getServerPrompts(name: string): MCPPrompt[] | undefined {
+		const connection = this.#connections.get(name);
+		if (!connection) return undefined;
+		return connection.prompts ?? [];
+	}
+
+	/**
+	 * Get a specific prompt from a server.
+	 */
+	async executePrompt(
+		name: string,
+		promptName: string,
+		args?: Record<string, string>,
+		options?: MCPRequestOptions,
+	): Promise<MCPGetPromptResult | undefined> {
+		const connection = this.#connections.get(name);
+		if (!connection) return undefined;
+		return getPrompt(connection, promptName, args, options);
+	}
+
+	/**
+	 * Get all server instructions (for system prompt injection).
+	 */
+	getServerInstructions(): Map<string, string> {
+		const instructions = new Map<string, string>();
+		for (const [name, connection] of this.#connections) {
+			if (connection.instructions) {
+				instructions.set(name, connection.instructions);
+			}
+		}
+		return instructions;
+	}
+
+	/**
+	 * Get notification state for display.
+	 */
+	getNotificationState(): { enabled: boolean; subscriptions: Map<string, ReadonlySet<string>> } {
+		return {
+			enabled: this.#notificationsEnabled,
+			subscriptions: this.#subscribedResources as Map<string, ReadonlySet<string>>,
+		};
 	}
 
 	/**

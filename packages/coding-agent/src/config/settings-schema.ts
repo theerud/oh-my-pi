@@ -63,6 +63,7 @@ export type StatusLineSegmentId =
 	| "plan_mode"
 	| "path"
 	| "git"
+	| "pr"
 	| "subagents"
 	| "token_in"
 	| "token_out"
@@ -569,12 +570,13 @@ export const SETTINGS_SCHEMA = {
 	// ─────────────────────────────────────────────────────────────────────────
 	"task.isolation.mode": {
 		type: "enum",
-		values: ["none", "worktree", "fuse-overlay"] as const,
+		values: ["none", "worktree", "fuse-overlay", "fuse-projfs"] as const,
 		default: "none",
 		ui: {
 			tab: "tools",
 			label: "Task isolation",
-			description: "Isolation mode for subagents (none, git worktree, or fuse-overlay)",
+			description:
+				"Isolation mode for subagents (none, git worktree, fuse-overlayfs on Unix, or ProjFS on Windows via fuse-projfs; unsupported modes fall back to worktree)",
 			submenu: true,
 		},
 	},
@@ -857,6 +859,24 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "MCP project config", description: "Load .mcp.json/mcp.json from project root" },
+	},
+	"mcp.notifications": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "MCP update injection",
+			description: "Inject MCP resource updates into the agent conversation",
+		},
+	},
+	"mcp.notificationDebounceMs": {
+		type: "number",
+		default: 500,
+		ui: {
+			tab: "tools",
+			label: "MCP notification debounce (ms)",
+			description: "Debounce window for MCP resource update notifications before injecting into conversation",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────

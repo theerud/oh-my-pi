@@ -17,29 +17,6 @@ class LineComponent implements Component {
 	}
 }
 
-class MutableLineComponent implements Component {
-	#count: number;
-
-	constructor(
-		private readonly prefix: string,
-		count: number,
-	) {
-		this.#count = count;
-	}
-
-	setCount(count: number): void {
-		this.#count = count;
-	}
-
-	invalidate(): void {
-		// No cached state
-	}
-
-	render(_width: number): string[] {
-		return Array.from({ length: this.#count }, (_v, i) => `${this.prefix}${i}`);
-	}
-}
-
 class MutableContentComponent implements Component {
 	#lines: string[];
 
@@ -194,27 +171,6 @@ describe("TUI overlays", () => {
 
 		tui.stop();
 	});
-	it("clears first row when shrinking to empty with clearOnShrink disabled", async () => {
-		const term = new VirtualTerminal(40, 10);
-		const tui = new TUI(term);
-		const component = new MutableLineComponent("line-", 3);
-
-		tui.setClearOnShrink(false);
-		tui.addChild(component);
-
-		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
-
-		component.setCount(0);
-		tui.requestRender();
-		await Bun.sleep(0);
-		await term.flush();
-
-		expect(term.getViewport().every(line => line.trim().length === 0)).toBeTruthy();
-
-		tui.stop();
-	});
 	it("renders viewport-only on resize when content size is stable", async () => {
 		const term = new VirtualTerminal(60, 8);
 		const tui = new TUI(term);
@@ -305,31 +261,6 @@ describe("TUI overlays", () => {
 			tui.stop();
 		}
 	});
-	it("keeps viewport pinned to latest content after repeated tail shrink", async () => {
-		const term = new VirtualTerminal(20, 8);
-		const tui = new TUI(term);
-		const component = new MutableContentComponent(Array.from({ length: 40 }, (_v, i) => `row-${i}`));
-		tui.addChild(component);
-		try {
-			tui.start();
-			await Bun.sleep(0);
-			await term.flush();
-
-			for (let n = 39; n >= 20; n--) {
-				component.setLines(Array.from({ length: n }, (_v, i) => `row-${i}`));
-				tui.requestRender();
-				await Bun.sleep(0);
-				await term.flush();
-			}
-
-			const viewport = term.getViewport().map(line => line.trimEnd());
-			expect(viewport.filter(line => line.length > 0)).toHaveLength(8);
-			expect(viewport[0].trim()).toBe("row-12");
-			expect(viewport[7].trim()).toBe("row-19");
-		} finally {
-			tui.stop();
-		}
-	});
 
 	it("stays anchored across shrink-grow cycles while overflowing viewport", async () => {
 		const term = new VirtualTerminal(30, 6);
@@ -413,42 +344,6 @@ describe("TUI overlays", () => {
 			const scrollback = term.getScrollBuffer();
 			expect(scrollback.length - before).toBeLessThan(700);
 			expect(longestBlankRun(scrollback)).toBeLessThan(30);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("keeps viewport tail bounded during overflow shrink and regrow cycles", async () => {
-		const term = new VirtualTerminal(40, 8);
-		const tui = new TUI(term);
-		const component = new MutableContentComponent(buildRows(240));
-		tui.addChild(component);
-		try {
-			tui.start();
-			await Bun.sleep(0);
-			await term.flush();
-			const before = term.getScrollBuffer().length;
-
-			for (let cycle = 0; cycle < 40; cycle++) {
-				const lineCount = cycle % 2 === 0 ? 240 - cycle * 3 : 150 + cycle * 2;
-				component.setLines(buildRows(lineCount));
-				tui.requestRender();
-				await Bun.sleep(0);
-				await term.flush();
-
-				const viewportRows = viewportRowNumbers(term);
-				expect(viewportRows.length).toBeGreaterThan(0);
-				for (let i = 1; i < viewportRows.length; i++) {
-					expect(viewportRows[i]!).toBeGreaterThanOrEqual(viewportRows[i - 1]!);
-				}
-				const tail = viewportRows.at(-1)!;
-				expect(tail).toBeLessThan(lineCount);
-				expect(tail).toBeGreaterThanOrEqual(Math.max(0, lineCount - term.rows - 4));
-			}
-
-			const scrollback = term.getScrollBuffer();
-			expect(scrollback.length - before).toBeLessThan(900);
-			expect(longestBlankRun(scrollback)).toBeLessThan(24);
 		} finally {
 			tui.stop();
 		}

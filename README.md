@@ -153,7 +153,7 @@ Parallel execution framework with specialized agents and real-time streaming:
 - **Parallel exploration**: Reviewer agent can spawn explore agents for large codebase analysis
 - **Real-time artifact streaming**: Task outputs stream as they're created, not just at completion
 - **Full output access**: Read complete subagent output via `agent://<id>` resources when previews truncate
-- **Isolation backends**: `isolated: true` runs tasks in git worktrees or fuse-overlay filesystems, with patch or branch merge strategies
+- **Isolation backends**: `isolated: true` runs tasks in git worktrees, Unix fuse-overlay filesystems, or Windows ProjFS (`fuse-projfs`), with patch or branch merge strategies
 - **Async background jobs**: Background execution with configurable concurrency (up to 100 jobs) and `await` tool for blocking on results
 - **Agent Control Center**: `/agents` dashboard for managing and creating custom agents
 - **AI-powered agent creation**: Generate custom agent definitions with the architect model
@@ -490,6 +490,7 @@ return config
 | Together (`together`)                           | `TOGETHER_API_KEY`                           |
 | Ollama (`ollama`)                               | `OLLAMA_API_KEY` _(optional)_                |
 | LiteLLM (`litellm`)                             | `LITELLM_API_KEY`                            |
+| LM Studio (`lm-studio`)                         | `LM_STUDIO_API_KEY` _(optional)_             |
 | Xiaomi MiMo (`xiaomi`)                          | `XIAOMI_API_KEY`                             |
 | Moonshot (`moonshot`)                           | `MOONSHOT_API_KEY`                           |
 | Venice (`venice`)                               | `VENICE_API_KEY`                             |
@@ -527,6 +528,7 @@ Use `/login` with supported providers:
 - GitLab Duo (`gitlab-duo`)
 - Qianfan (`qianfan`)
 - Ollama (local / self-hosted, `ollama`)
+- LM Studio (local / self-hosted, `lm-studio`)
 - vLLM (local OpenAI-compatible, `vllm`)
 - Z.AI (GLM Coding Plan)
 - Synthetic
@@ -540,6 +542,7 @@ Use `/login` with supported providers:
 - Cloudflare AI Gateway (`cloudflare-ai-gateway`)
 
 For `ollama`, API key is optional. Leave it unset for local no-auth instances, or set `OLLAMA_API_KEY` for authenticated hosts.
+For `lm-studio`, API key is optional. Leave it unset for local no-auth instances, or set `LM_STUDIO_API_KEY` for authenticated hosts.
 For `vllm`, paste your key in `/login` (or use `VLLM_API_KEY`). For local no-auth servers, any placeholder value works (for example `vllm-local`).
 For `nanogpt`, `/login nanogpt` opens `https://nano-gpt.com/api` and prompts for your `sk-...` key (or set `NANO_GPT_API_KEY`). Login validates the key via NanoGPT's models endpoint (not a fixed model entitlement).
 For `cloudflare-ai-gateway`, set provider base URL to
@@ -920,7 +923,7 @@ async:
 task:
   eager: false
   isolation:
-    mode: none # none | worktree | fuse-overlay
+    mode: none # none | worktree | fuse-overlay | fuse-projfs
     merge: patch # patch | branch
 ```
 

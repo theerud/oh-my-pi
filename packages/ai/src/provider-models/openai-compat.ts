@@ -7,6 +7,7 @@ import {
 	type OpenAICompatibleModelMapperContext,
 	type OpenAICompatibleModelRecord,
 } from "../utils/discovery/openai-compatible";
+import { getGitHubCopilotBaseUrl } from "../utils/oauth/github-copilot";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
@@ -797,6 +798,37 @@ export function kimiCodeModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 12.5. LM Studio
+// ---------------------------------------------------------------------------
+
+export interface LmStudioModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function lmStudioModelManagerOptions(
+	config?: LmStudioModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? Bun.env.LM_STUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1";
+	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
+	return {
+		providerId: "lm-studio",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "lm-studio",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					return mapWithBundledReference(entry, defaults, reference);
+				},
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 13. Synthetic
 // ---------------------------------------------------------------------------
 
@@ -1255,7 +1287,11 @@ function extractCopilotLimits(entry: OpenAICompatibleModelRecord): {
 
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://api.individual.githubcopilot.com";
+	const configuredBaseUrl = config?.baseUrl ?? "https://api.individual.githubcopilot.com";
+	const baseUrl =
+		apiKey?.includes("proxy-ep=") && configuredBaseUrl.includes("githubcopilot.com")
+			? getGitHubCopilotBaseUrl(apiKey)
+			: configuredBaseUrl;
 	const references = createBundledReferenceMap<Api>("github-copilot");
 	const globalReferences = createGlobalReferenceMap();
 	return {

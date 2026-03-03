@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [13.6.0] - 2026-03-03
+### Added
+
+- Added Anthropic Foundry gateway mode controlled by `CLAUDE_CODE_USE_FOUNDRY`, with support for `FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and optional mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS`)
+- Added LM Studio provider support with OpenAI-compatible model discovery and OAuth login.
+- Added support for `LM_STUDIO_API_KEY` and `LM_STUDIO_BASE_URL` environment variables for authentication and custom host configuration.
+
+### Changed
+
+- Anthropic key resolution now prefers `ANTHROPIC_FOUNDRY_API_KEY` over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled
+- Anthropic auth base-URL fallback now prefers `FOUNDRY_BASE_URL` when `CLAUDE_CODE_USE_FOUNDRY` is enabled
+
+## [13.5.8] - 2026-03-02
+### Fixed
+
+- Fixed schema compatibility issue where patternProperties in tool parameters caused failures when converting to legacy Antigravity format
+
 ## [13.5.5] - 2026-03-01
 
 ### Changed

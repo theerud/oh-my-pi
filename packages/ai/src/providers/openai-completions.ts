@@ -35,8 +35,8 @@ import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
-	getCopilotInitiatorOverride,
 	hasCopilotVisionInput,
+	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
 
@@ -188,7 +188,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = await createClient(model, context, apiKey, options?.headers);
+			const { client, copilotPremiumRequests, baseUrl } = await createClient(
+				model,
+				context,
+				apiKey,
+				options?.headers,
+			);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
 			rawRequestDump = {
@@ -196,10 +201,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				api: output.api,
 				model: model.id,
 				method: "POST",
-				url: `${model.baseUrl ?? "https://api.openai.com/v1"}/chat/completions`,
+				url: `${baseUrl ?? "https://api.openai.com/v1"}/chat/completions`,
 				body: params,
 			};
 			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
+			if (copilotPremiumRequests !== undefined) output.usage.premiumRequests = copilotPremiumRequests;
 			stream.push({ type: "start", partial: output });
 
 			let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
@@ -340,6 +346,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 						// Compute totalTokens ourselves since we add reasoning_tokens to output
 						// and some providers (e.g., Groq) don't include them in total_tokens
 						totalTokens: input + outputTokens + cachedTokens,
+						...(copilotPremiumRequests !== undefined ? { premiumRequests: copilotPremiumRequests } : {}),
 						cost: {
 							input: 0,
 							output: 0,
@@ -510,23 +517,32 @@ async function createClient(
 	if (model.provider === "kimi-code") {
 		headers = { ...(await getKimiCommonHeaders()), ...headers };
 	}
+	let copilotPremiumRequests: number | undefined;
+
+	let baseUrl = model.baseUrl;
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
-		const copilotHeaders = buildCopilotDynamicHeaders({
+		const copilot = buildCopilotDynamicHeaders({
 			messages: context.messages,
 			hasImages,
-			initiatorOverride: getCopilotInitiatorOverride(headers),
+			premiumMultiplier: model.premiumMultiplier,
+			headers,
 		});
-		Object.assign(headers, copilotHeaders);
+		Object.assign(headers, copilot.headers);
+		copilotPremiumRequests = copilot.premiumRequests;
+		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl;
 	}
-
-	return new OpenAI({
-		apiKey,
-		baseURL: model.baseUrl,
-		dangerouslyAllowBrowser: true,
-		maxRetries: 5,
-		defaultHeaders: headers,
-	});
+	return {
+		client: new OpenAI({
+			apiKey,
+			baseURL: baseUrl,
+			dangerouslyAllowBrowser: true,
+			maxRetries: 5,
+			defaultHeaders: headers,
+		}),
+		copilotPremiumRequests,
+		baseUrl,
+	};
 }
 
 function buildParams(model: Model<"openai-completions">, context: Context, options?: OpenAICompletionsOptions) {

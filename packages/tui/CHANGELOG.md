@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [13.6.2] - 2026-03-03
+### Fixed
+
+- Fixed cursor positioning when content shrinks to empty without clearOnShrink enabled
+
 ## [13.5.4] - 2026-03-01
 
 ### Fixed

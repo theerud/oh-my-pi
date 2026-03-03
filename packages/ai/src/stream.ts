@@ -53,6 +53,13 @@ function hasVertexAdcCredentials(): boolean {
 
 type KeyResolver = string | (() => string | undefined);
 
+function isFoundryEnabled(): boolean {
+	const value = $env.CLAUDE_CODE_USE_FOUNDRY;
+	if (!value) return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 const serviceProviderMap: Record<string, KeyResolver> = {
 	openai: "OPENAI_API_KEY",
 	google: "GEMINI_API_KEY",
@@ -77,8 +84,11 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	kagi: "KAGI_API_KEY",
 	// GitHub Copilot uses GitHub personal access token
 	"github-copilot": () => $pickenv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
-	// ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY
-	anthropic: () => $pickenv("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+	// Foundry mode optionally switches Anthropic auth to enterprise gateway credentials.
+	anthropic: () =>
+		isFoundryEnabled()
+			? $pickenv("ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+			: $pickenv("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
 	"gitlab-duo": "GITLAB_TOKEN",
 	// Vertex AI uses Application Default Credentials, not API keys.
 	// Auth is configured via `gcloud auth application-default login`.
@@ -117,6 +127,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	moonshot: "MOONSHOT_API_KEY",
 	nvidia: "NVIDIA_API_KEY",
 	nanogpt: "NANO_GPT_API_KEY",
+	"lm-studio": "LM_STUDIO_API_KEY",
 	ollama: "OLLAMA_API_KEY",
 	qianfan: "QIANFAN_API_KEY",
 	"qwen-portal": () => $pickenv("QWEN_OAUTH_TOKEN", "QWEN_PORTAL_API_KEY"),
@@ -563,7 +574,7 @@ function mapOptionsForApi<TApi extends Api>(
 			const googleModel = model as Model<"google-generative-ai">;
 			const effort = clampReasoning(options.reasoning)!;
 
-			// Gemini 3 models use thinkingLevel exclusively instead of thinkingBudget.
+			// Gemini 3+ models use thinkingLevel exclusively instead of thinkingBudget.
 			// https://ai.google.dev/gemini-api/docs/thinking#set-budget
 			if (isGemini3ProModel(googleModel) || isGemini3FlashModel(googleModel)) {
 				return {
@@ -597,8 +608,8 @@ function mapOptionsForApi<TApi extends Api>(
 
 			const effort = clampReasoning(options.reasoning)!;
 
-			// Gemini 3 models use thinkingLevel instead of thinkingBudget
-			if (model.id.includes("3-pro") || model.id.includes("3-flash")) {
+			// Gemini 3+ models use thinkingLevel instead of thinkingBudget
+			if (isGemini3ProModelId(model.id) || isGemini3FlashModelId(model.id)) {
 				return {
 					...base,
 					thinking: {
@@ -688,14 +699,22 @@ function mapOptionsForApi<TApi extends Api>(
 
 type ClampedThinkingLevel = Exclude<ThinkingLevel, "xhigh">;
 
+function isGemini3ProModelId(modelId: string): boolean {
+	return /3(?:\.\d+)?-pro/.test(modelId);
+}
+
+function isGemini3FlashModelId(modelId: string): boolean {
+	return /3(?:\.\d+)?-flash/.test(modelId);
+}
+
 function isGemini3ProModel(model: Model<"google-generative-ai">): boolean {
-	// Covers gemini-3-pro, gemini-3-pro-preview, and possible other prefixed ids in the future
-	return model.id.includes("3-pro");
+	// Covers gemini-3-pro, gemini-3-pro-preview, gemini-3.1-pro-preview, and future 3.x variants
+	return isGemini3ProModelId(model.id);
 }
 
 function isGemini3FlashModel(model: Model<"google-generative-ai">): boolean {
-	// Covers gemini-3-flash, gemini-3-flash-preview, and possible other prefixed ids in the future
-	return model.id.includes("3-flash");
+	// Covers gemini-3-flash, gemini-3-flash-preview, gemini-3.1-flash, and future 3.x variants
+	return isGemini3FlashModelId(model.id);
 }
 
 function getGemini3ThinkingLevel(
@@ -727,7 +746,7 @@ function getGemini3ThinkingLevel(
 }
 
 function getGeminiCliThinkingLevel(effort: ClampedThinkingLevel, modelId: string): GoogleThinkingLevel {
-	if (modelId.includes("3-pro")) {
+	if (isGemini3ProModelId(modelId)) {
 		// Gemini 3 Pro only supports LOW/HIGH (for now)
 		switch (effort) {
 			case "minimal":

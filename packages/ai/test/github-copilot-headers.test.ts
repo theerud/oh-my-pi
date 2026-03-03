@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { getBundledModel } from "../src/models";
 import {
 	buildCopilotDynamicHeaders,
 	getCopilotInitiatorOverride,
+	getCopilotPremiumMultiplier,
 	hasCopilotVisionInput,
 	inferCopilotInitiator,
 } from "../src/providers/github-copilot-headers";
@@ -66,6 +68,19 @@ describe("inferCopilotInitiator", () => {
 		expect(inferCopilotInitiator(messages)).toBe("user");
 	});
 
+	it("prefers explicit attribution over role when attribution is agent", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "internal reminder", attribution: "agent", timestamp: Date.now() },
+		];
+		expect(inferCopilotInitiator(messages)).toBe("agent");
+	});
+
+	it("prefers explicit attribution over role when attribution is user", () => {
+		const messages: Message[] = [
+			{ role: "developer", content: "forward user note", attribution: "user", timestamp: Date.now() },
+		];
+		expect(inferCopilotInitiator(messages)).toBe("user");
+	});
 	it("returns 'agent' when last message is user but last content block is tool_result", () => {
 		const messages: unknown[] = [
 			{
@@ -154,28 +169,113 @@ describe("hasCopilotVisionInput", () => {
 	});
 });
 
-describe("buildCopilotDynamicHeaders", () => {
-	it("sets X-Initiator and Openai-Intent", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
-		expect(headers["X-Initiator"]).toBe("user");
-		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+describe("getCopilotPremiumMultiplier", () => {
+	it("returns bundled multiplier metadata for paid-tier Copilot plans", () => {
+		expect(
+			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-haiku-4.5").premiumMultiplier, "paid"),
+		).toBe(0.33);
+		expect(
+			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-opus-4.6").premiumMultiplier, "paid"),
+		).toBe(3);
+		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "gpt-4o").premiumMultiplier, "paid")).toBe(
+			0,
+		);
+		expect(
+			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "grok-code-fast-1").premiumMultiplier, "paid"),
+		).toBe(0.25);
 	});
 
-	it("preserves explicit initiator override over inferred value", () => {
-		const headers = buildCopilotDynamicHeaders({
+	it("treats zero-multiplier models as 1x for free-tier or unknown plans", () => {
+		expect(getCopilotPremiumMultiplier(0, "free")).toBe(1);
+		expect(getCopilotPremiumMultiplier(0, undefined)).toBe(1);
+		expect(getCopilotPremiumMultiplier(0, "enterprise")).toBe(1);
+	});
+
+	it("defaults to 1x when multiplier metadata is missing", () => {
+		expect(getCopilotPremiumMultiplier(undefined, "paid")).toBe(1);
+		expect(getCopilotPremiumMultiplier(undefined, "free")).toBe(1);
+	});
+});
+
+describe("buildCopilotDynamicHeaders", () => {
+	it("uses model multiplier for user-initiated requests", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			premiumMultiplier: 0.33,
+		});
+		expect(headers["X-Initiator"]).toBe("user");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(premiumRequests).toBe(0.33);
+	});
+
+	it("uses 0x multiplier for included models on paid-tier plans", () => {
+		const { premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			premiumMultiplier: 0,
+			planTier: "paid",
+		});
+		expect(premiumRequests).toBe(0);
+	});
+
+	it("treats included models as 1x for free-tier plans", () => {
+		const { premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			premiumMultiplier: 0,
+			planTier: "free",
+		});
+		expect(premiumRequests).toBe(1);
+	});
+
+	it("defaults unknown or missing plan tiers to free-tier behavior", () => {
+		expect(
+			buildCopilotDynamicHeaders({
+				messages: [],
+				hasImages: false,
+				premiumMultiplier: 0,
+			}).premiumRequests,
+		).toBe(1);
+		expect(
+			buildCopilotDynamicHeaders({
+				messages: [],
+				hasImages: false,
+				premiumMultiplier: 0,
+				planTier: "enterprise",
+			}).premiumRequests,
+		).toBe(1);
+	});
+
+	it("preserves explicit initiator override over inferred value and sets 0 premium requests for agent", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [{ role: "user", content: "what time is it?" }],
 			hasImages: false,
+			premiumMultiplier: 3,
 			initiatorOverride: "agent",
 		});
 		expect(headers["X-Initiator"]).toBe("agent");
-	});
-	it("sets Copilot-Vision-Request when hasImages is true", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: true });
-		expect(headers["Copilot-Vision-Request"]).toBe("true");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(premiumRequests).toBe(0);
 	});
 
-	it("does not set Copilot-Vision-Request when hasImages is false", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
-		expect(headers["Copilot-Vision-Request"]).toBeUndefined();
+	it("sets Copilot-Vision-Request when hasImages is true", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: true,
+			premiumMultiplier: 3,
+		});
+		expect(headers["X-Initiator"]).toBe("user");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(headers["Copilot-Vision-Request"]).toBe("true");
+		expect(premiumRequests).toBe(3);
+	});
+
+	it("defaults to 1x when premium multiplier is not provided", () => {
+		const { premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+		});
+		expect(premiumRequests).toBe(1);
 	});
 });

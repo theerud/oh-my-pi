@@ -8,6 +8,13 @@ import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } 
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { findGitHeadPathSync, sanitizeStatusText } from "../shared";
+import {
+	canReuseCachedPr,
+	createPrCacheContext,
+	isSamePrCacheContext,
+	type PrCacheContext,
+	parseDefaultBranch,
+} from "./status-line/git-utils";
 import { getPreset } from "./status-line/presets";
 import { renderSegment, type SegmentContext } from "./status-line/segments";
 import { getSeparator } from "./status-line/separators";
@@ -39,6 +46,7 @@ export interface StatusLineSettings {
 export class StatusLineComponent implements Component {
 	#settings: StatusLineSettings = {};
 	#cachedBranch: string | null | undefined = undefined;
+	#cachedBranchRepoId: string | null | undefined = undefined;
 	#gitWatcher: fs.FSWatcher | null = null;
 	#onBranchChange: (() => void) | null = null;
 	#autoCompactEnabled: boolean = true;
@@ -51,6 +59,12 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlight = false;
+
+	// PR lookup caching (invalidated on branch/repo context changes)
+	#cachedPr: { number: number; url: string } | null | undefined = undefined;
+	#cachedPrContext: PrCacheContext | undefined = undefined;
+	#prLookupInFlight = false;
+	#defaultBranch?: string;
 
 	constructor(private readonly session: AgentSession) {
 		this.#settings = {
@@ -107,13 +121,13 @@ export class StatusLineComponent implements Component {
 
 		try {
 			this.#gitWatcher = fs.watch(gitHeadPath, () => {
-				this.#cachedBranch = undefined;
+				this.#invalidateGitCaches();
 				if (this.#onBranchChange) {
 					this.#onBranchChange();
 				}
 			});
 		} catch {
-			// Silently fail
+			this.#invalidateGitCaches();
 		}
 	}
 
@@ -125,19 +139,27 @@ export class StatusLineComponent implements Component {
 	}
 
 	invalidate(): void {
-		this.#cachedBranch = undefined;
+		this.#invalidateGitCaches();
 	}
 
+	#invalidateGitCaches(): void {
+		this.#cachedBranch = undefined;
+		this.#cachedBranchRepoId = undefined;
+		this.#cachedPr = undefined;
+		this.#cachedPrContext = undefined;
+	}
 	#getCurrentBranch(): string | null {
-		if (this.#cachedBranch !== undefined) {
+		const gitHeadPath = findGitHeadPathSync();
+		if (this.#cachedBranch !== undefined && this.#cachedBranchRepoId === gitHeadPath) {
 			return this.#cachedBranch;
 		}
 
-		const gitHeadPath = findGitHeadPathSync();
+		this.#cachedBranchRepoId = gitHeadPath;
 		if (!gitHeadPath) {
 			this.#cachedBranch = null;
 			return null;
 		}
+
 		try {
 			const content = fs.readFileSync(gitHeadPath, "utf8").trim();
 
@@ -151,6 +173,26 @@ export class StatusLineComponent implements Component {
 		}
 
 		return this.#cachedBranch ?? null;
+	}
+
+	#isDefaultBranch(branch: string): boolean {
+		if (this.#defaultBranch === undefined) {
+			// Kick off async resolution, use hardcoded fallback until it resolves
+			this.#defaultBranch = "main";
+			(async () => {
+				// Try origin/HEAD first, fall back to upstream/HEAD
+				const origin = await $`git rev-parse --abbrev-ref origin/HEAD`.quiet().nothrow();
+				if (origin.exitCode === 0) {
+					this.#defaultBranch = parseDefaultBranch(origin.stdout.toString().trim());
+					return;
+				}
+				const upstream = await $`git rev-parse --abbrev-ref upstream/HEAD`.quiet().nothrow();
+				if (upstream.exitCode === 0) {
+					this.#defaultBranch = parseDefaultBranch(upstream.stdout.toString().trim());
+				}
+			})();
+		}
+		return branch === this.#defaultBranch;
 	}
 
 	#getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
@@ -207,6 +249,66 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatus;
 	}
 
+	#lookupPr(): { number: number; url: string } | null {
+		const branch = this.#getCurrentBranch();
+		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
+
+		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
+			return this.#cachedPr ?? null;
+		}
+
+		if (this.#cachedPr !== undefined) {
+			this.#cachedPr = undefined;
+			this.#cachedPrContext = undefined;
+		}
+
+		// Don't look up if no branch, detached HEAD, default branch, or already in flight
+		if (!branch || branch === "detached" || this.#isDefaultBranch(branch) || this.#prLookupInFlight) {
+			return null;
+		}
+
+		this.#prLookupInFlight = true;
+		const lookupContext = currentContext;
+
+		// Fire async lookup, return null until resolved
+		(async () => {
+			// Helper: only write cache if branch/repo context hasn't changed since launch
+			const setCachedPr = (value: { number: number; url: string } | null) => {
+				const latestBranch = this.#getCurrentBranch();
+				const latestContext = latestBranch
+					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
+					: undefined;
+				if (lookupContext && isSamePrCacheContext(latestContext, lookupContext)) {
+					this.#cachedPr = value;
+					this.#cachedPrContext = lookupContext;
+				}
+			};
+			try {
+				// Requires `gh repo set-default` to be configured; fails gracefully if not
+				const result = await $`gh pr view --json number,url`.quiet().nothrow();
+				if (result.exitCode !== 0) {
+					setCachedPr(null);
+					return;
+				}
+				const pr = JSON.parse(result.stdout.toString()) as { number: number; url: string };
+				if (typeof pr.number === "number") {
+					setCachedPr({ number: pr.number, url: pr.url });
+				} else {
+					setCachedPr(null);
+				}
+			} catch {
+				setCachedPr(null);
+			} finally {
+				this.#prLookupInFlight = false;
+				if (this.#cachedPr && this.#onBranchChange) {
+					this.#onBranchChange();
+				}
+			}
+		})();
+
+		return null;
+	}
+
 	#buildSegmentContext(width: number): SegmentContext {
 		const state = this.session.state;
 
@@ -216,6 +318,7 @@ export class StatusLineComponent implements Component {
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
+			premiumRequests: 0,
 			cost: 0,
 		};
 
@@ -248,6 +351,7 @@ export class StatusLineComponent implements Component {
 			git: {
 				branch: this.#getCurrentBranch(),
 				status: this.#getGitStatus(),
+				pr: this.#lookupPr(),
 			},
 		};
 	}

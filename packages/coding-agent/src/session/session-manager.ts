@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Message, TextContent, Usage } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Message, MessageAttribution, TextContent, Usage } from "@oh-my-pi/pi-ai";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import {
 	getBlobsDir,
@@ -151,7 +151,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * Use customType to identify your extension's entries.
  *
  * Unlike CustomEntry, this DOES participate in LLM context.
- * The content is converted to a user message in buildSessionContext().
+ * The content participates in LLM context through convertToLlm().
  * Use details for extension-specific metadata (not sent to LLM).
  *
  * display controls TUI rendering:
@@ -164,6 +164,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
 	display: boolean;
+	/** Who initiated this message for billing/attribution semantics. */
+	attribution?: MessageAttribution;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
@@ -483,7 +485,14 @@ export function buildSessionContext(
 			messages.push(entry.message);
 		} else if (entry.type === "custom_message") {
 			messages.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				createCustomMessage(
+					entry.customType,
+					entry.content,
+					entry.display,
+					entry.details,
+					entry.timestamp,
+					entry.attribution,
+				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
@@ -1040,6 +1049,7 @@ export interface UsageStatistics {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	premiumRequests: number;
 	cost: number;
 }
 
@@ -1135,9 +1145,16 @@ export class SessionManager {
 	#fileEntries: FileEntry[] = [];
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
-	#leafId: string | null = null;
-	#usageStatistics: UsageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-	#persistWriter: NdjsonFileWriter | undefined;
+	#leafId = null as string | null;
+	#usageStatistics = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		premiumRequests: 0,
+		cost: 0,
+	} satisfies UsageStatistics;
+	#persistWriter = undefined as NdjsonFileWriter | undefined;
 	#persistWriterPath: string | undefined;
 	#persistChain: Promise<void> = Promise.resolve();
 	#persistError: Error | undefined;
@@ -1364,7 +1381,7 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#flushed = false;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1378,7 +1395,7 @@ export class SessionManager {
 		this.#byId.clear();
 		this.#labelsById.clear();
 		this.#leafId = null;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 		for (const entry of this.#fileEntries) {
 			if (entry.type === "session") continue;
 			this.#byId.set(entry.id, entry);
@@ -1396,6 +1413,7 @@ export class SessionManager {
 				this.#usageStatistics.output += usage.output;
 				this.#usageStatistics.cacheRead += usage.cacheRead;
 				this.#usageStatistics.cacheWrite += usage.cacheWrite;
+				this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
 				this.#usageStatistics.cost += usage.cost.total;
 			}
 
@@ -1406,6 +1424,7 @@ export class SessionManager {
 					this.#usageStatistics.output += usage.output;
 					this.#usageStatistics.cacheRead += usage.cacheRead;
 					this.#usageStatistics.cacheWrite += usage.cacheWrite;
+					this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
 					this.#usageStatistics.cost += usage.cost.total;
 				}
 			}
@@ -1670,6 +1689,7 @@ export class SessionManager {
 			this.#usageStatistics.output += usage.output;
 			this.#usageStatistics.cacheRead += usage.cacheRead;
 			this.#usageStatistics.cacheWrite += usage.cacheWrite;
+			this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
 			this.#usageStatistics.cost += usage.cost.total;
 		}
 
@@ -1680,6 +1700,7 @@ export class SessionManager {
 				this.#usageStatistics.output += usage.output;
 				this.#usageStatistics.cacheRead += usage.cacheRead;
 				this.#usageStatistics.cacheWrite += usage.cacheWrite;
+				this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
 				this.#usageStatistics.cost += usage.cost.total;
 			}
 		}
@@ -1825,6 +1846,7 @@ export class SessionManager {
 	 * @param content Message content (string or TextContent/ImageContent array)
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
+	 * @param attribution Who initiated this message for billing/attribution semantics
 	 * @returns Entry id
 	 */
 	appendCustomMessageEntry<T = unknown>(
@@ -1832,6 +1854,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		attribution: MessageAttribution = "agent",
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -1839,6 +1862,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
+			attribution,
 			id: generateId(this.#byId),
 			parentId: this.#leafId,
 			timestamp: new Date().toISOString(),

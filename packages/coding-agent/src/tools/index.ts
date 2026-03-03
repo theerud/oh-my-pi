@@ -129,7 +129,7 @@ export interface ToolSession {
 	modelRegistry?: import("../config/model-registry").ModelRegistry;
 	/** MCP manager for proxying MCP calls through parent */
 	mcpManager?: import("../mcp/manager").MCPManager;
-	/** Internal URL router for agent:// and skill:// URLs */
+	/** Internal URL router for protocols like agent://, skill://, and mcp:// */
 	internalRouter?: InternalUrlRouter;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
