@@ -18,7 +18,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -95,6 +95,14 @@ function addRecommendedSuffix(labels: string[], recommendedIndex?: number): stri
 	});
 }
 
+function getAutoSelectionOnTimeout(optionLabels: string[], recommended?: number): string[] {
+	if (optionLabels.length === 0) return [];
+	if (typeof recommended === "number" && recommended >= 0 && recommended < optionLabels.length) {
+		return [optionLabels[recommended]];
+	}
+	return [optionLabels[0]];
+}
+
 /** Strip "(Recommended)" suffix from a label */
 function stripRecommendedSuffix(label: string): string {
 	return label.endsWith(RECOMMENDED_SUFFIX) ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label;
@@ -107,15 +115,43 @@ function stripRecommendedSuffix(label: string): string {
 interface SelectionResult {
 	selectedOptions: string[];
 	customInput?: string;
+	timedOut: boolean;
+	navigation?: "back" | "forward";
+	cancelled?: boolean;
+}
+
+interface NavigationControls {
+	allowBack: boolean;
+	allowForward: boolean;
+	progressText?: string;
+}
+interface AskSingleQuestionOptions {
+	recommended?: number;
+	timeout?: number;
+	signal?: AbortSignal;
+	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput">;
+	navigation?: NavigationControls;
 }
 
 interface UIContext {
 	select(
 		prompt: string,
 		options: string[],
-		options_?: { initialIndex?: number; signal?: AbortSignal; outline?: boolean },
+		options_?: {
+			initialIndex?: number;
+			timeout?: number;
+			signal?: AbortSignal;
+			outline?: boolean;
+			onTimeout?: () => void;
+			onLeft?: () => void;
+			onRight?: () => void;
+			helpText?: string;
+		},
 	): Promise<string | undefined>;
-	input(prompt: string, options_?: { signal?: AbortSignal }): Promise<string | undefined>;
+	input(
+		prompt: string,
+		options_?: { signal?: AbortSignal; timeout?: number; onTimeout?: () => void },
+	): Promise<string | undefined>;
 }
 
 async function askSingleQuestion(
@@ -123,17 +159,75 @@ async function askSingleQuestion(
 	question: string,
 	optionLabels: string[],
 	multi: boolean,
-	recommended?: number,
-	signal?: AbortSignal,
+	options: AskSingleQuestionOptions = {},
 ): Promise<SelectionResult> {
+	const { recommended, timeout, signal, initialSelection, navigation } = options;
 	const doneLabel = getDoneOptionLabel();
-	let selectedOptions: string[] = [];
-	let customInput: string | undefined;
+	let selectedOptions = [...(initialSelection?.selectedOptions ?? [])];
+	let customInput = initialSelection?.customInput;
+	let timedOut = false;
 
+	const selectOption = async (
+		prompt: string,
+		optionsToShow: string[],
+		initialIndex?: number,
+	): Promise<{ choice: string | undefined; timedOut: boolean; navigation?: "back" | "forward" }> => {
+		let timeoutTriggered = false;
+		const onTimeout = () => {
+			timeoutTriggered = true;
+		};
+		let navigationAction: "back" | "forward" | undefined;
+		const helpText = navigation
+			? "up/down navigate  enter select  ←/→ question  esc cancel"
+			: "up/down navigate  enter select  esc cancel";
+		const dialogOptions = {
+			initialIndex,
+			timeout,
+			signal,
+			outline: true,
+			onTimeout,
+			helpText,
+			onLeft: navigation?.allowBack
+				? () => {
+						navigationAction = "back";
+					}
+				: undefined,
+			onRight: navigation?.allowForward
+				? () => {
+						navigationAction = "forward";
+					}
+				: undefined,
+		};
+		const startMs = Date.now();
+		const choice = signal
+			? await untilAborted(signal, () => ui.select(prompt, optionsToShow, dialogOptions))
+			: await ui.select(prompt, optionsToShow, dialogOptions);
+		if (!timeoutTriggered && choice === undefined && typeof timeout === "number") {
+			timeoutTriggered = Date.now() - startMs >= timeout;
+		}
+		return { choice, timedOut: timeoutTriggered, navigation: navigationAction };
+	};
+
+	const promptForInput = async (): Promise<{ input: string | undefined; timedOut: boolean }> => {
+		let inputTimedOut = false;
+		const onTimeout = () => {
+			inputTimedOut = true;
+		};
+		const input = signal
+			? await untilAborted(signal, () => ui.input("Enter your response:", { signal, timeout, onTimeout }))
+			: await ui.input("Enter your response:", { signal, timeout, onTimeout });
+		return { input, timedOut: inputTimedOut };
+	};
+
+	const promptWithProgress = navigation?.progressText ? `${question} (${navigation.progressText})` : question;
 	if (multi) {
-		const selected = new Set<string>();
-		let cursorIndex = Math.min(Math.max(recommended ?? 0, 0), optionLabels.length - 1);
-
+		const selected = new Set<string>(selectedOptions);
+		let cursorIndex = Math.min(Math.max(recommended ?? 0, 0), Math.max(optionLabels.length - 1, 0));
+		const firstSelected = selectedOptions[0];
+		if (firstSelected) {
+			const selectedIndex = optionLabels.indexOf(firstSelected);
+			if (selectedIndex >= 0) cursorIndex = selectedIndex;
+		}
 		while (true) {
 			const opts: string[] = [];
 
@@ -142,38 +236,41 @@ async function askSingleQuestion(
 				opts.push(`${checkbox} ${opt}`);
 			}
 
-			// Done after options, before Other - so cursor stays on options after toggle
-			if (selected.size > 0) {
+			if (!navigation?.allowForward && selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);
 
 			const prefix = selected.size > 0 ? `(${selected.size} selected) ` : "";
-			const choice = signal
-				? await untilAborted(signal, () =>
-						ui.select(`${prefix}${question}`, opts, {
-							initialIndex: cursorIndex,
-							signal,
-							outline: true,
-						}),
-					)
-				: await ui.select(`${prefix}${question}`, opts, {
-						initialIndex: cursorIndex,
-						signal,
-						outline: true,
-					});
+			const {
+				choice,
+				timedOut: selectTimedOut,
+				navigation: arrowNavigation,
+			} = await selectOption(`${prefix}${promptWithProgress}`, opts, cursorIndex);
 
-			if (choice === undefined || choice === doneLabel) break;
+			if (arrowNavigation) {
+				return { selectedOptions: Array.from(selected), customInput, timedOut, navigation: arrowNavigation };
+			}
+			if (choice === undefined) {
+				if (selectTimedOut) {
+					timedOut = true;
+					break;
+				}
+				return { selectedOptions: Array.from(selected), customInput, timedOut, cancelled: true };
+			}
+			if (choice === doneLabel) break;
 
 			if (choice === OTHER_OPTION) {
-				const input = signal
-					? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
-					: await ui.input("Enter your response:", { signal });
-				if (input) customInput = input;
+				if (selectTimedOut) {
+					timedOut = true;
+					break;
+				}
+				const inputResult = await promptForInput();
+				if (inputResult.input) customInput = inputResult.input;
+				if (inputResult.timedOut) timedOut = true;
 				break;
 			}
 
-			// Find which index was selected and update cursor position
 			const selectedIdx = opts.indexOf(choice);
 			if (selectedIdx >= 0) {
 				cursorIndex = selectedIdx;
@@ -194,35 +291,65 @@ async function askSingleQuestion(
 					selected.add(opt);
 				}
 			}
+
+			if (selectTimedOut) {
+				timedOut = true;
+				break;
+			}
 		}
 		selectedOptions = Array.from(selected);
 	} else {
 		const displayLabels = addRecommendedSuffix(optionLabels, recommended);
-		const choice = signal
-			? await untilAborted(signal, () =>
-					ui.select(question, [...displayLabels, OTHER_OPTION], {
-						initialIndex: recommended,
-						signal,
-						outline: true,
-					}),
-				)
-			: await ui.select(question, [...displayLabels, OTHER_OPTION], {
-					initialIndex: recommended,
-					signal,
-					outline: true,
-				});
+		const optionsWithNavigation = [...displayLabels, OTHER_OPTION];
 
-		if (choice === OTHER_OPTION) {
-			const input = signal
-				? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
-				: await ui.input("Enter your response:", { signal });
-			if (input) customInput = input;
-		} else if (choice) {
+		let initialIndex = recommended;
+		const previouslySelected = selectedOptions[0];
+		if (previouslySelected) {
+			const selectedIndex = optionLabels.indexOf(previouslySelected);
+			if (selectedIndex >= 0) initialIndex = selectedIndex;
+		} else if (customInput) {
+			initialIndex = displayLabels.length;
+		}
+		if (initialIndex !== undefined) {
+			const maxIndex = Math.max(optionsWithNavigation.length - 1, 0);
+			initialIndex = Math.max(0, Math.min(initialIndex, maxIndex));
+		}
+
+		const {
+			choice,
+			timedOut: selectTimedOut,
+			navigation: arrowNavigation,
+		} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex);
+		timedOut = selectTimedOut;
+
+		if (arrowNavigation) {
+			return { selectedOptions, customInput, timedOut, navigation: arrowNavigation };
+		}
+		if (choice === undefined) {
+			if (!timedOut) {
+				return { selectedOptions, customInput, timedOut, cancelled: true };
+			}
+		} else if (choice === OTHER_OPTION) {
+			if (!selectTimedOut) {
+				const inputResult = await promptForInput();
+				if (inputResult.input) customInput = inputResult.input;
+				if (inputResult.timedOut) timedOut = true;
+			}
+			selectedOptions = [];
+		} else {
 			selectedOptions = [stripRecommendedSuffix(choice)];
+			customInput = undefined;
+		}
+		if (navigation?.allowForward) {
+			return { selectedOptions, customInput, timedOut, navigation: "forward" };
 		}
 	}
 
-	return { selectedOptions, customInput };
+	if (timedOut && selectedOptions.length === 0 && !customInput) {
+		selectedOptions = getAutoSelectionOnTimeout(optionLabels, recommended);
+	}
+
+	return { selectedOptions, customInput, timedOut };
 }
 
 function formatQuestionResult(result: QuestionResult): string {
@@ -309,28 +436,29 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			};
 		}
 
-		const askQuestion = async (q: AskParams["questions"][number]) => {
+		const askQuestion = async (
+			q: AskParams["questions"][number],
+			options?: { previous?: QuestionResult; navigation?: NavigationControls },
+		) => {
 			const optionLabels = q.options.map(o => o.label);
-			const timeoutSignal = timeout == null ? undefined : AbortSignal.timeout(timeout);
-			const questionSignal = ptree.combineSignals(signal, timeoutSignal);
 			try {
-				const { selectedOptions, customInput } = await askSingleQuestion(
+				const { selectedOptions, customInput, navigation, cancelled, timedOut } = await askSingleQuestion(
 					ui,
 					q.question,
 					optionLabels,
 					q.multi ?? false,
-					q.recommended,
-					questionSignal,
+					{
+						recommended: q.recommended,
+						timeout: timeout ?? undefined,
+						signal,
+						initialSelection: options?.previous,
+						navigation: options?.navigation,
+					},
 				);
-				return { optionLabels, selectedOptions, customInput, timedOut: false };
+				return { optionLabels, selectedOptions, customInput, navigation, cancelled, timedOut };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
-					if (signal?.aborted) {
-						throw new ToolAbortError("Ask input was cancelled");
-					}
-					if (timeoutSignal?.aborted) {
-						return { optionLabels, selectedOptions: [], customInput: undefined, timedOut: true };
-					}
+					throw new ToolAbortError("Ask input was cancelled");
 				}
 				throw error;
 			}
@@ -338,9 +466,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		if (params.questions.length === 1) {
 			const [q] = params.questions;
-			const { optionLabels, selectedOptions, customInput, timedOut } = await askQuestion(q);
+			const { optionLabels, selectedOptions, customInput, cancelled, timedOut } = await askQuestion(q);
 
-			if (!timedOut && selectedOptions.length === 0 && !customInput) {
+			if (!timedOut && (cancelled || (selectedOptions.length === 0 && !customInput))) {
 				context.abort();
 				throw new ToolAbortError("Ask tool was cancelled by the user");
 			}
@@ -366,24 +494,58 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			return { content: [{ type: "text" as const, text: responseText }], details };
 		}
 
-		const results: QuestionResult[] = [];
+		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+		let questionIndex = 0;
+		while (questionIndex < params.questions.length) {
+			const q = params.questions[questionIndex]!;
+			const previous = resultsByIndex[questionIndex];
+			const navigation: NavigationControls = {
+				allowBack: questionIndex > 0,
+				allowForward: true,
+				progressText: `${questionIndex + 1}/${params.questions.length}`,
+			};
+			const {
+				optionLabels,
+				selectedOptions,
+				customInput,
+				navigation: navAction,
+				cancelled,
+				timedOut,
+			} = await askQuestion(q, { previous, navigation });
 
-		for (const q of params.questions) {
-			const { optionLabels, selectedOptions, customInput, timedOut } = await askQuestion(q);
-
-			if (!timedOut && selectedOptions.length === 0 && !customInput) {
+			if (cancelled && !timedOut) {
 				context.abort();
 				throw new ToolAbortError("Ask tool was cancelled by the user");
 			}
-			results.push({
+
+			resultsByIndex[questionIndex] = {
 				id: q.id,
 				question: q.question,
 				options: optionLabels,
 				multi: q.multi ?? false,
 				selectedOptions,
 				customInput,
-			});
+			};
+
+			if (navAction === "back") {
+				questionIndex = Math.max(0, questionIndex - 1);
+				continue;
+			}
+
+			questionIndex += 1;
 		}
+
+		const results = resultsByIndex.map((result, index) => {
+			if (result) return result;
+			const q = params.questions[index]!;
+			return {
+				id: q.id,
+				question: q.question,
+				options: q.options.map(o => o.label),
+				multi: q.multi ?? false,
+				selectedOptions: [],
+			};
+		});
 
 		const details: AskToolDetails = { results };
 		const responseLines = results.map(formatQuestionResult);

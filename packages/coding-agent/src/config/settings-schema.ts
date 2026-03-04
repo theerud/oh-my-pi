@@ -68,6 +68,7 @@ export type StatusLineSegmentId =
 	| "token_in"
 	| "token_out"
 	| "token_total"
+	| "token_rate"
 	| "cost"
 	| "context_pct"
 	| "context_total"
@@ -488,6 +489,15 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "Enable Fetch", description: "Enable the fetch tool for URL fetching" },
+	},
+	"fetch.useKagiSummarizer": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Use Kagi in Fetch",
+			description: "Use Kagi Universal Summarizer when rendering HTML in fetch",
+		},
 	},
 	"web_search.enabled": {
 		type: "boolean",

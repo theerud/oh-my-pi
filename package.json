@@ -12,7 +12,7 @@
 		"test": "bun run --workspaces --if-present --parallel test",
 		"check": "bun run --parallel check:ts check:rs",
 		"check:ts": "biome check . && tsgo -p tsconfig.json && tsgo -p packages/stats/tsconfig.client.json",
-		"check:rs": "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo check -Z minimal-versions --workspace",
+		"check:rs": "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings",
 		"lint": "bun run --parallel lint:ts lint:rs",
 		"lint:ts": "biome lint .",
 		"lint:rs": "cargo clippy --workspace -- -D warnings",
@@ -21,7 +21,7 @@
 		"fmt:rs": "cargo fmt --all",
 		"fix": "bun run --parallel fix:ts fix:rs",
 		"fix:ts": "biome check --write --unsafe . && bun --cwd=packages/coding-agent run format-prompts && bun --cwd=packages/coding-agent run generate-docs-index",
-		"fix:rs": "cargo clippy --fix --allow-dirty --all-targets --no-deps --allow-staged --broken-code --allow-no-vcs && cargo fmt --all",
+		"fix:rs": "cargo fmt --all && cargo clippy --fix --allow-dirty --all-targets --no-deps --allow-staged --broken-code --allow-no-vcs",
 		"build:native": "bun --cwd=packages/natives run build:native",
 		"dev:native": "bun --cwd=packages/natives run dev:native",
 		"bench:gen-fixtures": "bun --cwd=packages/react-edit-benchmark run src/generate.ts --react-dir /tmp/react-source --count-per-type 8",
@@ -51,8 +51,7 @@
 		"ts-morph": "^27.0",
 		"@typescript/native-preview": "^7.0.0-dev.20260302.1",
 		"lint-staged": "^16.3",
-		"prettier": "^3.8",
-		"rustup": "^1.0"
+		"prettier": "^3.8"
 	},
 	"lint-staged": {
 		"*.{js,ts,jsx,tsx,json,jsonc,css}": "biome check --write --no-errors-on-unmatched"

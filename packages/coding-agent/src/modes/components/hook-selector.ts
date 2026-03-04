@@ -2,7 +2,17 @@
  * Generic selector component for hooks.
  * Displays a list of string options with keyboard navigation.
  */
-import { Container, matchesKey, padding, Spacer, Text, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	matchesKey,
+	padding,
+	replaceTabs,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { CountdownTimer } from "./countdown-timer";
 import { DynamicBorder } from "./dynamic-border";
@@ -10,9 +20,13 @@ import { DynamicBorder } from "./dynamic-border";
 export interface HookSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
+	onTimeout?: () => void;
 	initialIndex?: number;
 	outline?: boolean;
 	maxVisible?: number;
+	onLeft?: () => void;
+	onRight?: () => void;
+	helpText?: string;
 }
 
 class OutlinedList extends Container {
@@ -28,8 +42,10 @@ class OutlinedList extends Container {
 		const horizontal = borderColor(theme.boxSharp.horizontal.repeat(Math.max(1, width)));
 		const innerWidth = Math.max(1, width - 2);
 		const content = this.#lines.map(line => {
-			const pad = Math.max(0, innerWidth - visibleWidth(line));
-			return `${borderColor(theme.boxSharp.vertical)}${line}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`;
+			const normalized = replaceTabs(line);
+			const fitted = truncateToWidth(normalized, innerWidth);
+			const pad = Math.max(0, innerWidth - visibleWidth(fitted));
+			return `${borderColor(theme.boxSharp.vertical)}${fitted}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`;
 		});
 		return [horizontal, ...content, horizontal];
 	}
@@ -46,7 +62,8 @@ export class HookSelectorComponent extends Container {
 	#titleText: Text;
 	#baseTitle: string;
 	#countdown: CountdownTimer | undefined;
-
+	#onLeftCallback: (() => void) | undefined;
+	#onRightCallback: (() => void) | undefined;
 	constructor(
 		title: string,
 		options: string[],
@@ -62,6 +79,8 @@ export class HookSelectorComponent extends Container {
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
 		this.#baseTitle = title;
+		this.#onLeftCallback = opts?.onLeft;
+		this.#onRightCallback = opts?.onRight;
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -76,6 +95,7 @@ export class HookSelectorComponent extends Container {
 				opts.tui,
 				s => this.#titleText.setText(theme.fg("accent", `${this.#baseTitle} (${s}s)`)),
 				() => {
+					opts?.onTimeout?.();
 					// Auto-select current option on timeout (typically the first/recommended option)
 					const selected = this.#options[this.#selectedIndex];
 					if (selected) {
@@ -95,7 +115,8 @@ export class HookSelectorComponent extends Container {
 			this.addChild(this.#listContainer);
 		}
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "up/down navigate  enter select  esc cancel"), 1, 0));
+		const controlsHint = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
+		this.addChild(new Text(theme.fg("dim", controlsHint), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 
@@ -144,6 +165,10 @@ export class HookSelectorComponent extends Container {
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const selected = this.#options[this.#selectedIndex];
 			if (selected) this.#onSelectCallback(selected);
+		} else if (matchesKey(keyData, "left")) {
+			this.#onLeftCallback?.();
+		} else if (matchesKey(keyData, "right")) {
+			this.#onRightCallback?.();
 		} else if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc") || matchesKey(keyData, "ctrl+c")) {
 			this.#onCancelCallback();
 		}

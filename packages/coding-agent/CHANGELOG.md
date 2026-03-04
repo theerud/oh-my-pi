@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [13.7.4] - 2026-03-04
+### Added
+- Added `fetch.useKagiSummarizer` setting to toggle Kagi Universal Summarizer usage in the fetch tool.
+
+### Fixed
+
+- Fixed incorrect message history reference in session title generation that could cause missing or stale titles on first message
+- Added startup check requiring Bun 1.3.7+ for JSONL session parsing (`Bun.JSONL.parseChunk`) and clear upgrade guidance so `/resume` and `--resume` do not silently report missing sessions on older Bun runtimes
+
+## [13.7.3] - 2026-03-04
+
+### Added
+
+- Added Kagi Universal Summarizer integration for URL summarization, now prioritized before Jina and other methods
+- Added Kagi Universal Summarizer support for YouTube video summaries when credentials are available
+- Exported `searchWithKagi` and `summarizeUrlWithKagi` functions from new `web/kagi` module for direct API access
+- Added `KagiApiError` exception class for Kagi API-specific error handling
+
+### Changed
+
+- Updated hashline prompt documentation with clearer operation syntax and improved examples showing full edit structure with path and edits array
+- Refactored `hlineref` Handlebars helper to return JSON-quoted strings for safer embedding in JSON blocks within prompts
+- Improved `hashlineParseText` to correctly preserve blank lines and trailing empty strings in array input while stripping trailing newlines from string input
+- Optimized duplicate line detection in range replacements to use trimmed comparison, reducing false positives from whitespace differences
+- Refactored Kagi search provider to use shared Kagi API utilities from `web/kagi` module
+- Changed HTML-to-text rendering priority order to try Kagi first, then Jina, Trafilatura, and Lynx
+
+### Fixed
+
+- Fixed `isEscapedTabAutocorrectEnabled` environment variable parsing to use switch statement for clearer logic and consistent default behavior
+
+## [13.7.2] - 2026-03-04
+### Added
+
+- Added support for direct OAuth provider login via `/login <provider>` command (e.g., `/login kagi`)
+- Added optional `providerId` parameter to `showOAuthSelector()` to enable direct provider selection without UI selector
+
+### Changed
+
+- Simplified web search result formatting to omit empty sections and metadata when not present
+
+## [13.7.0] - 2026-03-03
+
+### Fixed
+
+- Fixed `ask` timeout handling to auto-select the recommended option instead of aborting the turn, while preserving explicit user-cancel abort behavior ([#266](https://github.com/can1357/oh-my-pi/issues/266))
+
 ## [13.6.2] - 2026-03-03
 ### Fixed
 

@@ -1,8 +1,7 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { parseHTML } from "linkedom";
@@ -14,6 +13,7 @@ import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { ensureTool } from "../utils/tools-manager";
+import { summarizeUrlWithKagi } from "../web/kagi";
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
@@ -423,12 +423,13 @@ function parseFeedToMarkdown(content: string, maxItems = 10): string {
 }
 
 /**
- * Render HTML to markdown using native, jina, trafilatura, lynx (in order of preference)
+ * Render HTML to markdown using kagi, jina, trafilatura, lynx (in order of preference)
  */
 async function renderHtmlToText(
 	url: string,
 	html: string,
 	timeout: number,
+	useKagiSummarizer: boolean,
 	userSignal?: AbortSignal,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const signal = ptree.combineSignals(userSignal, timeout * 1000);
@@ -440,7 +441,20 @@ async function renderHtmlToText(
 		signal,
 	};
 
-	// Try jina first (reader API)
+	// Try Kagi Universal Summarizer first (if enabled and KAGI_API_KEY is configured)
+	if (useKagiSummarizer) {
+		try {
+			const kagiSummary = await summarizeUrlWithKagi(url, { signal });
+			if (kagiSummary && kagiSummary.length > 100 && !isLowQualityOutput(kagiSummary)) {
+				return { content: kagiSummary, ok: true, method: "kagi" };
+			}
+		} catch {
+			// Kagi failed, continue to next method
+			signal?.throwIfAborted();
+		}
+	}
+
+	// Try jina next (reader API)
 	try {
 		const jinaUrl = `https://r.jina.ai/${url}`;
 		const response = await fetch(jinaUrl, {
@@ -553,7 +567,13 @@ async function handleSpecialUrls(url: string, timeout: number, signal?: AbortSig
 /**
  * Main render function implementing the full pipeline
  */
-async function renderUrl(url: string, timeout: number, raw: boolean, signal?: AbortSignal): Promise<RenderResult> {
+async function renderUrl(
+	url: string,
+	timeout: number,
+	raw: boolean,
+	useKagiSummarizer: boolean,
+	signal?: AbortSignal,
+): Promise<RenderResult> {
 	const notes: string[] = [];
 	const fetchedAt = new Date().toISOString();
 	if (signal?.aborted) {
@@ -792,7 +812,7 @@ async function renderUrl(url: string, timeout: number, raw: boolean, signal?: Ab
 		}
 
 		// Step 6: Render HTML with lynx or html2text
-		const htmlResult = await renderHtmlToText(finalUrl, rawContent, timeout, signal);
+		const htmlResult = await renderHtmlToText(finalUrl, rawContent, timeout, useKagiSummarizer, signal);
 		if (!htmlResult.ok) {
 			notes.push("html rendering failed (lynx/html2text unavailable)");
 			const output = finalizeOutput(rawContent);
@@ -915,7 +935,8 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 			throw new ToolAbortError();
 		}
 
-		const result = await renderUrl(url, effectiveTimeout, raw, signal);
+		const useKagiSummarizer = this.session.settings.get("fetch.useKagiSummarizer");
+		const result = await renderUrl(url, effectiveTimeout, raw, useKagiSummarizer, signal);
 		const truncation = truncateHead(result.content, {
 			maxBytes: DEFAULT_MAX_BYTES,
 			maxLines: FETCH_DEFAULT_MAX_LINES,
@@ -1066,8 +1087,8 @@ export function renderFetchResult(
 			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
 				const previewLimit = expanded ? 12 : 3;
 				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
-				const previewLines = previewList.items.map(line => truncate(line.trimEnd(), 120, "…"));
-				const remaining = Math.max(0, contentLines.length - previewLines.length);
+				const previewLines = previewList.items.map(line => line.trimEnd());
+				const remaining = Math.max(0, contentLines.length - previewList.items.length);
 				contentPreviewLines =
 					previewLines.length > 0
 						? previewLines.map(line => uiTheme.fg("dim", line))

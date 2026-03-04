@@ -949,7 +949,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleExportCommand(text);
 	}
 
-	handleDumpCommand(): Promise<void> {
+	handleDumpCommand() {
 		return this.#commandController.handleDumpCommand();
 	}
 
@@ -961,7 +961,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleShareCommand();
 	}
 
-	handleCopyCommand(): Promise<void> {
+	handleCopyCommand() {
 		return this.#commandController.handleCopyCommand();
 	}
 
@@ -1149,8 +1149,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.handleResumeSession(sessionPath);
 	}
 
-	showOAuthSelector(mode: "login" | "logout"): Promise<void> {
-		return this.#selectorController.showOAuthSelector(mode);
+	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
+		return this.#selectorController.showOAuthSelector(mode, providerId);
 	}
 
 	showHookConfirm(title: string, message: string): Promise<boolean> {

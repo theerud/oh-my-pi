@@ -6,39 +6,23 @@ Applies precise file edits using `LINE#ID` tags from `read` output.
 3. You **MUST** submit one `edit` call per file with all operations, think your changes through before submitting.
 </workflow>
 
-<prohibited>
-You **MUST NOT** use this tool for formatting-only edits: reindenting, realigning, brace-style changes, whitespace normalization, or line-length wrapping. Any edit whose diff is purely whitespace is a formatting operation — run the appropriate formatter for the project instead.
-</prohibited>
-
 <operations>
-Every edit has `op`, `pos`, and `lines`. Range replaces also have `end`. Both `pos` and `end` use `"N#ID"` format (e.g. `"23#XY"`).
-**`pos`** — the anchor line. Meaning depends on `op`:
+**`path`** — the path to the file to edit.
+**`move`** — if set, move the file to the given path.
+**`delete`** — if true, delete the file.
+**`edits.[n].pos`** — the anchor line. Meaning depends on `op`:
 - `replace`: start of range (or the single line to replace)
 - `prepend`: insert new lines **before** this line; omit for beginning of file
 - `append`: insert new lines **after** this line; omit for end of file
-**`end`** — range replace only. The last line of the range (inclusive). Omit for single-line replace.
-**`lines`** — the replacement content:
+**`edits.[n].end`** — range replace only. The last line of the range (inclusive). Omit for single-line replace.
+**`edits.[n].lines`** — the replacement content:
 - `["line1", "line2"]` — replace with these lines (array of strings)
 - `"line1"` — shorthand for `["line1"]` (single-line replace)
 - `[""]` — replace content with a blank line (line preserved, content cleared)
 - `null` or `[]` — **delete** the line(s) entirely
 
-### Line or range replace/delete
-- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", lines: null }] }` — delete one line
-- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: null }] }` — delete a range
-- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", lines: […] }] }` — replace one line
-- `{ path: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: […] }] }` — replace a range
-
-### Insert new lines
-- `{ path: "…", edits: [{ op: "prepend", pos: "N#ID", lines: […] }] }` — insert before tagged line
-- `{ path: "…", edits: [{ op: "prepend", lines: […] }] }` — insert at beginning of file (no tag)
-- `{ path: "…", edits: [{ op: "append", pos: "N#ID", lines: […] }] }` — insert after tagged line
-- `{ path: "…", edits: [{ op: "append", lines: […] }] }` — insert at end of file (no tag)
-
-### File-level controls
-- `{ path: "…", delete: true, edits: [] }` — delete the file
-- `{ path: "…", move: "new/path.ts", edits: […] }` — move file to new path (edits applied first)
-**Atomicity:** all ops in one call validate against the same pre-edit snapshot; tags reference the last `read`. Edits are applied bottom-up, so earlier tags stay valid even when later ops add or remove lines.
+Tags should be referenced from the last `read` output.
+Edits are applied bottom-up, so earlier tags stay valid even when later ops add or remove lines.
 </operations>
 
 <rules>
@@ -47,9 +31,6 @@ Every edit has `op`, `pos`, and `lines`. Range replaces also have `end`. Both `p
 3. **Range end tag (inclusive):** `end` is inclusive and **MUST** point to the final line being replaced.
    - If `lines` includes a closing boundary token (`}`, `]`, `)`, `);`, `},`), `end` **MUST** include the original boundary line.
    - You **MUST NOT** set `end` to an interior line and then re-add the boundary token in `lines`; that duplicates the next surviving line.
-   - To remove a line while keeping its neighbors, **delete** it (`lines: null`). You **MUST NOT** replace it with the content of an adjacent line — that line still exists and will be duplicated.
-4. **Match surrounding indentation:** Leading whitespace in `lines` **MUST** be copied verbatim from adjacent lines in the `read` output. Do not infer or reconstruct indentation from memory — count the actual leading spaces on the lines immediately above and below the insertion or replacement point.
-5. **Preserve idiomatic sibling spacing:** When inserting declarations between top-level siblings, you **MUST** preserve existing blank-line separators. If siblings are separated by one blank line, include a trailing `""` in `lines` so inserted code keeps the same spacing.
 </rules>
 
 <recovery>
@@ -66,7 +47,7 @@ Every edit has `op`, `pos`, and `lines`. Range replaces also have `end`. Both `p
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 23 "  const timeout: number = 5000;"}},
+    pos: {{hlineref 23 "  const timeout: number = 5000;"}},
     lines: ["  const timeout: number = 30_000;"]
   }]
 }
@@ -80,7 +61,7 @@ Single line — `lines: null` deletes entirely:
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 7 "// @ts-ignore"}},
+    pos: {{hlineref 7 "// @ts-ignore"}},
     lines: null
   }]
 }
@@ -91,8 +72,8 @@ Range — add `end`:
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 80 "  // TODO: remove after migration"}},
-    end: {{hlinejsonref 83 "  }"}},
+    pos: {{hlineref 80 "  // TODO: remove after migration"}},
+    end: {{hlineref 83 "  }"}},
     lines: null
   }]
 }
@@ -108,7 +89,7 @@ Range — add `end`:
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 14 "  placeholder: \"DO NOT SHIP\","}},
+    pos: {{hlineref 14 "  placeholder: \"DO NOT SHIP\","}},
     lines: [""]
   }]
 }
@@ -122,14 +103,13 @@ Range — add `end`:
 {{hlinefull 62 "      return null;"}}
 {{hlinefull 63 "    }"}}
 ```
-Include the closing `}` in the replaced range — stopping one line short orphans the brace or duplicates it.
 ```
 {
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 61 "      console.error(err);"}},
-    end: {{hlinejsonref 63 "    }"}},
+    pos: {{hlineref 61 "      console.error(err);"}},
+    end: {{hlineref 63 "    }"}},
     lines: [
       "      if (isEnoent(err)) return null;",
       "      throw err;",
@@ -142,24 +122,39 @@ Include the closing `}` in the replaced range — stopping one line short orphan
 
 <example name="inclusive end avoids duplicate boundary">
 ```ts
-{{hlinefull 70 "\tif (user.isAdmin) {"}}
-{{hlinefull 71 "\t\tdeleteRecord(id);"}}
-{{hlinefull 72 "\t}"}}
-{{hlinefull 73 "\tafter();"}}
+{{hlinefull 70 "if (ok) {"}}
+{{hlinefull 71 "  run();"}}
+{{hlinefull 72 "}"}}
+{{hlinefull 73 "after();"}}
 ```
-The block grows by one line and the condition changes — two single-line ops would be needed otherwise. Since `}` appears in `lines`, `end` must include `72`:
+Bad — `end` stops before `}` while `lines` already includes `}`:
 ```
 {
   path: "…",
   edits: [{
     op: "replace",
-    pos: {{hlinejsonref 70 "\tif (user.isAdmin) {"}},
-    end: {{hlinejsonref 72 "\t}"}},
+    pos: {{hlineref 70 "if (ok) {"}},
+    end: {{hlineref 71 "  run();"}},
     lines: [
-      "\tif (user.isAdmin && confirmed) {",
-      "\t\tauditLog(id);",
-      "\t\tdeleteRecord(id);",
-      "\t}"
+      "if (ok) {",
+      "  runSafe();",
+      "}"
+    ]
+  }]
+}
+```
+Good — include original `}` in the replaced range when replacement keeps `}`:
+```
+{
+  path: "…",
+  edits: [{
+    op: "replace",
+    pos: {{hlineref 70 "if (ok) {"}},
+    end: {{hlineref 72 "}"}},
+    lines: [
+      "if (ok) {",
+      "  runSafe();",
+      "}"
     ]
   }]
 }
@@ -177,13 +172,12 @@ Also apply the same rule to `);`, `],`, and `},` closers: if replacement include
 {{hlinefull 49 "  runY();"}}
 {{hlinefull 50 "}"}}
 ```
-Use a trailing `""` to preserve the blank line between top-level sibling declarations.
 ```
 {
   path: "…",
   edits: [{
     op: "prepend",
-    pos: {{hlinejsonref 48 "function y() {"}},
+    pos: {{hlineref 48 "function y() {"}},
     lines: [
       "function z() {",
       "  runZ();",
@@ -193,23 +187,23 @@ Use a trailing `""` to preserve the blank line between top-level sibling declara
   }]
 }
 ```
+Use a trailing `""` to preserve the blank line between top-level sibling declarations.
 </example>
 
-<example name="anchor to structure, not whitespace">
-Trailing `""` in `lines` preserves blank-line separators. Anchor to the structural line, not the blank line above — blank lines are ambiguous and shift.
+<example name="disambiguate anchors">
+Blank lines and repeated patterns (`}`, `return null;`) appear many times — never anchor on them when a unique line exists nearby.
 ```ts
 {{hlinefull 101 "}"}}
 {{hlinefull 102 ""}}
 {{hlinefull 103 "export function serialize(data: unknown): string {"}}
 ```
-Bad — append after "}"
-Good — anchors to structural line:
+Bad — anchoring on the blank line (ambiguous, may shift):
 ```
 {
   path: "…",
   edits: [{
-    op: "prepend",
-    pos: {{hlinejsonref 103 "export function serialize(data: unknown): string {"}},
+    op: "append",
+    pos: {{hlineref 102 ""}},
     lines: [
       "function validate(data: unknown): boolean {",
       "  return data != null && typeof data === \"object\";",
@@ -219,28 +213,18 @@ Good — anchors to structural line:
   }]
 }
 ```
-</example>
-
-<example name="indentation must match context">
-Leading whitespace in `lines` **MUST** be copied from the `read` output, not reconstructed from memory. If the file uses tabs, use `\t` in JSON — you **MUST NOT** use `\\t`, which produces a literal backslash-t in the file.
-```ts
-{{hlinefull 10 "class Foo {"}}
-{{hlinefull 11 "\tbar() {"}}
-{{hlinefull 12 "\t\treturn 1;"}}
-{{hlinefull 13 "\t}"}}
-{{hlinefull 14 "}"}}
-```
-Good — `\t` in JSON is a real tab, matching the file's indentation:
+Good — anchor on the unique declaration line:
 ```
 {
   path: "…",
   edits: [{
     op: "prepend",
-    pos: {{hlinejsonref 14 "}"}},
+    pos: {{hlineref 103 "export function serialize(data: unknown): string {"}},
     lines: [
-      "\tbaz() {",
-      "\t\treturn 2;",
-      "\t}"
+      "function validate(data: unknown): boolean {",
+      "  return data != null && typeof data === \"object\";",
+      "}",
+      ""
     ]
   }]
 }

@@ -300,7 +300,7 @@ export class InputController {
 			this.ctx.flushPendingBashComponents();
 
 			// Generate session title on first message
-			const hasUserMessages = this.ctx.agent.state.messages.some((m: AgentMessage) => m.role === "user");
+			const hasUserMessages = this.ctx.session.messages.some((m: AgentMessage) => m.role === "user");
 			if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE) {
 				const registry = this.ctx.session.modelRegistry;
 				const smolModel = this.ctx.settings.getModelRole("smol");
@@ -393,7 +393,7 @@ export class InputController {
 		if (allQueued.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.ctx.agent.abort();
+				this.ctx.session.abort();
 			}
 			return 0;
 		}
@@ -403,7 +403,7 @@ export class InputController {
 		this.ctx.editor.setText(combinedText);
 		this.ctx.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.ctx.agent.abort();
+			this.ctx.session.abort();
 		}
 		return allQueued.length;
 	}
@@ -510,15 +510,14 @@ export class InputController {
 			this.ctx.showStatus("Nothing to copy");
 			return;
 		}
-		copyToClipboard(text)
-			.then(() => {
-				const sanitized = sanitizeText(text);
-				const preview = sanitized.length > 30 ? `${sanitized.slice(0, 30)}...` : sanitized;
-				this.ctx.showStatus(`Copied: ${preview}`);
-			})
-			.catch(() => {
-				this.ctx.showWarning("Failed to copy to clipboard");
-			});
+		try {
+			copyToClipboard(text);
+			const sanitized = sanitizeText(text);
+			const preview = sanitized.length > 30 ? `${sanitized.slice(0, 30)}...` : sanitized;
+			this.ctx.showStatus(`Copied: ${preview}`);
+		} catch {
+			this.ctx.showWarning("Failed to copy to clipboard");
+		}
 	}
 
 	cycleThinkingLevel(): void {
