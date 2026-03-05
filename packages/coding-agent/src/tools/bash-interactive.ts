@@ -9,8 +9,8 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { Terminal } from "@xterm/headless";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
+import { Terminal } from "@xterm/headless";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";

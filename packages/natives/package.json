@@ -30,6 +30,8 @@
 	"types": "./src/index.ts",
 	"scripts": {
 		"build:native": "bun scripts/build-native.ts",
+		"build:native:lean": "bun scripts/build-native.ts --lean",
+		"build:native:minimal": "bun scripts/build-native.ts --lean --no-highlights --no-image",
 		"dev:native": "bun scripts/build-native.ts --dev",
 		"embed:native": "bun scripts/embed-native.ts",
 		"check": "biome check . && tsgo -p tsconfig.json",

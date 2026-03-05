@@ -2140,6 +2140,8 @@ dependencies = [
  "phf 0.13.1",
  "portable-pty",
  "rayon",
+ "serde",
+ "serde_json",
  "smallvec",
  "syntect",
  "tokio",

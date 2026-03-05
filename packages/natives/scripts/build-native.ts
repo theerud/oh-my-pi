@@ -8,7 +8,11 @@ const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 
 const isDev = process.argv.includes("--dev");
+const isLean = process.argv.includes("--lean");
+const noHighlights = process.argv.includes("--no-highlights");
+const noImage = process.argv.includes("--no-image");
 const crossTarget = Bun.env.CROSS_TARGET;
+
 const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
 const targetArch = Bun.env.TARGET_ARCH || process.arch;
 const configuredVariantRaw = Bun.env.TARGET_VARIANT;
@@ -140,7 +144,44 @@ const cargoArgs = ["build"];
 if (!isDev) cargoArgs.push("--release");
 if (crossTarget) cargoArgs.push("--target", crossTarget);
 
+// Feature selection logic
+cargoArgs.push("--no-default-features");
+const features = new Set<string>();
+
+if (isLean) {
+	features.add("structural-search-system");
+	features.add("text-search-system");
+	features.add("shell-system");
+} else {
+	features.add("structural-search-native");
+	features.add("text-search-native");
+	features.add("shell-native");
+}
+
+if (!noHighlights) {
+	features.add("syntax-highlighting");
+}
+
+if (!noImage) {
+	features.add("image");
+}
+
+// Allow environment variable to add extra features
+if (Bun.env.PI_NATIVE_FEATURES) {
+	for (const f of Bun.env.PI_NATIVE_FEATURES.split(",")) {
+		features.add(f.trim());
+	}
+}
+
+if (features.size > 0) {
+	cargoArgs.push("--features", Array.from(features).join(","));
+}
+
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${isDev ? " (debug)" : ""}…`);
+if (features.size > 0) {
+	console.log(`Features: ${Array.from(features).join(", ")}`);
+}
+
 const buildResult = await $`cargo ${cargoArgs}`.cwd(rustDir).nothrow();
 if (buildResult.exitCode !== 0) {
 	const stderr = buildResult.stderr?.toString("utf-8") ?? "";

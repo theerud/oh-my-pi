@@ -6,6 +6,8 @@ import * as path from "node:path";
 const repoRoot = import.meta.dir ? path.join(import.meta.dir, "..") : process.cwd();
 const distDir = path.join(repoRoot, "dist");
 const stagingDir = path.join(distDir, "omp");
+const isLean = process.argv.includes("--lean");
+const isMinimal = process.argv.includes("--minimal");
 
 async function main() {
 	console.log("🚀 Starting distribution build...");
@@ -18,7 +20,13 @@ async function main() {
 
 	// 2. Build Native Modules
 	console.log("\n📦 Building native modules...");
-	await $`bun run build:native`.cwd(repoRoot);
+	if (isMinimal) {
+		await $`bun run build:native:minimal`.cwd(repoRoot);
+	} else if (isLean) {
+		await $`bun run build:native:lean`.cwd(repoRoot);
+	} else {
+		await $`bun run build:native`.cwd(repoRoot);
+	}
 
 	// 3. Build JS Bundle
 	console.log("\n📦 Building JS bundle...");
@@ -68,7 +76,8 @@ async function main() {
 
 	// 6. Create Tarball
 	console.log("\n🎁 Creating tarball...");
-	const tarballName = `omp-v${agentPkg.version}-${process.platform}-${process.arch}.tar.gz`;
+	const flavor = isMinimal ? "-minimal" : isLean ? "-lean" : "";
+	const tarballName = `omp-v${agentPkg.version}-${process.platform}-${process.arch}${flavor}.tar.gz`;
 	await $`tar -czf ${tarballName} omp`.cwd(distDir);
 
 	console.log(`\n✅ Build Complete!`);

@@ -4,17 +4,23 @@
 //! Performs text copy synchronously so macOS writes run on the caller thread.
 //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
 
+#[cfg(feature = "image")]
 use std::io::Cursor;
 
-use arboard::{Clipboard, Error as ClipboardError, ImageData};
+use arboard::Clipboard;
+#[cfg(feature = "image")]
+use arboard::{Error as ClipboardError, ImageData};
+#[cfg(feature = "image")]
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+#[cfg(feature = "image")]
 use crate::task;
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
+#[cfg(feature = "image")]
 pub struct ClipboardImage {
 	/// PNG-encoded image bytes.
 	pub data:      Uint8Array,
@@ -23,6 +29,7 @@ pub struct ClipboardImage {
 	pub mime_type: String,
 }
 
+#[cfg(feature = "image")]
 fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 	let width = u32::try_from(image.width)
 		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;
@@ -63,6 +70,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 /// # Errors
 /// Returns an error if clipboard access fails or image encoding fails.
 #[napi(js_name = "readImageFromClipboard")]
+#[cfg(feature = "image")]
 pub fn read_image_from_clipboard() -> task::Async<Option<ClipboardImage>> {
 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
 		let mut clipboard = Clipboard::new()
@@ -79,4 +87,10 @@ pub fn read_image_from_clipboard() -> task::Async<Option<ClipboardImage>> {
 			Err(err) => Err(Error::from_reason(format!("Failed to read clipboard image: {err}"))),
 		}
 	})
+}
+
+#[napi(js_name = "readImageFromClipboard")]
+#[cfg(not(feature = "image"))]
+pub fn read_image_from_clipboard() -> Result<Option<Unknown<'static>>> {
+	Err(Error::from_reason("Image support is disabled in this build."))
 }
