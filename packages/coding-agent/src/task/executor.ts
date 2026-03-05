@@ -4,8 +4,8 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 import path from "node:path";
-import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ToolChoice } from "@oh-my-pi/pi-ai";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
+import type { Api, Model, ThinkingLevel, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import Ajv, { type ValidateFunction } from "ajv";
@@ -938,12 +938,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			await modelRegistry.refresh();
 			checkAbort();
 
-			const { model, thinkingLevel: resolvedThinkingLevel } = resolveModelOverride(
-				modelPatterns,
-				modelRegistry,
-				settings,
-			);
-			const effectiveThinkingLevel = thinkingLevel ?? resolvedThinkingLevel;
+			const {
+				model,
+				thinkingLevel: resolvedThinkingLevel,
+				explicitThinkingLevel,
+			} = resolveModelOverride(modelPatterns, modelRegistry, settings);
+			const effectiveThinkingLevel = explicitThinkingLevel
+				? resolvedThinkingLevel
+				: (thinkingLevel ?? resolvedThinkingLevel);
 
 			const sessionManager = sessionFile
 				? await SessionManager.open(sessionFile)

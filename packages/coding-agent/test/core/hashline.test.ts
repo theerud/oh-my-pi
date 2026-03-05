@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	applyHashlineEdits,
+	buildCompactHashlineDiffPreview,
 	computeLineHash,
 	formatHashLines,
 	HashlineMismatchError,
@@ -579,6 +580,42 @@ describe("applyHashlineEdits — heuristics", () => {
 		expect(result.lines).toBe("ALPHA\n\n\ngamma");
 		expect(result.warnings).toBeUndefined();
 	});
+
+	it("auto-corrects off-by-one range start that would duplicate a preceding line", () => {
+		// Reproduces the failure from assistant history: model anchors at line N+1 but
+		// opens the replacement block with the same content as line N, duplicating it.
+		const content = "if (x) {\n  oldBody();\n}\nafter();";
+		const edits: HashlineEdit[] = [
+			{
+				op: "replace",
+				pos: makeTag(2, "  oldBody();"),
+				end: makeTag(3, "}"),
+				lines: ["if (x) {", "  newBody();", "}"],
+			},
+		];
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("if (x) {\n  newBody();\n}\nafter();");
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings?.[0]).toContain("Auto-corrected range replace");
+		expect(result.warnings?.[0]).toContain('"if (x) {"');
+	});
+
+	it("does not auto-correct leading line when pos already includes the boundary line", () => {
+		// Safety guard: the first replacement line equals the line before pos, but pos itself
+		// already has the same content — coincidence, not off-by-one.
+		const content = "}\n}\nafter();";
+		const edits: HashlineEdit[] = [
+			{
+				op: "replace",
+				pos: makeTag(2, "}"),
+				end: makeTag(2, "}"),
+				lines: ["}", "// inserted"],
+			},
+		];
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("}\n}\n// inserted\nafter();");
+		expect(result.warnings).toBeUndefined();
+	});
 	it("auto-corrects leading escaped tab indentation by default", () => {
 		const previous = Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
 		delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
@@ -803,6 +840,48 @@ describe("applyHashlineEdits — errors", () => {
 
 		const prependEdits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: [] }];
 		expect(applyHashlineEdits(content, prependEdits).lines).toBe("\naaa\nbbb");
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// buildCompactHashlineDiffPreview
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("buildCompactHashlineDiffPreview", () => {
+	it("keeps trailing context for first unchanged run", () => {
+		const diff = [" 1|ctx-a", " 2|ctx-b", " 3|ctx-c", " 4|ctx-d", "+5|added"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+
+		expect(preview.preview).not.toContain(" 1|ctx-a");
+		expect(preview.preview).not.toContain(" 2|ctx-b");
+		expect(preview.preview).toContain(" 3|ctx-c");
+		expect(preview.preview).toContain(" 4|ctx-d");
+		expect(preview.preview).toContain(" ... 2 more unchanged lines");
+		expect(preview.preview).toContain("+5|added");
+	});
+
+	it("collapses long addition runs and tracks line counts", () => {
+		const diff = [" 1|head", "+2|one", "+3|two", "+4|three", "+5|four", "-2|old"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+
+		expect(preview.preview).toContain("+2|one");
+		expect(preview.preview).toContain("+3|two");
+		expect(preview.preview).toContain(" ... 2 more added lines");
+		expect(preview.addedLines).toBe(4);
+		expect(preview.removedLines).toBe(1);
+	});
+	it("keeps leading context for last unchanged run", () => {
+		const diff = ["-10|old", "+10|new", " 11|ctx-a", " 12|ctx-b", " 13|ctx-c", " 14|ctx-d"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+
+		expect(preview.preview).toContain(" 11|ctx-a");
+		expect(preview.preview).toContain(" 12|ctx-b");
+		expect(preview.preview).not.toContain(" 13|ctx-c");
+		expect(preview.preview).not.toContain(" 14|ctx-d");
+		expect(preview.preview).toContain(" ... 2 more unchanged lines");
 	});
 });
 

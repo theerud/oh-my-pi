@@ -293,9 +293,15 @@ const NANO_GPT_NON_TEXT_MODEL_TOKENS = [
 	"tts",
 ] as const;
 
+/** Regex matching NanoGPT `:thinking` suffixed model IDs (with or without a level). */
+const NANO_GPT_THINKING_SUFFIX_RE = /:thinking(:[^:]+)?$/;
+
 function isLikelyNanoGptTextModelId(id: string): boolean {
 	const normalized = id.trim().toLowerCase();
 	if (!normalized) {
+		return false;
+	}
+	if (NANO_GPT_THINKING_SUFFIX_RE.test(normalized)) {
 		return false;
 	}
 	return !NANO_GPT_NON_TEXT_MODEL_TOKENS.some(token => normalized.includes(token));
@@ -668,8 +674,116 @@ export function openrouterModelManagerOptions(
 	};
 }
 
+const ZENMUX_OPENAI_BASE_URL = "https://zenmux.ai/api/v1";
+const ZENMUX_ANTHROPIC_BASE_URL = "https://zenmux.ai/api/anthropic";
+
+function normalizeZenMuxOpenAiBaseUrl(baseUrl?: string): string {
+	const value = baseUrl?.trim();
+	if (!value) {
+		return ZENMUX_OPENAI_BASE_URL;
+	}
+	return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function toZenMuxAnthropicBaseUrl(openAiBaseUrl: string): string {
+	try {
+		const parsed = new URL(openAiBaseUrl);
+		const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
+		parsed.pathname = trimmedPath.endsWith("/api/v1")
+			? `${trimmedPath.slice(0, -"/api/v1".length)}/api/anthropic`
+			: "/api/anthropic";
+		return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+	} catch {
+		return ZENMUX_ANTHROPIC_BASE_URL;
+	}
+}
+
+function isZenMuxAnthropicModel(entry: OpenAICompatibleModelRecord, modelId: string): boolean {
+	if (typeof entry.owned_by === "string" && entry.owned_by.toLowerCase() === "anthropic") {
+		return true;
+	}
+	return modelId.toLowerCase().startsWith("anthropic/");
+}
+
+function getZenMuxPricingValue(pricings: Record<string, unknown> | undefined, key: string): number {
+	const bucket = pricings?.[key];
+	if (!Array.isArray(bucket)) {
+		return 0;
+	}
+	for (const item of bucket) {
+		if (!isRecord(item)) {
+			continue;
+		}
+		const value = toNumber(item.value);
+		if (value !== undefined) {
+			return value;
+		}
+	}
+	return 0;
+}
+
+function getZenMuxCacheWritePrice(pricings: Record<string, unknown> | undefined): number {
+	const oneHour = getZenMuxPricingValue(pricings, "input_cache_write_1_h");
+	if (oneHour > 0) {
+		return oneHour;
+	}
+	const fiveMinute = getZenMuxPricingValue(pricings, "input_cache_write_5_min");
+	if (fiveMinute > 0) {
+		return fiveMinute;
+	}
+	return getZenMuxPricingValue(pricings, "input_cache_write");
+}
+
 // ---------------------------------------------------------------------------
-// 10.5 Kilo Gateway
+// 10.5 ZenMux
+// ---------------------------------------------------------------------------
+
+export interface ZenMuxModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function zenmuxModelManagerOptions(config?: ZenMuxModelManagerConfig): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const openAiBaseUrl = normalizeZenMuxOpenAiBaseUrl(config?.baseUrl);
+	const anthropicBaseUrl = toZenMuxAnthropicBaseUrl(openAiBaseUrl);
+	return {
+		providerId: "zenmux",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels<Api>({
+					api: "openai-completions",
+					provider: "zenmux",
+					baseUrl: openAiBaseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const pricings = isRecord(entry.pricings) ? entry.pricings : undefined;
+						const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined;
+						const isAnthropicModel = isZenMuxAnthropicModel(entry, defaults.id);
+						return {
+							...defaults,
+							name: toModelName(entry.display_name, defaults.name),
+							api: isAnthropicModel ? "anthropic-messages" : "openai-completions",
+							baseUrl: isAnthropicModel ? anthropicBaseUrl : openAiBaseUrl,
+							reasoning: capabilities?.reasoning === true || defaults.reasoning,
+							input: toInputCapabilities(entry.input_modalities),
+							cost: {
+								input: getZenMuxPricingValue(pricings, "prompt"),
+								output: getZenMuxPricingValue(pricings, "completion"),
+								cacheRead: getZenMuxPricingValue(pricings, "input_cache_read"),
+								cacheWrite: getZenMuxCacheWritePrice(pricings),
+							},
+							contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+							maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
+						};
+					},
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 10.6 Kilo Gateway
 // ---------------------------------------------------------------------------
 
 export interface KiloModelManagerConfig {
@@ -1215,8 +1329,10 @@ export function nanoGptModelManagerOptions(
 	return {
 		providerId: "nanogpt",
 		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
+			fetchDynamicModels: async () => {
+				// Track base IDs that have :thinking variants so we can mark them reasoning-capable.
+				const thinkingBaseIds = new Set<string>();
+				const models = await fetchOpenAICompatibleModels({
 					api: "openai-completions",
 					provider: "nanogpt",
 					baseUrl,
@@ -1233,8 +1349,24 @@ export function nanoGptModelManagerOptions(
 						const mapped = mapWithBundledReference(entry, defaults, reference);
 						return { ...mapped, api: "openai-completions", provider: "nanogpt" };
 					},
-					filterModel: (_entry, model) => isLikelyNanoGptTextModelId(model.id),
-				}),
+					filterModel: (_entry, model) => {
+						const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
+						if (match) {
+							thinkingBaseIds.add(model.id.slice(0, match.index));
+							return false;
+						}
+						return isLikelyNanoGptTextModelId(model.id);
+					},
+				});
+				if (!models) return null;
+				// Mark base models as reasoning-capable when a :thinking variant existed.
+				for (const model of models) {
+					if (!model.reasoning && thinkingBaseIds.has(model.id)) {
+						(model as { reasoning: boolean }).reasoning = true;
+					}
+				}
+				return models;
+			},
 		}),
 	};
 }
@@ -1837,6 +1969,21 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("qwen-portal", "qwen-portal", "https://portal.qwen.ai/v1", {
 		defaultContextWindow: 128000,
 		defaultMaxTokens: 8192,
+	}),
+
+	// --- ZenMux ---
+	openAiCompletionsDescriptor("zenmux", "zenmux", ZENMUX_OPENAI_BASE_URL, {
+		filterModel: (_id, m) => {
+			if (m.tool_call !== true) return false;
+			if (m.status === "deprecated") return false;
+			return true;
+		},
+		resolveApi: modelId => {
+			if (modelId.startsWith("anthropic/")) {
+				return { api: "anthropic-messages" as const, baseUrl: ZENMUX_ANTHROPIC_BASE_URL };
+			}
+			return { api: "openai-completions" as const, baseUrl: ZENMUX_OPENAI_BASE_URL };
+		},
 	}),
 ];
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */

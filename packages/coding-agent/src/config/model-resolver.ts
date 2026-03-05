@@ -1,10 +1,16 @@
 /**
  * Model resolution, scoping, and initial selection
  */
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { type Api, DEFAULT_MODEL_PER_PROVIDER, type KnownProvider, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	DEFAULT_MODEL_PER_PROVIDER,
+	type KnownProvider,
+	type Model,
+	modelsAreEqual,
+	parseThinkingLevel,
+	type ThinkingLevel,
+} from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
-import { isValidThinkingLevel } from "../cli/args";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { fuzzyMatch } from "../utils/fuzzy";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "./model-registry";
@@ -23,10 +29,23 @@ export interface ScopedModel {
  * Parse a model string in "provider/modelId" format.
  * Returns undefined if the format is invalid.
  */
-export function parseModelString(modelStr: string): { provider: string; id: string } | undefined {
+export function parseModelString(
+	modelStr: string,
+): { provider: string; id: string; thinkingLevel?: ThinkingLevel } | undefined {
 	const slashIdx = modelStr.indexOf("/");
 	if (slashIdx <= 0) return undefined;
-	return { provider: modelStr.slice(0, slashIdx), id: modelStr.slice(slashIdx + 1) };
+	const id = modelStr.slice(slashIdx + 1);
+	const provider = modelStr.slice(0, slashIdx);
+	// Strip valid thinking level suffix (e.g., "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high")
+	const colonIdx = id.lastIndexOf(":");
+	if (colonIdx !== -1) {
+		const suffix = id.slice(colonIdx + 1);
+		const thinkingLevel = parseThinkingLevel(suffix);
+		if (thinkingLevel) {
+			return { provider, id: id.slice(0, colonIdx), thinkingLevel };
+		}
+	}
+	return { provider, id };
 }
 
 /**
@@ -230,7 +249,7 @@ function parseModelPatternWithContext(
 	pattern: string,
 	availableModels: Model<Api>[],
 	context: ModelPreferenceContext,
-	options?: { allowInvalidThinkingLevelFallback?: boolean },
+	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
 	// Try exact match first
 	const exactMatch = tryMatchModel(pattern, availableModels, context);
@@ -248,7 +267,8 @@ function parseModelPatternWithContext(
 	const prefix = pattern.substring(0, lastColonIndex);
 	const suffix = pattern.substring(lastColonIndex + 1);
 
-	if (isValidThinkingLevel(suffix)) {
+	const parsedThinkingLevel = parseThinkingLevel(suffix);
+	if (parsedThinkingLevel) {
 		// Valid thinking level - recurse on prefix and use this level
 		const result = parseModelPatternWithContext(prefix, availableModels, context, options);
 		if (result.model) {
@@ -256,7 +276,7 @@ function parseModelPatternWithContext(
 			const explicitThinkingLevel = !result.warning;
 			return {
 				model: result.model,
-				thinkingLevel: explicitThinkingLevel ? suffix : undefined,
+				thinkingLevel: explicitThinkingLevel ? parsedThinkingLevel : undefined,
 				warning: result.warning,
 				explicitThinkingLevel,
 			};
@@ -264,7 +284,7 @@ function parseModelPatternWithContext(
 		return result;
 	}
 
-	const allowFallback = options?.allowInvalidThinkingLevelFallback ?? true;
+	const allowFallback = options?.allowInvalidThinkingSelectorFallback ?? true;
 	if (!allowFallback) {
 		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
@@ -286,7 +306,7 @@ export function parseModelPattern(
 	pattern: string,
 	availableModels: Model<Api>[],
 	preferences?: ModelMatchPreferences,
-	options?: { allowInvalidThinkingLevelFallback?: boolean },
+	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
 	const context = buildPreferenceContext(availableModels, preferences);
 	return parseModelPatternWithContext(pattern, availableModels, context, options);
@@ -320,6 +340,74 @@ export function expandRoleAlias(value: string, settings?: Settings): string {
 }
 
 /**
+ * Resolve a model role value into a concrete model and thinking metadata.
+ */
+export interface ResolvedModelRoleValue {
+	model: Model<Api> | undefined;
+	thinkingLevel?: ThinkingLevel;
+	explicitThinkingLevel: boolean;
+	warning: string | undefined;
+}
+
+export function resolveModelRoleValue(
+	roleValue: string | undefined,
+	availableModels: Model<Api>[],
+	options?: { settings?: Settings; matchPreferences?: ModelMatchPreferences },
+): ResolvedModelRoleValue {
+	if (!roleValue) {
+		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
+	}
+
+	const normalized = roleValue.trim();
+	if (!normalized || normalized === DEFAULT_MODEL_ROLE) {
+		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
+	}
+
+	const lastColonIndex = normalized.lastIndexOf(":");
+	const hasThinkingSuffix =
+		lastColonIndex > PREFIX_MODEL_ROLE.length && parseThinkingLevel(normalized.slice(lastColonIndex + 1));
+	const aliasCandidate = hasThinkingSuffix ? normalized.slice(0, lastColonIndex) : normalized;
+	const effectivePattern = expandRoleAlias(aliasCandidate, options?.settings);
+	const patternWithSuffix = hasThinkingSuffix
+		? `${effectivePattern}:${normalized.slice(lastColonIndex + 1)}`
+		: effectivePattern;
+	const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPattern(
+		patternWithSuffix,
+		availableModels,
+		options?.matchPreferences,
+	);
+
+	return { model, thinkingLevel, explicitThinkingLevel, warning };
+}
+
+export function extractExplicitThinkingSelector(
+	value: string | undefined,
+	settings?: Settings,
+): ThinkingLevel | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim();
+	if (!normalized || normalized === DEFAULT_MODEL_ROLE) return undefined;
+
+	const visited = new Set<string>();
+	let current = normalized;
+	while (!visited.has(current)) {
+		visited.add(current);
+		const lastColonIndex = current.lastIndexOf(":");
+		const hasThinkingSuffix =
+			lastColonIndex > PREFIX_MODEL_ROLE.length && parseThinkingLevel(current.slice(lastColonIndex + 1));
+		if (hasThinkingSuffix) {
+			return current.slice(lastColonIndex + 1) as ThinkingLevel;
+		}
+		const expanded = expandRoleAlias(current, settings).trim();
+		if (!expanded || expanded === current) break;
+		if (expanded === DEFAULT_MODEL_ROLE) return undefined;
+		current = expanded;
+	}
+
+	return undefined;
+}
+
+/**
  * Resolve a model identifier or pattern to a Model instance.
  */
 export function resolveModelFromString(
@@ -329,7 +417,8 @@ export function resolveModelFromString(
 ): Model<Api> | undefined {
 	const parsed = parseModelString(value);
 	if (parsed) {
-		return available.find(model => model.provider === parsed.provider && model.id === parsed.id);
+		const exact = available.find(model => model.provider === parsed.provider && model.id === parsed.id);
+		if (exact) return exact;
 	}
 	return parseModelPattern(value, available, matchPreferences).model;
 }
@@ -361,25 +450,20 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ThinkingLevel } {
-	if (modelPatterns.length === 0) return {};
+): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
+	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
+	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
-		const normalized = pattern.trim();
-		if (!normalized || isDefaultModelAlias(normalized)) {
-			continue;
-		}
-		const effectivePattern = expandRoleAlias(pattern, settings);
-		const { model, thinkingLevel } = parseModelPattern(
-			effectivePattern,
-			modelRegistry.getAvailable(),
+		const { model, thinkingLevel, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
+			settings,
 			matchPreferences,
-		);
+		});
 		if (model) {
-			return { model, thinkingLevel: thinkingLevel !== "off" ? thinkingLevel : undefined };
+			return { model, thinkingLevel, explicitThinkingLevel };
 		}
 	}
-	return {};
+	return { explicitThinkingLevel: false };
 }
 
 /**
@@ -413,8 +497,9 @@ export async function resolveModelScope(
 
 			if (colonIdx !== -1) {
 				const suffix = pattern.substring(colonIdx + 1);
-				if (isValidThinkingLevel(suffix)) {
-					thinkingLevel = suffix;
+				const parsedThinkingLevel = parseThinkingLevel(suffix);
+				if (parsedThinkingLevel) {
+					thinkingLevel = parsedThinkingLevel;
 					explicitThinkingLevel = true;
 					globPattern = pattern.substring(0, colonIdx);
 				}
@@ -541,7 +626,7 @@ export function resolveCliModel(options: {
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
 	const { model, thinkingLevel, warning } = parseModelPattern(pattern, candidates, preferences, {
-		allowInvalidThinkingLevelFallback: false,
+		allowInvalidThinkingSelectorFallback: false,
 	});
 
 	if (!model) {
@@ -578,7 +663,7 @@ export async function findInitialModel(options: {
 	isContinuing: boolean;
 	defaultProvider?: string;
 	defaultModelId?: string;
-	defaultThinkingLevel?: ThinkingLevel;
+	defaultThinkingSelector?: ThinkingLevel;
 	modelRegistry: ModelRegistry;
 }): Promise<InitialModelResult> {
 	const {
@@ -588,7 +673,7 @@ export async function findInitialModel(options: {
 		isContinuing,
 		defaultProvider,
 		defaultModelId,
-		defaultThinkingLevel,
+		defaultThinkingSelector,
 		modelRegistry,
 	} = options;
 
@@ -608,10 +693,10 @@ export async function findInitialModel(options: {
 	// 2. Use first model from scoped models (skip if continuing/resuming)
 	if (scopedModels.length > 0 && !isContinuing) {
 		const scoped = scopedModels[0];
-		const scopedThinkingLevel = scoped.thinkingLevel ?? defaultThinkingLevel ?? "off";
+		const scopedThinkingSelector = scoped.thinkingLevel ?? defaultThinkingSelector ?? "off";
 		return {
 			model: scoped.model,
-			thinkingLevel: scopedThinkingLevel,
+			thinkingLevel: scopedThinkingSelector,
 			fallbackMessage: undefined,
 		};
 	}
@@ -621,8 +706,8 @@ export async function findInitialModel(options: {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
 		if (found) {
 			model = found;
-			if (defaultThinkingLevel) {
-				thinkingLevel = defaultThinkingLevel;
+			if (defaultThinkingSelector) {
+				thinkingLevel = defaultThinkingSelector;
 			}
 			return { model, thinkingLevel, fallbackMessage: undefined };
 		}

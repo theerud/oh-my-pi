@@ -458,6 +458,18 @@ function maybeWarnSuspiciousUnicodeEscapePlaceholder(edits: HashlineEdit[], warn
 // Edit Application
 // ═══════════════════════════════════════════════════════════════════════════
 
+const MIN_AUTOCORRECT_LENGTH = 2;
+
+function shouldAutocorrect(line: string, otherLine: string): boolean {
+	if (!line || line !== otherLine) return false;
+	line = line.trim();
+	if (line.length < MIN_AUTOCORRECT_LENGTH) {
+		// if brace, we allow
+		return line.endsWith("}") || line.endsWith(")");
+	}
+	return true;
+}
+
 /**
  * Apply an array of hashline edits to file content.
  *
@@ -630,9 +642,7 @@ export function applyHashlineEdits(
 					const trailingReplacementLine = newLines[newLines.length - 1]?.trimEnd();
 					const nextSurvivingLine = fileLines[edit.end.line]?.trimEnd();
 					if (
-						trailingReplacementLine &&
-						nextSurvivingLine &&
-						trailingReplacementLine === nextSurvivingLine &&
+						shouldAutocorrect(trailingReplacementLine, nextSurvivingLine) &&
 						// Safety: only correct when end-line content differs from the duplicate.
 						// If end already points to the boundary, matching next line is coincidence.
 						fileLines[edit.end.line - 1]?.trimEnd() !== trailingReplacementLine
@@ -640,6 +650,19 @@ export function applyHashlineEdits(
 						newLines.pop();
 						warnings.push(
 							`Auto-corrected range replace ${edit.pos.line}#${edit.pos.hash}-${edit.end.line}#${edit.end.hash}: removed trailing replacement line "${trailingReplacementLine}" that duplicated next surviving line`,
+						);
+					}
+					const leadingReplacementLine = newLines[0]?.trimEnd();
+					const prevSurvivingLine = fileLines[edit.pos.line - 2]?.trimEnd();
+					if (
+						shouldAutocorrect(leadingReplacementLine, prevSurvivingLine) &&
+						// Safety: only correct when pos-line content differs from the duplicate.
+						// If pos already points to the boundary, matching prev line is coincidence.
+						fileLines[edit.pos.line - 1]?.trimEnd() !== leadingReplacementLine
+					) {
+						newLines.shift();
+						warnings.push(
+							`Auto-corrected range replace ${edit.pos.line}#${edit.pos.hash}-${edit.end.line}#${edit.end.hash}: removed leading replacement line "${leadingReplacementLine}" that duplicated preceding surviving line`,
 						);
 					}
 					fileLines.splice(edit.pos.line - 1, count, ...newLines);
@@ -709,4 +732,117 @@ export function applyHashlineEdits(
 			firstChangedLine = line;
 		}
 	}
+}
+
+export interface CompactHashlineDiffPreview {
+	preview: string;
+	addedLines: number;
+	removedLines: number;
+}
+
+export interface CompactHashlineDiffOptions {
+	maxUnchangedRun?: number;
+	maxAdditionRun?: number;
+	maxDeletionRun?: number;
+	maxOutputLines?: number;
+}
+
+const NUMBERED_DIFF_LINE_RE = /^([ +-])(\d+)\|(.*)$/;
+
+type DiffRunKind = " " | "+" | "-" | "meta";
+type DiffRun = { kind: DiffRunKind; lines: string[] };
+
+function collapseFromStart(lines: string[], maxLines: number, label: string): string[] {
+	if (lines.length <= maxLines) return lines;
+	const hidden = lines.length - maxLines;
+	return [...lines.slice(0, maxLines), ` ... ${hidden} more ${label} lines`];
+}
+
+function collapseFromEnd(lines: string[], maxLines: number, label: string): string[] {
+	if (lines.length <= maxLines) return lines;
+	const hidden = lines.length - maxLines;
+	return [` ... ${hidden} more ${label} lines`, ...lines.slice(-maxLines)];
+}
+
+function collapseFromMiddle(lines: string[], maxLines: number, label: string): string[] {
+	if (lines.length <= maxLines * 2) return lines;
+	const hidden = lines.length - maxLines * 2;
+	return [...lines.slice(0, maxLines), ` ... ${hidden} more ${label} lines`, ...lines.slice(-maxLines)];
+}
+
+function splitDiffRuns(lines: string[]): DiffRun[] {
+	const runs: DiffRun[] = [];
+	for (const line of lines) {
+		const match = NUMBERED_DIFF_LINE_RE.exec(line);
+		const kind = (match?.[1] as " " | "+" | "-" | undefined) ?? "meta";
+		const prev = runs[runs.length - 1];
+		if (prev && prev.kind === kind) {
+			prev.lines.push(line);
+			continue;
+		}
+		runs.push({ kind, lines: [line] });
+	}
+	return runs;
+}
+
+/**
+ * Build a compact diff preview suitable for model-visible tool responses.
+ *
+ * Collapses long unchanged runs and long consecutive additions/removals so the
+ * model sees the shape of edits without replaying full file content.
+ */
+export function buildCompactHashlineDiffPreview(
+	diff: string,
+	options: CompactHashlineDiffOptions = {},
+): CompactHashlineDiffPreview {
+	const maxUnchangedRun = options.maxUnchangedRun ?? 2;
+	const maxAdditionRun = options.maxAdditionRun ?? 2;
+	const maxDeletionRun = options.maxDeletionRun ?? 2;
+	const maxOutputLines = options.maxOutputLines ?? 16;
+
+	const inputLines = diff.length === 0 ? [] : diff.split("\n");
+	const runs = splitDiffRuns(inputLines);
+
+	const out: string[] = [];
+	let addedLines = 0;
+	let removedLines = 0;
+
+	for (let runIndex = 0; runIndex < runs.length; runIndex++) {
+		const run = runs[runIndex];
+		switch (run.kind) {
+			case "meta":
+				out.push(...run.lines);
+				break;
+			case "+":
+				addedLines += run.lines.length;
+				out.push(...collapseFromStart(run.lines, maxAdditionRun, "added"));
+				break;
+			case "-":
+				removedLines += run.lines.length;
+				out.push(...collapseFromStart(run.lines, maxDeletionRun, "removed"));
+				break;
+			case " ":
+				if (runIndex === 0) {
+					out.push(...collapseFromEnd(run.lines, maxUnchangedRun, "unchanged"));
+					break;
+				}
+				if (runIndex === runs.length - 1) {
+					out.push(...collapseFromStart(run.lines, maxUnchangedRun, "unchanged"));
+					break;
+				}
+				out.push(...collapseFromMiddle(run.lines, maxUnchangedRun, "unchanged"));
+				break;
+		}
+	}
+
+	if (out.length > maxOutputLines) {
+		const hidden = out.length - maxOutputLines;
+		return {
+			preview: [...out.slice(0, maxOutputLines), ` ... ${hidden} more preview lines`].join("\n"),
+			addedLines,
+			removedLines,
+		};
+	}
+
+	return { preview: out.join("\n"), addedLines, removedLines };
 }

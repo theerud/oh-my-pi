@@ -24,7 +24,6 @@ import {
 	type AgentState,
 	type AgentTool,
 	INTENT_FIELD,
-	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -33,6 +32,7 @@ import type {
 	Model,
 	ProviderSessionState,
 	TextContent,
+	ThinkingLevel,
 	ToolCall,
 	ToolChoice,
 	Usage,
@@ -40,6 +40,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	calculateRateLimitBackoffMs,
+	getAvailableThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	parseRateLimitReason,
@@ -49,7 +50,7 @@ import { abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-u
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "../config/model-registry";
-import { expandRoleAlias, parseModelString } from "../config/model-resolver";
+import { extractExplicitThinkingSelector, parseModelString, resolveModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate, renderPromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
@@ -252,10 +253,6 @@ export interface HandoffResult {
 // ============================================================================
 
 /** Standard thinking levels */
-const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
-
-/** Thinking levels including xhigh (for supported models) */
-const THINKING_LEVELS_WITH_XHIGH: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 const noOpUIContext: ExtensionUIContext = {
 	select: async (_title, _options, _dialogOptions) => undefined,
@@ -295,7 +292,6 @@ export class AgentSession {
 	readonly settings: Settings;
 
 	#asyncJobManager: AsyncJobManager | undefined = undefined;
-
 	#scopedModels: Array<{ model: Model; thinkingLevel: ThinkingLevel }>;
 	#promptTemplates: PromptTemplate[];
 	#slashCommands: FileSlashCommand[];
@@ -2630,7 +2626,7 @@ export class AgentSession {
 
 		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
-		this.settings.setModelRole(role, `${model.provider}/${model.id}`);
+		this.settings.setModelRole(role, this.#formatRoleModelValue(role, model));
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Re-clamp thinking level for new model's capabilities without persisting settings
@@ -2684,7 +2680,13 @@ export class AgentSession {
 
 		const currentModel = this.model;
 		if (!currentModel) return undefined;
-		const roleModels: Array<{ role: ModelRole; model: Model }> = [];
+		const matchPreferences = { usageOrder: this.settings.getStorage()?.getModelUsageOrder() };
+		const roleModels: Array<{
+			role: ModelRole;
+			model: Model;
+			thinkingLevel?: ThinkingLevel;
+			explicitThinkingLevel: boolean;
+		}> = [];
 
 		for (const role of roleOrder) {
 			const roleModelStr =
@@ -2693,18 +2695,18 @@ export class AgentSession {
 					: this.settings.getModelRole(role);
 			if (!roleModelStr) continue;
 
-			const expandedRoleModelStr = expandRoleAlias(roleModelStr, this.settings);
-			const parsed = parseModelString(expandedRoleModelStr);
-			let match: Model | undefined;
-			if (parsed) {
-				match = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
-			}
-			if (!match) {
-				match = availableModels.find(m => m.id.toLowerCase() === expandedRoleModelStr.toLowerCase());
-			}
-			if (!match) continue;
+			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
+				settings: this.settings,
+				matchPreferences,
+			});
+			if (!resolved.model) continue;
 
-			roleModels.push({ role, model: match });
+			roleModels.push({
+				role,
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
+			});
 		}
 
 		if (roleModels.length <= 1) return undefined;
@@ -2722,6 +2724,10 @@ export class AgentSession {
 			await this.setModelTemporary(next.model);
 		} else {
 			await this.setModel(next.model, next.role);
+		}
+
+		if (next.explicitThinkingLevel && next.thinkingLevel !== undefined) {
+			this.setThinkingLevel(next.thinkingLevel);
 		}
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
@@ -2764,7 +2770,7 @@ export class AgentSession {
 		// Apply model
 		this.#setModelWithProviderSessionReset(next.model);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
-		this.settings.setModelRole("default", `${next.model.provider}/${next.model.id}`);
+		this.settings.setModelRole("default", this.#formatRoleModelValue("default", next.model));
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply thinking level (setThinkingLevel clamps to model capabilities)
@@ -2792,7 +2798,7 @@ export class AgentSession {
 
 		this.#setModelWithProviderSessionReset(nextModel);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
-		this.settings.setModelRole("default", `${nextModel.provider}/${nextModel.id}`);
+		this.settings.setModelRole("default", this.#formatRoleModelValue("default", nextModel));
 		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 
 		// Re-clamp thinking level for new model's capabilities without persisting settings
@@ -2854,9 +2860,9 @@ export class AgentSession {
 	 * Get available thinking levels for current model.
 	 * The provider will clamp to what the specific model supports internally.
 	 */
-	getAvailableThinkingLevels(): ThinkingLevel[] {
+	getAvailableThinkingLevels(): ReadonlyArray<ThinkingLevel> {
 		if (!this.supportsThinking()) return ["off"];
-		return this.supportsXhighThinking() ? THINKING_LEVELS_WITH_XHIGH : THINKING_LEVELS;
+		return getAvailableThinkingLevels(this.supportsXhighThinking());
 	}
 
 	/**
@@ -2873,8 +2879,8 @@ export class AgentSession {
 		return !!this.model?.reasoning;
 	}
 
-	#clampThinkingLevel(level: ThinkingLevel, availableLevels: ThinkingLevel[]): ThinkingLevel {
-		const ordered = THINKING_LEVELS_WITH_XHIGH;
+	#clampThinkingLevel(level: ThinkingLevel, availableLevels: ReadonlyArray<ThinkingLevel>): ThinkingLevel {
+		const ordered = getAvailableThinkingLevels(true);
 		const available = new Set(availableLevels);
 		const requestedIndex = ordered.indexOf(level);
 		if (requestedIndex === -1) {
@@ -3531,33 +3537,13 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		const availableModels = this.#modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
-		const candidates: Model[] = [];
-		const seen = new Set<string>();
-		const addCandidate = (candidate: Model | undefined): void => {
-			if (!candidate) return;
-			const key = this.#getModelKey(candidate);
-			if (seen.has(key)) return;
-			seen.add(key);
-			candidates.push(candidate);
-		};
-
-		addCandidate(this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels));
-
-		const sameProviderLarger = [...availableModels]
-			.filter(
-				m => m.provider === currentModel.provider && m.api === currentModel.api && m.contextWindow > contextWindow,
-			)
-			.sort((a, b) => a.contextWindow - b.contextWindow);
-		addCandidate(sameProviderLarger[0]);
-		for (const candidate of candidates) {
-			if (modelsAreEqual(candidate, currentModel)) continue;
-			if (candidate.contextWindow <= contextWindow) continue;
-			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
-			if (!apiKey) continue;
-			return candidate;
-		}
-
-		return undefined;
+		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
+		if (!candidate) return undefined;
+		if (modelsAreEqual(candidate, currentModel)) return undefined;
+		if (candidate.contextWindow <= contextWindow) return undefined;
+		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+		if (!apiKey) return undefined;
+		return candidate;
 	}
 
 	#setModelWithProviderSessionReset(model: Model): void {
@@ -3597,6 +3583,15 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		return `${model.provider}/${model.id}`;
 	}
 
+	#formatRoleModelValue(role: ModelRole, model: Model): string {
+		const modelKey = `${model.provider}/${model.id}`;
+		const existingRoleValue = this.settings.getModelRole(role);
+		if (!existingRoleValue) return modelKey;
+
+		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
+		if (thinkingLevel === undefined) return modelKey;
+		return `${modelKey}:${thinkingLevel}`;
+	}
 	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
 		const configuredTarget = currentModel.contextPromotionTarget?.trim();
 		if (!configuredTarget) return undefined;
@@ -3619,12 +3614,10 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		if (!roleModelStr) return undefined;
 
-		const parsed = parseModelString(roleModelStr);
-		if (parsed) {
-			return availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
-		}
-		const roleLower = roleModelStr.toLowerCase();
-		return availableModels.find(m => m.id.toLowerCase() === roleLower);
+		return resolveModelRoleValue(roleModelStr, availableModels, {
+			settings: this.settings,
+			matchPreferences: { usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
+		}).model;
 	}
 
 	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
@@ -4575,6 +4568,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		if (!skipConversationRestore) {
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
 		return { selectedText, cancelled: false };
@@ -4729,6 +4723,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		const sessionContext = this.sessionManager.buildSessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		// Emit session_tree event
 		if (this.#extensionRunner) {

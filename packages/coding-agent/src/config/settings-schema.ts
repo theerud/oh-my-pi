@@ -1,4 +1,6 @@
-/**
+import { getAvailableThinkingLevels } from "@oh-my-pi/pi-ai";
+
+/** Unified settings schema - single source of truth for all settings.
  * Unified settings schema - single source of truth for all settings.
  *
  * Each setting is defined once here with:
@@ -190,7 +192,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	defaultThinkingLevel: {
 		type: "enum",
-		values: ["off", "minimal", "low", "medium", "high", "xhigh"] as const,
+		values: getAvailableThinkingLevels(),
 		default: "high",
 		ui: {
 			tab: "agent",
@@ -281,6 +283,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "config",
 			label: "Read hash lines",
 			description: "Include line hashes in read output for hashline edit mode (LINE#ID:content)",
+		},
+	},
+	"read.defaultLimit": {
+		type: "number",
+		default: 300,
+		ui: {
+			tab: "tools",
+			label: "Read default limit",
+			description: "Default number of lines returned when agent calls read without a limit",
+			submenu: true,
 		},
 	},
 	showHardwareCursor: {

@@ -2,6 +2,83 @@
 
 ## [Unreleased]
 
+## [13.9.2] - 2026-03-05
+
+### Added
+
+- Support for Python code execution messages with output display and error handling
+- Support for mode change entries in session exports
+- Support for TTSR injection and session initialization entries in tree filtering
+
+### Changed
+
+- Updated label lookup to use `targetId` field instead of `parentId` for label references
+- Changed model change entry display to use `model` field instead of separate `provider` and `modelId` fields
+- Simplified model change rendering by removing OpenAI Codex bridge prompt display
+- Updated searchable text extraction to include Python code from `pythonExecution` messages
+
+### Removed
+
+- Removed `codexInjectionInfo` from session data destructuring
+- Removed OpenAI Codex-specific bridge prompt UI from model change entries
+
+### Fixed
+
+- Auto-corrected off-by-one range start errors in hashline edits that would duplicate preceding lines
+
+## [13.9.0] - 2026-03-05
+### Added
+
+- Added `read.defaultLimit` setting to configure default number of lines returned by read tool when no limit is specified (default: 300 lines)
+- Added preset options for read default limit (200, 300, 500, 1000, 5000 lines) in settings UI
+
+### Changed
+
+- Updated read tool prompt to distinguish between default limit and maximum limit per call
+- Moved `ThinkingLevel` type from `@oh-my-pi/pi-agent-core` to `@oh-my-pi/pi-ai` for centralized thinking level definitions
+- Replaced local thinking level validation with `parseThinkingLevel()` and `ALL_THINKING_LEVELS` from `@oh-my-pi/pi-ai`
+- Updated thinking level option providers to use `THINKING_MODE_DESCRIPTIONS` from `@oh-my-pi/pi-ai` for consistent descriptions
+- Renamed `RoleThinkingMode` type to `ThinkingMode` and changed default value from `'default'` to `'inherit'` for clarity
+- Replaced `formatThinkingEffortLabel()` utility with `formatThinking()` from `@oh-my-pi/pi-ai`
+- Renamed `extractExplicitThinkingLevel()` to `extractExplicitThinkingSelector()` in model resolver
+- Updated thinking level clamping to use `getAvailableThinkingLevel()` from `@oh-my-pi/pi-ai`
+
+### Removed
+
+- Removed `thinking-effort-label.ts` utility file (functionality moved to `@oh-my-pi/pi-ai`)
+- Removed local `VALID_THINKING_LEVELS` constant definitions across multiple files
+- Removed `isValidThinkingLevel()` function (replaced by `parseThinkingLevel()` from `@oh-my-pi/pi-ai`)
+- Removed `parseThinkingLevel()` helper from discovery module (now uses centralized version from `@oh-my-pi/pi-ai`)
+
+### Fixed
+
+- Fixed provider session state not being cleared when branching or navigating tree history, preventing resource leaks with codex provider sessions
+
+## [13.8.0] - 2026-03-04
+### Added
+
+- Added `buildCompactHashlineDiffPreview()` function to generate compact diff previews for model-visible tool responses, collapsing long unchanged runs and consecutive additions/removals to show edit shape without full file content
+- Added project-level discovery for `.agent/` and `.agents/` directories, walking up from cwd to repo root (matching behavior of other providers like `.omp`, `.claude`, `.codex`). Applies to skills, rules, prompts, commands, context files (AGENTS.md), and system prompts (SYSTEM.md)
+
+### Changed
+
+- Changed edit tool response to include diff summary with line counts (+added -removed) and a compact diff preview instead of warnings-only output
+- Limited auto context promotion to models with explicit `contextPromotionTarget`; models without a configured target now compact on overflow instead of switching to arbitrary larger models ([#282](https://github.com/can1357/oh-my-pi/issues/282))
+
+### Fixed
+
+- Fixed `:thinking` suffix in `modelRoles` config values silently breaking model resolution (e.g., `slow: anthropic/claude-opus-4-6:high`) and being stripped on Ctrl+P role cycling
+
+## [13.7.6] - 2026-03-04
+### Added
+
+- Exported `dedupeParseErrors` utility function to deduplicate parse error messages while preserving order
+
+### Fixed
+
+- Reduced duplicate parse error messages when multiple patterns fail on the same file
+- Normalized parse error output in ast-grep to remove pattern-specific prefixes and show only file-level errors
+
 ## [13.7.4] - 2026-03-04
 ### Added
 - Added `fetch.useKagiSummarizer` setting to toggle Kagi Universal Summarizer usage in the fetch tool.

@@ -34,7 +34,14 @@ import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard"
 import { applyPatch } from "./applicator";
 import { generateDiffString, generateUnifiedDiffString, replaceText } from "./diff";
 import { findMatch } from "./fuzzy";
-import { type Anchor, applyHashlineEdits, computeLineHash, type HashlineEdit, parseTag } from "./hashline";
+import {
+	type Anchor,
+	applyHashlineEdits,
+	buildCompactHashlineDiffPreview,
+	computeLineHash,
+	type HashlineEdit,
+	parseTag,
+} from "./hashline";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "./normalize";
 import { type EditToolDetails, getLspBatchRequest } from "./shared";
 // Internal imports
@@ -315,18 +322,10 @@ export type EditMode = "replace" | "patch" | "hashline";
 
 export const DEFAULT_EDIT_MODE: EditMode = "hashline";
 
-export function normalizeEditMode(mode?: string | null): EditMode | null {
-	switch (mode) {
-		case "replace":
-			return "replace";
-		case "patch":
-			return "patch";
-		case "hashline":
-			return "hashline";
-		default:
-			return null;
-	}
-}
+const EDIT_ID: Record<string, EditMode> = Object.fromEntries(
+	["replace", "patch", "hashline"].map(mode => [mode, mode as EditMode]),
+);
+export const normalizeEditMode = (mode?: string | null): EditMode | undefined => EDIT_ID[mode ?? ""];
 
 /**
  * Edit tool implementation.
@@ -401,11 +400,17 @@ export class EditTool implements AgentTool<TInput> {
 	 */
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
+		// 1. Check if edit mode is explicitly set for this model
 		const activeModel = this.session.getActiveModelString?.();
-		const editVariant =
-			this.session.settings.getEditVariantForModel(activeModel) ??
-			normalizeEditMode(this.session.settings.get("edit.mode"));
-		return editVariant ?? DEFAULT_EDIT_MODE;
+		const modelVariant = this.session.settings.getEditVariantForModel(activeModel);
+		if (modelVariant) return modelVariant;
+		// 2. Check if model contains "-spark" substring (default to replace mode)
+		if (activeModel?.includes("-spark")) return "replace";
+		// 3. Check if edit mode is explicitly set in session settings
+		const settingsMode = normalizeEditMode(this.session.settings.get("edit.mode"));
+		if (settingsMode) return settingsMode;
+		// 4. Default to DEFAULT_EDIT_MODE
+		return DEFAULT_EDIT_MODE;
 	}
 
 	/**
@@ -597,11 +602,15 @@ export class EditTool implements AgentTool<TInput> {
 				.get();
 
 			const resultText = move ? `Moved ${path} to ${move}` : `Updated ${path}`;
+			const preview = buildCompactHashlineDiffPreview(diffResult.diff);
+			const summaryLine = `Changes: +${preview.addedLines} -${preview.removedLines}${preview.preview ? "" : " (no textual diff preview)"}`;
+			const warningsBlock = result.warnings?.length ? `\n\nWarnings:\n${result.warnings.join("\n")}` : "";
+			const previewBlock = preview.preview ? `\n\nDiff preview:\n${preview.preview}` : "";
 			return {
 				content: [
 					{
 						type: "text",
-						text: `${resultText}${result.warnings?.length ? `\n\nWarnings:\n${result.warnings.join("\n")}` : ""}`,
+						text: `${resultText}\n${summaryLine}${previewBlock}${warningsBlock}`,
 					},
 				],
 				details: {

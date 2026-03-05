@@ -105,13 +105,14 @@ export type KnownProvider =
 	| "venice"
 	| "vllm"
 	| "xiaomi"
+	| "zenmux"
 	| "lm-studio";
 export type Provider = KnownProvider | string;
 
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+import type { ThinkingEffort, ThinkingLevel } from "./thinking";
 
 /** Token budgets for each thinking level (token-based providers only) */
-export type ThinkingBudgets = { [key in ThinkingLevel]?: number };
+export type ThinkingBudgets = { [key in ThinkingEffort]?: number };
 
 export type MessageAttribution = "user" | "agent";
 
@@ -223,6 +224,11 @@ export interface ThinkingContent {
 	thinkingSignature?: string; // e.g., for OpenAI responses, the reasoning item ID
 }
 
+export interface RedactedThinkingContent {
+	type: "redactedThinking";
+	data: string;
+}
+
 export interface ImageContent {
 	type: "image";
 	data: string; // base64 encoded image data
@@ -276,7 +282,7 @@ export interface DeveloperMessage {
 
 export interface AssistantMessage {
 	role: "assistant";
-	content: (TextContent | ThinkingContent | ToolCall)[];
+	content: (TextContent | ThinkingContent | RedactedThinkingContent | ToolCall)[];
 	api: Api;
 	provider: Provider;
 	model: string;

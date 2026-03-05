@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { parseModelPattern, resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	parseModelPattern,
+	parseModelString,
+	resolveCliModel,
+	resolveModelFromString,
+	resolveModelOverride,
+	resolveModelRoleValue,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -85,7 +92,34 @@ const mockProviderOverlapModels: Model<"anthropic-messages">[] = [
 	},
 ];
 
-const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels];
+const mockCodexOverlapModels: Model<"anthropic-messages">[] = [
+	{
+		id: "gpt-5.3-codex",
+		name: "GPT-5.3 Codex",
+		api: "anthropic-messages",
+		provider: "openai-codex",
+		baseUrl: "https://api.openai.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.5, output: 6, cacheRead: 0.15, cacheWrite: 1.5 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	},
+	{
+		id: "gpt-5.3-codex-spark",
+		name: "GPT-5.3 Codex Spark",
+		api: "anthropic-messages",
+		provider: "openai-codex",
+		baseUrl: "https://api.openai.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	},
+];
+
+const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels, ...mockCodexOverlapModels];
 
 describe("parseModelPattern", () => {
 	describe("simple patterns without colons", () => {
@@ -264,6 +298,88 @@ describe("parseModelPattern", () => {
 	});
 });
 
+describe("resolveModelRoleValue", () => {
+	test("resolves pi/<role>:<thinking> by expanding role alias before parsing thinking", () => {
+		const settings = {
+			getModelRole: (role: string) => (role === "smol" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
+		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+
+		const result = resolveModelRoleValue("pi/smol:high", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+		expect(result.thinkingLevel).toBe("high");
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("resolves pi/default through configured default role alias", () => {
+		const settings = {
+			getModelRole: (role: string) => (role === "default" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
+		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+
+		const result = resolveModelRoleValue("pi/default", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
+		expect(result.warning).toBeUndefined();
+	});
+
+	test("does not resolve exact codex role values to codex-spark via substring matching", () => {
+		const providerQualified = resolveModelRoleValue("openai-codex/gpt-5.3-codex:xhigh", allModels);
+		expect(providerQualified.model?.provider).toBe("openai-codex");
+		expect(providerQualified.model?.id).toBe("gpt-5.3-codex");
+		expect(providerQualified.thinkingLevel).toBe("xhigh");
+		expect(providerQualified.explicitThinkingLevel).toBe(true);
+
+		const idOnly = resolveModelRoleValue("gpt-5.3-codex:xhigh", allModels);
+		expect(idOnly.model?.provider).toBe("openai-codex");
+		expect(idOnly.model?.id).toBe("gpt-5.3-codex");
+		expect(idOnly.thinkingLevel).toBe("xhigh");
+		expect(idOnly.explicitThinkingLevel).toBe(true);
+	});
+});
+describe("resolveModelFromString", () => {
+	test("falls back to pattern parsing for provider/model:thinking when strict provider+id miss", () => {
+		const resolved = resolveModelFromString("openrouter/qwen/qwen3-coder:exacto:high", allModels);
+		expect(resolved?.provider).toBe("openrouter");
+		expect(resolved?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("treats colon-containing model IDs without thinking suffix as exact IDs", () => {
+		const resolved = resolveModelFromString("openrouter/qwen/qwen3-coder:exacto", allModels);
+		expect(resolved?.provider).toBe("openrouter");
+		expect(resolved?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+});
+
+describe("resolveModelOverride", () => {
+	test("preserves explicit off and explicit-thinking metadata", () => {
+		const registry = {
+			getAvailable: () => allModels,
+		} as Parameters<typeof resolveModelOverride>[1];
+
+		const result = resolveModelOverride(["sonnet:off"], registry);
+
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.thinkingLevel).toBe("off");
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("resolves colon-containing model IDs with appended thinking suffix", () => {
+		const registry = {
+			getAvailable: () => allModels,
+		} as Parameters<typeof resolveModelOverride>[1];
+
+		const result = resolveModelOverride(["openrouter/qwen/qwen3-coder:exacto:high"], registry);
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+		expect(result.thinkingLevel).toBe("high");
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
 describe("resolveCliModel", () => {
 	test("resolves --model provider/id without --provider", () => {
 		const registry = {
@@ -369,5 +485,61 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openrouter");
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+});
+
+describe("parseModelString", () => {
+	test("parses standard provider/id format", () => {
+		const result = parseModelString("anthropic/claude-sonnet-4-5");
+		expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5" });
+	});
+
+	test("returns undefined for strings without a slash", () => {
+		expect(parseModelString("claude-sonnet-4-5")).toBeUndefined();
+		expect(parseModelString("")).toBeUndefined();
+		expect(parseModelString("sonnet:high")).toBeUndefined();
+	});
+
+	test("returns undefined for strings starting with slash", () => {
+		expect(parseModelString("/claude-sonnet-4-5")).toBeUndefined();
+	});
+
+	describe("thinking level suffix extraction", () => {
+		test("extracts valid thinking level from provider/id:level", () => {
+			const result = parseModelString("anthropic/claude-sonnet-4-5:high");
+			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5", thinkingLevel: "high" });
+		});
+
+		test("extracts all valid thinking levels", () => {
+			const levels = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+			for (const level of levels) {
+				const result = parseModelString(`anthropic/claude-sonnet-4-5:${level}`);
+				expect(result?.id).toBe("claude-sonnet-4-5");
+				expect(result?.thinkingLevel).toBe(level);
+			}
+		});
+
+		test("does NOT strip invalid suffix — treats it as part of model ID", () => {
+			const result = parseModelString("openrouter/qwen/qwen3-coder:exacto");
+			expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder:exacto" });
+		});
+
+		test("handles model ID with colon followed by valid thinking level", () => {
+			// e.g. "openrouter/qwen/qwen3-coder:exacto:high" — last colon is thinking level
+			const result = parseModelString("openrouter/qwen/qwen3-coder:exacto:high");
+			expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder:exacto", thinkingLevel: "high" });
+		});
+
+		test("does not extract thinking level from model ID with invalid suffix", () => {
+			const result = parseModelString("openrouter/openai/gpt-4o:extended");
+			// :extended is not a valid thinking level, so it stays as part of the ID
+			expect(result).toEqual({ provider: "openrouter", id: "openai/gpt-4o:extended" });
+		});
+
+		test("handles empty suffix after colon", () => {
+			const result = parseModelString("anthropic/claude-sonnet-4-5:");
+			// Empty string is not a valid thinking level, so colon stays as part of ID
+			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:" });
+		});
 	});
 });

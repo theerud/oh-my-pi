@@ -1,10 +1,5 @@
+import turnAbortedGuidance from "../prompts/turn-aborted-guidance.md" with { type: "text" };
 import type { Api, AssistantMessage, DeveloperMessage, Message, Model, ToolCall, ToolResultMessage } from "../types";
-
-const TURN_ABORTED_GUIDANCE =
-	"<turn-aborted>\n" +
-	"The previous turn was aborted. Any running tools/commands were terminated. " +
-	"If tools were aborted, they may have partially executed; verify current state before retrying.\n" +
-	"</turn-aborted>";
 
 const enum ToolCallStatus {
 	/** Tool call has received a result (real or synthetic for orphan) */
@@ -31,8 +26,9 @@ export function transformMessages<TApi extends Api>(
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 
+	const latestAssistantIndex = messages.findLastIndex(msg => msg.role === "assistant");
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
-	const transformed = messages.map(msg => {
+	const transformed = messages.map((msg, index) => {
 		// User and developer messages pass through unchanged
 		if (msg.role === "user" || msg.role === "developer") {
 			return msg;
@@ -55,8 +51,14 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
 
+			const mustPreserveLatestAnthropicThinking =
+				index === latestAssistantIndex &&
+				model.api === "anthropic-messages" &&
+				assistantMsg.api === "anthropic-messages";
+
 			const transformedContent = assistantMsg.content.flatMap(block => {
 				if (block.type === "thinking") {
+					if (mustPreserveLatestAnthropicThinking) return block;
 					// For same model: keep thinking blocks with signatures (needed for replay)
 					// even if the thinking text is empty (OpenAI encrypted reasoning)
 					if (isSameModel && block.thinkingSignature) return block;
@@ -67,6 +69,12 @@ export function transformMessages<TApi extends Api>(
 						type: "text" as const,
 						text: block.thinking,
 					};
+				}
+
+				if (block.type === "redactedThinking") {
+					if (mustPreserveLatestAnthropicThinking) return block;
+					if (isSameModel) return block;
+					return [];
 				}
 
 				if (block.type === "text") {
@@ -163,7 +171,7 @@ export function transformMessages<TApi extends Api>(
 				// Inject turn_aborted guidance marker as developer message
 				result.push({
 					role: "developer",
-					content: TURN_ABORTED_GUIDANCE,
+					content: turnAbortedGuidance,
 					timestamp: assistantMsg.timestamp + 1,
 				} as DeveloperMessage);
 

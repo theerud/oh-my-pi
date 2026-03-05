@@ -64,6 +64,7 @@ import { loginVenice } from "./utils/oauth/venice";
 import { loginVllm } from "./utils/oauth/vllm";
 import { loginXiaomi } from "./utils/oauth/xiaomi";
 import { loginZai } from "./utils/oauth/zai";
+import { loginZenMux } from "./utils/oauth/zenmux";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Credential Types
@@ -488,12 +489,7 @@ export class AuthStorage {
 	 */
 	#getHashedIndex(sessionId: string, total: number): number {
 		if (total <= 1) return 0;
-		let hash = 2166136261; // FNV offset basis
-		for (let i = 0; i < sessionId.length; i++) {
-			hash ^= sessionId.charCodeAt(i);
-			hash = Math.imul(hash, 16777619); // FNV prime
-		}
-		return (hash >>> 0) % total;
+		return Bun.hash.xxHash32(sessionId) % total;
 	}
 
 	/**
@@ -917,6 +913,11 @@ export class AuthStorage {
 			}
 			case "xiaomi": {
 				const apiKey = await loginXiaomi(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "zenmux": {
+				const apiKey = await loginZenMux(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
@@ -1490,12 +1491,33 @@ export class AuthStorage {
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const checkUsage = strategy !== undefined && credentials.length > 1;
-		const candidates = checkUsage
-			? await this.#rankOAuthSelections({ providerKey, provider, order, credentials, options, strategy })
+		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		// Skip ranking only when the session already has a working preferred credential — re-ranking
+		// mid-session causes account switches that cold-start the server-side prompt cache. New sessions
+		// (no preference) and sessions whose preferred is blocked still rank, so we pick the account
+		// with the most headroom proactively and fall back intelligently when rate-limited.
+		const sessionPreferredIsAvailable =
+			sessionPreferredIndex !== undefined && !this.#isCredentialBlocked(providerKey, sessionPreferredIndex);
+		const shouldRank = checkUsage && !sessionPreferredIsAvailable;
+		const candidates = shouldRank
+			? await this.#rankOAuthSelections({ providerKey, provider, order, credentials, options, strategy: strategy! })
 			: order
 					.map(idx => credentials[idx])
 					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
 					.map(selection => ({ selection, usage: null, usageChecked: false }));
+
+		if (sessionPreferredIndex !== undefined) {
+			const sessionPreferredCandidate = candidates.findIndex(
+				candidate =>
+					!this.#isCredentialBlocked(providerKey, candidate.selection.index) &&
+					candidate.selection.index === sessionPreferredIndex,
+			);
+			if (sessionPreferredCandidate > 0) {
+				const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
+				candidates.unshift(preferred);
+			}
+		}
 		const fallback = candidates[0];
 
 		for (const candidate of candidates) {

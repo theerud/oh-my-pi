@@ -31,10 +31,35 @@ export function normalizeToolCallId(id: string): string {
 export function normalizeResponsesToolCallId(id: string): { callId: string; itemId: string } {
 	const [callId, itemId] = id.split("|");
 	if (callId && itemId) {
-		return { callId, itemId };
+		const normalizedCallId = truncateResponseItemId(callId, getIdPrefix(callId, "call"));
+		const normalizedItemId = normalizeResponsesItemId(itemId);
+		return { callId: normalizedCallId, itemId: normalizedItemId };
 	}
 	const hash = Bun.hash.xxHash64(id).toString(36);
-	return { callId: `call_${hash}`, itemId: `item_${hash}` };
+	const normalizedCallId = id.startsWith("call_") ? truncateResponseItemId(id, "call") : `call_${hash}`;
+	return { callId: normalizedCallId, itemId: `fc_${hash}` };
+}
+
+function getIdPrefix(id: string, fallback: string): string {
+	const prefix = id.match(/^([a-zA-Z][a-zA-Z0-9]*)_/)?.[1];
+	return prefix || fallback;
+}
+
+function normalizeResponsesItemId(itemId: string): string {
+	const prefix = getIdPrefix(itemId, "fc");
+	if (prefix !== "fc" && prefix !== "fcr") {
+		return `fc_${Bun.hash.xxHash64(itemId).toString(36)}`;
+	}
+	return truncateResponseItemId(itemId, prefix);
+}
+
+/**
+ * Truncate an OpenAI Responses API item ID to 64 characters.
+ * IDs exceeding the limit are replaced with a hash-based ID using the given prefix.
+ */
+export function truncateResponseItemId(id: string, prefix: string): string {
+	if (id.length <= 64) return id;
+	return `${prefix}_${Bun.hash.xxHash64(id).toString(36)}`;
 }
 
 /**

@@ -6,6 +6,8 @@
  * 1. Add it to settings-schema.ts with a `ui` field
  * 2. That's it - it appears in the UI automatically
  */
+
+import { getAvailableThinkingLevels, getThinkingMetadata } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import {
 	getDefault,
@@ -167,6 +169,14 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "300", label: "5 minutes" },
 		{ value: "600", label: "10 minutes" },
 	],
+	// Read line limit
+	"read.defaultLimit": [
+		{ value: "200", label: "200 lines" },
+		{ value: "300", label: "300 lines" },
+		{ value: "500", label: "500 lines" },
+		{ value: "1000", label: "1000 lines" },
+		{ value: "5000", label: "5000 lines" },
+	],
 	// Edit fuzzy threshold
 	"edit.fuzzyThreshold": [
 		{ value: "0.85", label: "0.85", description: "Lenient" },
@@ -221,14 +231,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 	],
 	// Default thinking level
-	defaultThinkingLevel: [
-		{ value: "off", label: "off", description: "No reasoning" },
-		{ value: "minimal", label: "minimal", description: "Very brief (~1k tokens)" },
-		{ value: "low", label: "low", description: "Light (~2k tokens)" },
-		{ value: "medium", label: "medium", description: "Moderate (~8k tokens)" },
-		{ value: "high", label: "high", description: "Deep (~16k tokens)" },
-		{ value: "xhigh", label: "xhigh", description: "Maximum (~32k tokens)" },
-	],
+	defaultThinkingLevel: [...getAvailableThinkingLevels().map(getThinkingMetadata)],
 	// Temperature
 	temperature: [
 		{ value: "-1", label: "Default", description: "Use provider default" },

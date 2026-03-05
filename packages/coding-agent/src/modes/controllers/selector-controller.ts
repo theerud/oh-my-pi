@@ -1,5 +1,4 @@
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { getOAuthProviders, type OAuthProvider } from "@oh-my-pi/pi-ai";
+import { getOAuthProviders, type OAuthProvider, type ThinkingLevel } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Input, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -76,7 +75,7 @@ export class SelectorController {
 			this.showSelector(done => {
 				const selector = new SettingsSelectorComponent(
 					{
-						availableThinkingLevels: this.ctx.session.getAvailableThinkingLevels(),
+						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
 						cwd: getProjectDir(),
@@ -342,12 +341,24 @@ export class SelectorController {
 			}
 
 			// Provider settings - update runtime preferences
-			case "webSearchProvider":
+			case "providers.webSearch":
 				setPreferredSearchProvider(
-					value as "auto" | "exa" | "jina" | "zai" | "perplexity" | "anthropic" | "gemini" | "codex",
+					value as
+						| "auto"
+						| "exa"
+						| "brave"
+						| "jina"
+						| "kimi"
+						| "zai"
+						| "perplexity"
+						| "anthropic"
+						| "gemini"
+						| "codex"
+						| "kagi"
+						| "synthetic",
 				);
 				break;
-			case "imageProvider":
+			case "providers.image":
 				setPreferredImageProvider(value as "auto" | "gemini" | "openrouter");
 				break;
 
@@ -369,7 +380,7 @@ export class SelectorController {
 				this.ctx.settings,
 				this.ctx.session.modelRegistry,
 				this.ctx.session.scopedModels,
-				async (model, role) => {
+				async (model, role, thinkingMode) => {
 					try {
 						if (role === null) {
 							// Temporary: update agent state but don't persist to settings
@@ -382,6 +393,9 @@ export class SelectorController {
 						} else if (role === "default") {
 							// Default: update agent state and persist
 							await this.ctx.session.setModel(model, role);
+							if (thinkingMode && thinkingMode !== "inherit") {
+								this.ctx.session.setThinkingLevel(thinkingMode as ThinkingLevel);
+							}
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
 							this.ctx.showStatus(`Default model: ${model.id}`);

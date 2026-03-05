@@ -57,7 +57,7 @@ function getPromptCacheRetention(baseUrl: string, cacheRetention: CacheRetention
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
-	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	toolChoice?: ToolChoice;
@@ -480,9 +480,9 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		// See: https://github.com/can1357/oh-my-pi/issues/41
 		params.include = ["reasoning.encrypted_content"];
 
-		if (options?.reasoningEffort || options?.reasoningSummary) {
+		if (options?.reasoning || options?.reasoningSummary) {
 			params.reasoning = {
-				effort: options?.reasoningEffort || "medium",
+				effort: options?.reasoning || "medium",
 				summary: options?.reasoningSummary || "auto",
 			};
 		} else {
@@ -638,7 +638,7 @@ function convertMessages(
 					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
 					// By omitting the id, we avoid triggering that validation (like cross-provider does).
 					let itemId: string | undefined = normalized.itemId;
-					if (isDifferentModel && itemId?.startsWith("fc_")) {
+					if (isDifferentModel && (itemId?.startsWith("fc_") || itemId?.startsWith("fcr_"))) {
 						itemId = undefined;
 					}
 					knownCallIds.add(normalized.callId);
