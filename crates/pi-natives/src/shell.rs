@@ -956,11 +956,23 @@ mod system_impl {
 		#[napi]
 		pub fn run<'e>(
 			&self,
-			_env: &'e Env,
-			_options: ShellRunOptions<'e>,
-			_on_chunk: Option<ThreadsafeFunction<String>>,
+			env: &'e Env,
+			options: ShellRunOptions<'e>,
+			on_chunk: Option<ThreadsafeFunction<String>>,
 		) -> Result<PromiseRaw<'e, ShellRunResult>> {
-			Err(Error::from_reason("Persistent Shell sessions are only supported in native build."))
+			let ShellRunOptions { command, cwd, env: run_env, timeout_ms, signal } = options;
+
+			let ct = crate::task::CancelToken::new(timeout_ms, signal);
+			let run_config = ShellRunConfig { command, cwd, env: run_env };
+
+			crate::task::future(env, "shell.run", async move {
+				let res = run_shell_oneshot((), run_config, on_chunk, ct).await?;
+				Ok(ShellRunResult {
+					exit_code: res.exit_code,
+					cancelled: res.cancelled,
+					timed_out: res.timed_out,
+				})
+			})
 		}
 
 		#[napi]

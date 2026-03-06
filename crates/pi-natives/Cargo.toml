@@ -23,7 +23,7 @@ parking_lot = "0.12.5"
 dashmap = "6.1"
 clap = { version = "4", features = ["derive"] }
 os_pipe = "1"
-portable-pty = { version = "0.9", optional = true }
+portable-pty = "0.9"
 grep-regex = { version = "0.1", optional = true }
 grep-searcher = { version = "0.1", optional = true }
 grep-matcher = { version = "0.1", optional = true }
@@ -158,7 +158,7 @@ structural-search-native = [
 structural-search-system = []
 
 # Shell execution - Native (brush-core) or System (bash)
-shell-native = ["dep:brush-core", "dep:brush-builtins", "dep:portable-pty"]
+shell-native = ["dep:brush-core", "dep:brush-builtins"]
 shell-system = []
 
 # Text search (grep) - Native (grep crates) or System (rg)

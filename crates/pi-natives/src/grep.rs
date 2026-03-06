@@ -4,6 +4,8 @@
 //! - `search()` for in-memory content search.
 //! - `grep()` for filesystem search with glob/type filtering.
 
+use std::path::PathBuf;
+
 use napi::{JsString, bindgen_prelude::*, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
 
@@ -171,6 +173,8 @@ pub struct GrepResult {
 	/// Whether the limit/offset stopped the search early.
 	#[napi(js_name = "limitReached")]
 	pub limit_reached:      Option<bool>,
+	/// Context lines requested.
+	pub context:            Option<u32>,
 }
 
 pub struct GrepConfig {
@@ -190,6 +194,16 @@ pub struct GrepConfig {
 	pub context:        Option<u32>,
 	pub max_columns:    Option<u32>,
 	pub mode:           Option<String>,
+}
+
+pub fn resolve_search_path(path: &str) -> Result<PathBuf> {
+	let candidate = PathBuf::from(path);
+	if candidate.is_absolute() {
+		return Ok(candidate);
+	}
+	let cwd = std::env::current_dir()
+		.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?;
+	Ok(cwd.join(candidate))
 }
 
 #[cfg(feature = "text-search-native")]
@@ -385,16 +399,6 @@ mod native_impl {
 			Some("count" | "filesWithMatches") => OutputMode::Count,
 			_ => OutputMode::Content,
 		}
-	}
-
-	pub fn resolve_search_path(path: &str) -> Result<PathBuf> {
-		let candidate = PathBuf::from(path);
-		if candidate.is_absolute() {
-			return Ok(candidate);
-		}
-		let cwd = std::env::current_dir()
-			.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?;
-		Ok(cwd.join(candidate))
 	}
 
 	pub enum TypeFilter {
@@ -910,6 +914,7 @@ mod native_impl {
 					files_with_matches: 0,
 					files_searched:     0,
 					limit_reached:      None,
+					context:            Some(context_before.max(context_after)),
 				});
 			}
 
@@ -920,6 +925,7 @@ mod native_impl {
 					files_with_matches: 0,
 					files_searched:     0,
 					limit_reached:      None,
+					context:            Some(context_before.max(context_after)),
 				});
 			};
 			let reader = file.take(MAX_FILE_BYTES);
@@ -942,6 +948,7 @@ mod native_impl {
 					files_with_matches: 0,
 					files_searched:     1,
 					limit_reached:      None,
+					context:            Some(context_before.max(context_after)),
 				});
 			}
 
@@ -975,6 +982,7 @@ mod native_impl {
 				files_with_matches: 1,
 				files_searched: 1,
 				limit_reached: if limit_reached { Some(true) } else { None },
+				context: Some(context_before.max(context_after)),
 			});
 		}
 
@@ -1001,6 +1009,7 @@ mod native_impl {
 				files_with_matches: 0,
 				files_searched:     0,
 				limit_reached:      None,
+				context:            Some(context_before.max(context_after)),
 			});
 		}
 
@@ -1066,6 +1075,7 @@ mod native_impl {
 				files_with_matches,
 				files_searched,
 				limit_reached: None,
+				context: Some(context_before.max(context_after)),
 			});
 		}
 
@@ -1094,6 +1104,7 @@ mod native_impl {
 			files_with_matches,
 			files_searched,
 			limit_reached: if limit_reached { Some(true) } else { None },
+			context: Some(context_before.max(context_after)),
 		})
 	}
 }
@@ -1102,6 +1113,7 @@ mod native_impl {
 mod system_impl {
 	use std::{
 		io::{BufRead, BufReader},
+		path::Path,
 		process::{Command, Stdio},
 	};
 
@@ -1173,6 +1185,21 @@ mod system_impl {
 			return Err(Error::from_reason("ripgrep (rg) binary not found in PATH."));
 		}
 
+		let search_path = resolve_search_path(&options.path)?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+
+		let (current_dir, target_arg) = if metadata.is_file() {
+			(
+				search_path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+				search_path
+					.file_name()
+					.map_or_else(|| ".".to_string(), |n| n.to_string_lossy().into_owned()),
+			)
+		} else {
+			(search_path, ".".to_string())
+		};
+
 		let mut args = vec!["--json".to_string(), options.pattern.clone()];
 
 		if options.ignore_case.unwrap_or(false) {
@@ -1214,10 +1241,11 @@ mod system_impl {
 			args.push(after.to_string());
 		}
 
-		args.push(options.path.clone());
+		args.push(target_arg);
 
 		let mut child = Command::new("rg")
 			.args(&args)
+			.current_dir(current_dir)
 			.stdout(Stdio::piped())
 			.spawn()
 			.map_err(|e| Error::from_reason(format!("Failed to spawn rg: {e}")))?;
@@ -1276,6 +1304,7 @@ mod system_impl {
 			files_with_matches,
 			files_searched,
 			limit_reached: None,
+			context: None,
 		})
 	}
 }
@@ -1293,7 +1322,7 @@ mod no_impl {
 	}
 
 	pub fn grep_sync(
-		_options: GrepOptions<'_>,
+		_options: GrepConfig,
 		_on_match: Option<&ThreadsafeFunction<GrepMatch>>,
 		_ct: task::CancelToken,
 	) -> Result<GrepResult> {
@@ -1333,10 +1362,16 @@ pub fn search(content: Either<JsString, Uint8Array>, options: SearchOptions) -> 
 /// Quick check if content matches a pattern.
 #[napi(js_name = "hasMatch")]
 pub fn has_match(
-	content: Either<JsString, Uint8Array>,
-	pattern: Either<JsString, Uint8Array>,
-	ignore_case: bool,
-	multiline: bool,
+	#[allow(unused_variables, reason = "required for native search")] content: Either<
+		JsString,
+		Uint8Array,
+	>,
+	#[allow(unused_variables, reason = "required for native search")] pattern: Either<
+		JsString,
+		Uint8Array,
+	>,
+	#[allow(unused_variables, reason = "required for native search")] ignore_case: bool,
+	#[allow(unused_variables, reason = "required for native search")] multiline: bool,
 ) -> Result<bool> {
 	#[cfg(feature = "text-search-native")]
 	{
@@ -1350,12 +1385,11 @@ pub fn has_match(
 			Either::B(buf) => buf.as_ref(),
 		};
 
-		let pattern_utf8;
 		let pattern_string;
 		let pattern_ref: &str = match &pattern {
 			Either::A(js_str) => {
-				pattern_utf8 = js_str.into_utf8()?;
-				pattern_utf8.as_str()?
+				pattern_string = js_str.into_utf8()?.as_str()?.to_owned();
+				&pattern_string
 			},
 			Either::B(buf) => {
 				pattern_string = std::str::from_utf8(buf.as_ref())
@@ -1424,20 +1458,5 @@ pub fn grep(
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
 
-	#[cfg(feature = "text-search-native")]
-	{
-		task::blocking("grep", ct, move |ct| grep_sync(config, on_match.as_ref(), ct))
-	}
-
-	#[cfg(all(not(feature = "text-search-native"), feature = "text-search-system"))]
-	{
-		task::blocking("grep", ct, move |ct| grep_sync(config, on_match.as_ref(), ct))
-	}
-
-	#[cfg(all(not(feature = "text-search-native"), not(feature = "text-search-system")))]
-	{
-		task::blocking("grep", ct, move |_| {
-			Err(Error::from_reason("Text search is disabled in this build."))
-		})
-	}
+	task::blocking("grep", ct, move |ct| grep_sync(config, on_match.as_ref(), ct))
 }

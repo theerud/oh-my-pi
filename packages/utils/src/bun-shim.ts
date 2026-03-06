@@ -90,6 +90,8 @@ export function file(filePath: string) {
 			return {
 				size: s.size,
 				mtime: s.mtime,
+				isDirectory: () => s.isDirectory(),
+				isFile: () => s.isFile(),
 			};
 		},
 		slice(start?: number, end?: number) {
