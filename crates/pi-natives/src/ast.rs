@@ -1002,6 +1002,22 @@ mod system_impl {
 		}
 
 		let search_path = normalize_search_path(config.path.clone())?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+
+		let (current_dir, target_arg) = if metadata.is_file() {
+			(
+				search_path
+					.parent()
+					.unwrap_or_else(|| std::path::Path::new("."))
+					.to_path_buf(),
+				search_path
+					.file_name()
+					.map_or_else(|| ".".to_string(), |n| n.to_string_lossy().into_owned()),
+			)
+		} else {
+			(search_path, ".".to_string())
+		};
 
 		let mut args = vec!["run".to_string(), "--json=stream".to_string()];
 
@@ -1017,9 +1033,11 @@ mod system_impl {
 			args.push(lang);
 		}
 
+		args.push(target_arg);
+
 		let mut child = Command::new("ast-grep")
 			.args(&args)
-			.current_dir(search_path)
+			.current_dir(current_dir)
 			.stdout(Stdio::piped())
 			.spawn()
 			.map_err(|e| Error::from_reason(format!("Failed to spawn ast-grep: {e}")))?;
@@ -1066,10 +1084,111 @@ mod system_impl {
 	}
 
 	pub fn ast_edit_sync(
-		_config: AstReplaceConfig,
+		config: AstReplaceConfig,
 		_ct: task::CancelToken,
 	) -> Result<AstReplaceResult> {
-		Err(Error::from_reason("astEdit is only supported in native build."))
+		if !crate::utils::command_exists("ast-grep") {
+			return Err(Error::from_reason("ast-grep binary not found in PATH."));
+		}
+
+		let search_path = normalize_search_path(config.path.clone())?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+
+		let (current_dir, target_arg) = if metadata.is_file() {
+			(
+				search_path
+					.parent()
+					.unwrap_or_else(|| std::path::Path::new("."))
+					.to_path_buf(),
+				search_path
+					.file_name()
+					.map_or_else(|| ".".to_string(), |n| n.to_string_lossy().into_owned()),
+			)
+		} else {
+			(search_path, ".".to_string())
+		};
+
+		let rewrites = config.rewrites.unwrap_or_default();
+		let dry_run = config.dry_run.unwrap_or(true);
+
+		let mut all_changes = Vec::new();
+		let mut files_touched = std::collections::HashSet::new();
+
+		for (pattern, replacement) in rewrites {
+			let mut args = vec![
+				"run".to_string(),
+				"--pattern".to_string(),
+				pattern,
+				"--rewrite".to_string(),
+				replacement,
+				"--json=stream".to_string(),
+			];
+
+			if let Some(lang) = &config.lang {
+				args.push("-l".to_string());
+				args.push(lang.clone());
+			}
+
+			if !dry_run {
+				args.push("--update-all".to_string());
+			}
+
+			args.push(target_arg.clone());
+
+			let mut child = Command::new("ast-grep")
+				.args(&args)
+				.current_dir(&current_dir)
+				.stdout(Stdio::piped())
+				.spawn()
+				.map_err(|e| Error::from_reason(format!("Failed to spawn ast-grep: {e}")))?;
+
+			let stdout = child.stdout.take().unwrap();
+			let reader = BufReader::new(stdout);
+
+			for line in reader.lines() {
+				let line = line.map_err(|e| {
+					Error::from_reason(format!("Error reading ast-grep output: {e}"))
+				})?;
+				if let Ok(m) = serde_json::from_str::<AstGrepMatch>(&line) {
+					files_touched.insert(m.path.clone());
+					all_changes.push(AstReplaceChange {
+						path: m.path,
+						before: m.text,
+						after: m.replacement.unwrap_or_default(),
+						byte_start: m.range.byte_offset.start,
+						byte_end: m.range.byte_offset.end,
+						deleted_length: m.range.byte_offset.end.saturating_sub(m.range.byte_offset.start),
+						start_line: m.range.start.line + 1,
+						start_column: m.range.start.column + 1,
+						end_line: m.range.end.line + 1,
+						end_column: m.range.end.column + 1,
+					});
+				}
+			}
+			let _ = child.wait();
+		}
+
+		let mut file_counts = HashMap::new();
+		for change in &all_changes {
+			*file_counts.entry(change.path.clone()).or_insert(0) += 1;
+		}
+
+		let file_changes = file_counts
+			.into_iter()
+			.map(|(path, count)| AstReplaceFileChange { path, count })
+			.collect();
+
+		Ok(AstReplaceResult {
+			total_replacements: all_changes.len() as u32,
+			files_touched: files_touched.len() as u32,
+			files_searched: 0,
+			applied: !dry_run,
+			limit_reached: false,
+			parse_errors: None,
+			changes: all_changes,
+			file_changes,
+		})
 	}
 }
 
