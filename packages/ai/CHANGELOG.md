@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [13.9.8] - 2026-03-08
+### Fixed
+
+- Fixed WebSocket stream fallback logic to safely replay buffered output over SSE when WebSocket fails after partial content has been streamed
+
+## [13.9.4] - 2026-03-07
+### Changed
+
+- Simplified API key credential storage to always replace existing credentials on re-login instead of accumulating multiple keys
+- Updated Kagi API key placeholder from `kagi_...` to `KG_...` to match current API key format
+- Updated Kagi login instructions to clarify Search API access is beta-only and provide support contact
+- Disabled usage reporting in streaming responses for Cerebras models due to compatibility issues
+
+### Fixed
+
+- Fixed Cerebras model compatibility by preventing `stream_options` usage requests in chat completions
+
+## [13.9.3] - 2026-03-07
 ### Breaking Changes
 
 - Changed `reasoning` parameter from `ThinkingLevel | undefined` to `Effort | undefined` in `SimpleStreamOptions`; 'off' is no longer valid (omit the field instead)
@@ -32,6 +50,8 @@
 
 ### Changed
 
+- Changed credential disabling mechanism from boolean `disabled` flag to `disabled_cause` text field for tracking why credentials were disabled
+- Changed `deleteAuthCredential()` and `deleteAuthCredentialsForProvider()` methods to require a `disabledCause` parameter explaining the reason for disabling
 - Changed Gemini model parsing to strip `-preview` suffix for consistent model identification
 - Changed OpenAI Codex websocket error handling to detect fatal connection errors and immediately fall back to SSE without retrying
 - Changed OpenAI Codex to always use websockets v2 protocol (removed v1 support)
@@ -65,6 +85,7 @@
 
 ### Fixed
 
+- Fixed credential purging to respect disabled credentials when deduplicating by email, preventing re-enablement of intentionally disabled credentials
 - Fixed OpenAI Codex websocket error reporting to include detailed error messages from error events
 - Fixed conversation history reconstruction to support incremental updates from multiple assistant messages while maintaining backward compatibility with full-snapshot payloads
 - Fixed OpenAI Codex to reject unsupported effort levels instead of silently clamping them, providing clear error messages about supported efforts
@@ -73,6 +94,8 @@
 - Fixed OpenAI Codex streaming to properly include service_tier in SSE payloads
 - Fixed type safety in OpenAI responses by removing unsafe type casts on image content blocks
 - Fixed credential purging to respect disabled credentials when deduplicating by email
+- Fixed API-key provider re-login to replace the active stored key instead of appending stale credentials that were still selected first
+- Fixed Kagi login guidance to use the correct `KG_...` key format and mention Search API beta access requirements
 
 ## [13.9.2] - 2026-03-05
 
