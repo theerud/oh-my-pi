@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [13.9.10] - 2026-03-08
+
+### Added
+
+- Added `identity_key` column to auth credentials storage for improved credential deduplication
+- Added schema versioning system to auth credentials database for safer migrations
+- Added automatic backfilling of identity keys during database schema migrations
+
+### Changed
+
+- Changed credential deduplication logic to use single identity key instead of multiple identifiers for better performance
+- Changed database schema to store normalized identity keys alongside credentials
+- Changed auth schema migration to support upgrading from legacy database versions with automatic data backfill
+
+### Fixed
+
+- Fixed API key credential matching to correctly identify when the same key is re-stored, preventing unnecessary row duplication on re-login
+- Fixed credential deduplication to correctly handle OAuth accounts with matching emails but different account IDs
+- Fixed API key replacement to reuse existing stored rows instead of accumulating disabled duplicates
+- Fixed auth storage to preserve newer recorded schema versions when opened by older binaries
+
 ## [13.9.8] - 2026-03-08
 ### Fixed
 
