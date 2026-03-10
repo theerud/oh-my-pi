@@ -527,6 +527,15 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: { tab: "tools", label: "Enable Notebook", description: "Enable the notebook tool for notebook editing" },
 	},
+	"inspect_image.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Enable Inspect Image",
+			description: "Enable the inspect_image tool, delegating image understanding to a vision-capable model",
+		},
+	},
 	"checkpoint.enabled": {
 		type: "boolean",
 		default: false,
@@ -540,15 +549,6 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "Enable Fetch", description: "Enable the fetch tool for URL fetching" },
-	},
-	"fetch.useKagiSummarizer": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			label: "Use Kagi in Fetch",
-			description: "Use Kagi Universal Summarizer when rendering HTML in fetch",
-		},
 	},
 	"web_search.enabled": {
 		type: "boolean",
@@ -820,6 +820,7 @@ export const SETTINGS_SCHEMA = {
 			"anthropic",
 			"gemini",
 			"codex",
+			"tavily",
 			"kagi",
 			"synthetic",
 		] as const,

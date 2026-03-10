@@ -6,15 +6,7 @@ import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Loader, SlashCommand } from "@oh-my-pi/pi-tui";
-import {
-	CombinedAutocompleteProvider,
-	Container,
-	Markdown,
-	ProcessTerminal,
-	Spacer,
-	Text,
-	TUI,
-} from "@oh-my-pi/pi-tui";
+import { Container, Markdown, ProcessTerminal, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, hsvToRgb, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { KeybindingsManager } from "../config/keybindings";
@@ -123,6 +115,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	retryEscapeHandler?: () => void;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: { text: string; images?: ImageContent[] }) => void;
+	optimisticUserMessageSignature: string | undefined = undefined;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
 	shutdownRequested = false;
@@ -389,7 +382,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			name: cmd.name,
 			description: cmd.description,
 		}));
-		const autocompleteProvider = new CombinedAutocompleteProvider(
+		const autocompleteProvider = this.#inputController.createAutocompleteProvider(
 			[...this.#pendingSlashCommands, ...fileSlashCommands],
 			basePath,
 		);
@@ -855,6 +848,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showError(message: string): void {
+		this.optimisticUserMessageSignature = undefined;
 		this.#uiHelpers.showError(message);
 	}
 

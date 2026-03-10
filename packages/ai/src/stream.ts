@@ -83,6 +83,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	jina: "JINA_API_KEY",
 	brave: "BRAVE_API_KEY",
 	perplexity: "PERPLEXITY_API_KEY",
+	tavily: "TAVILY_API_KEY",
 	kagi: "KAGI_API_KEY",
 	// GitHub Copilot uses GitHub personal access token
 	"github-copilot": () => $pickenv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
@@ -390,7 +391,7 @@ function resolveOpenAiReasoningEffort<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): Effort | undefined {
 	const reasoning = options?.reasoning;
-	if (!reasoning) return undefined;
+	if (!reasoning || !model.reasoning) return undefined;
 	return requireSupportedEffort(model, reasoning);
 }
 
@@ -423,9 +424,9 @@ function mapOptionsForApi<TApi extends Api>(
 
 	switch (model.api) {
 		case "anthropic-messages": {
-			// Explicitly disable thinking when reasoning is not specified
+			// Explicitly disable thinking when reasoning is not specified or model doesn't support it
 			const reasoning = options?.reasoning;
-			if (!reasoning) {
+			if (!reasoning || !model.reasoning) {
 				return castApi<"anthropic-messages">({
 					...base,
 					thinkingEnabled: false,
@@ -547,10 +548,10 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 
 		case "google-generative-ai": {
-			// Explicitly disable thinking when reasoning is not specified
+			// Explicitly disable thinking when reasoning is not specified or model doesn't support it
 			// This is needed because Gemini has "dynamic thinking" enabled by default
 			const reasoning = options?.reasoning;
-			if (!reasoning) {
+			if (!reasoning || !model.reasoning) {
 				return castApi<"google-generative-ai">({
 					...base,
 					thinking: { enabled: false },
@@ -586,7 +587,7 @@ function mapOptionsForApi<TApi extends Api>(
 
 		case "google-gemini-cli": {
 			const reasoning = options?.reasoning;
-			if (!reasoning) {
+			if (!reasoning || !model.reasoning) {
 				return castApi<"google-gemini-cli">({
 					...base,
 					thinking: { enabled: false },
@@ -636,9 +637,9 @@ function mapOptionsForApi<TApi extends Api>(
 		}
 
 		case "google-vertex": {
-			// Explicitly disable thinking when reasoning is not specified
+			// Explicitly disable thinking when reasoning is not specified or model doesn't support it
 			const reasoning = options?.reasoning;
-			if (!reasoning) {
+			if (!reasoning || !model.reasoning) {
 				return castApi<"google-vertex">({
 					...base,
 					thinking: { enabled: false },

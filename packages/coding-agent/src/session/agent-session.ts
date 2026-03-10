@@ -261,7 +261,6 @@ export interface HandoffResult {
 interface HandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
-	skipPostPromptRecoveryWait?: boolean;
 }
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -3242,16 +3241,20 @@ export class AgentSession {
 			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
-			await this.#promptWithMessage(
-				{
-					role: "developer",
-					content: [{ type: "text", text: handoffPrompt }],
-					attribution: "agent",
-					timestamp: Date.now(),
-				},
-				handoffPrompt,
-				{ skipCompactionCheck: true, skipPostPromptRecoveryWait: options?.skipPostPromptRecoveryWait },
-			);
+			this.#promptInFlightCount++;
+			try {
+				this.agent.setSystemPrompt(this.#baseSystemPrompt);
+				await this.#promptAgentWithIdleRetry([
+					{
+						role: "developer",
+						content: [{ type: "text", text: handoffPrompt }],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				]);
+			} finally {
+				this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+			}
 			await completionPromise;
 
 			if (handoffCancelled || handoffSignal.aborted) {
@@ -3723,11 +3726,11 @@ export class AgentSession {
 		let action: "context-full" | "handoff" =
 			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
-		// Properly abort and null existing controller before replacing
-		if (this.#autoCompactionAbortController) {
-			this.#autoCompactionAbortController.abort();
-		}
-		this.#autoCompactionAbortController = new AbortController();
+		// Abort any older auto-compaction before installing this run's controller.
+		this.#autoCompactionAbortController?.abort();
+		const autoCompactionAbortController = new AbortController();
+		this.#autoCompactionAbortController = autoCompactionAbortController;
+		const autoCompactionSignal = autoCompactionAbortController.signal;
 
 		try {
 			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
@@ -3735,10 +3738,9 @@ export class AgentSession {
 				const handoffResult = await this.handoff(handoffFocus, {
 					autoTriggered: true,
 					signal: this.#autoCompactionAbortController.signal,
-					skipPostPromptRecoveryWait: true,
 				});
 				if (!handoffResult) {
-					const aborted = this.#autoCompactionAbortController.signal.aborted;
+					const aborted = autoCompactionSignal.aborted;
 					if (aborted) {
 						await this.#emitSessionEvent({
 							type: "auto_compaction_end",
@@ -3822,7 +3824,7 @@ export class AgentSession {
 					preparation,
 					branchEntries: pathEntries,
 					customInstructions: undefined,
-					signal: this.#autoCompactionAbortController.signal,
+					signal: autoCompactionSignal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
@@ -3882,21 +3884,14 @@ export class AgentSession {
 					let attempt = 0;
 					while (true) {
 						try {
-							compactResult = await compact(
-								preparation,
-								candidate,
-								apiKey,
-								undefined,
-								this.#autoCompactionAbortController.signal,
-								{
-									promptOverride: hookPrompt,
-									extraContext: hookContext,
-									remoteInstructions: this.#baseSystemPrompt,
-								},
-							);
+							compactResult = await compact(preparation, candidate, apiKey, undefined, autoCompactionSignal, {
+								promptOverride: hookPrompt,
+								extraContext: hookContext,
+								remoteInstructions: this.#baseSystemPrompt,
+							});
 							break;
 						} catch (error) {
-							if (this.#autoCompactionAbortController.signal.aborted) {
+							if (autoCompactionSignal.aborted) {
 								throw error;
 							}
 
@@ -3940,7 +3935,7 @@ export class AgentSession {
 								error: message,
 								model: `${candidate.provider}/${candidate.id}`,
 							});
-							await abortableSleep(delayMs, this.#autoCompactionAbortController.signal);
+							await abortableSleep(delayMs, autoCompactionSignal);
 						}
 					}
 
@@ -3964,7 +3959,7 @@ export class AgentSession {
 				preserveData = { ...(preserveData ?? {}), ...(compactResult.preserveData ?? {}) };
 			}
 
-			if (this.#autoCompactionAbortController.signal.aborted) {
+			if (autoCompactionSignal.aborted) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -4054,7 +4049,7 @@ export class AgentSession {
 				});
 			}
 		} catch (error) {
-			if (this.#autoCompactionAbortController?.signal.aborted) {
+			if (autoCompactionSignal.aborted) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -4077,7 +4072,9 @@ export class AgentSession {
 						: `Auto-compaction failed: ${errorMessage}`,
 			});
 		} finally {
-			this.#autoCompactionAbortController = undefined;
+			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
+				this.#autoCompactionAbortController = undefined;
+			}
 		}
 	}
 

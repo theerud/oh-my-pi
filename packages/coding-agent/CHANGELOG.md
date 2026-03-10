@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [13.9.12] - 2026-03-09
+### Added
+
+- Added Tavily as a supported web search provider with `TAVILY_API_KEY` credential discovery and provider fallback support
+- Added `#`-triggered prompt action suggestions in the editor, with keybinding hints for line navigation and prompt copy actions
+- Added Tavily as a supported web search provider with `TAVILY_API_KEY` credential discovery and provider fallback support ([#313](https://github.com/can1357/oh-my-pi/issues/313))
+
+### Removed
+
+- Removed Kagi Universal Summarizer integration from fetch tool—HTML rendering now uses jina, trafilatura, and lynx only
+- Removed `fetch.useKagiSummarizer` setting
+- Removed Kagi summarization from YouTube video handling
+
+### Fixed
+
+- Canonicalized bash executor working directories before handing them to brush so `pwd` stays aligned with canonical Git worktree paths in symlinked workspaces
+
 ## [13.9.10] - 2026-03-08
 ### Added
 

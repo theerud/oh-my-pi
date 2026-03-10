@@ -13,25 +13,33 @@ import type {
 } from "openai/resources/responses/responses";
 import { calculateCost } from "../models";
 import { getEnvApiKey } from "../stream";
-import type {
-	Api,
-	AssistantMessage,
-	CacheRetention,
-	Context,
-	Model,
-	ServiceTier,
-	StopReason,
-	StreamFunction,
-	StreamOptions,
-	TextContent,
-	ThinkingContent,
-	Tool,
-	ToolCall,
-	ToolChoice,
+import {
+	type Api,
+	type AssistantMessage,
+	type CacheRetention,
+	type Context,
+	isSpecialServiceTier,
+	type Model,
+	type ServiceTier,
+	type StopReason,
+	type StreamFunction,
+	type StreamOptions,
+	type TextContent,
+	type ThinkingContent,
+	type Tool,
+	type ToolCall,
+	type ToolChoice,
 } from "../types";
-import { normalizeResponsesToolCallId, resolveCacheRetention } from "../utils";
+import {
+	createOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesHistoryItems,
+	getOpenAIResponsesHistoryPayload,
+	normalizeResponsesToolCallId,
+	resolveCacheRetention,
+} from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
@@ -116,6 +124,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { client, copilotPremiumRequests, baseUrl } = createClient(model, context, apiKey, options?.headers);
 			const { params } = buildParams(model, context, options);
+			const requestAbortController = new AbortController();
+			const requestSignal = options?.signal
+				? AbortSignal.any([options.signal, requestAbortController.signal])
+				: requestAbortController.signal;
 			options?.onPayload?.(params);
 			rawRequestDump = {
 				provider: model.provider,
@@ -125,10 +137,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				url: `${baseUrl ?? "https://api.openai.com/v1"}/responses`,
 				body: params,
 			};
-			const openaiStream = await client.responses.create(
-				params,
-				options?.signal ? { signal: options.signal } : undefined,
-			);
+			const openaiStream = await client.responses.create(params, { signal: requestSignal });
 			if (copilotPremiumRequests !== undefined) output.usage.premiumRequests = copilotPremiumRequests;
 			stream.push({ type: "start", partial: output });
 
@@ -138,7 +147,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			const blockIndex = () => blocks.length - 1;
 			const nativeOutputItems: Array<Record<string, unknown>> = [];
 
-			for await (const event of openaiStream) {
+			for await (const event of iterateWithIdleTimeout(openaiStream, {
+				idleTimeoutMs: getOpenAIStreamIdleTimeoutMs(),
+				errorMessage: "OpenAI responses stream stalled while waiting for the next event",
+				onIdle: () => requestAbortController.abort(),
+			})) {
 				// Handle output item start
 				if (event.type === "response.output_item.added") {
 					if (!firstTokenTime) firstTokenTime = Date.now();
@@ -368,11 +381,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				throw new Error("An unknown error occurred");
 			}
 
-			output.providerPayload = {
-				type: "openaiResponsesHistory",
-				dt: true,
-				items: nativeOutputItems,
-			};
+			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
 
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -488,8 +497,7 @@ function buildParams(
 	if (options?.repetitionPenalty !== undefined) {
 		params.repetition_penalty = options.repetitionPenalty;
 	}
-
-	if (options?.serviceTier !== undefined) {
+	if (isSpecialServiceTier(options?.serviceTier)) {
 		params.service_tier = options.serviceTier;
 	}
 
@@ -544,15 +552,6 @@ function supportsStrictMode(model: Model<"openai-responses">): boolean {
 	);
 }
 
-function getOpenAIResponsesHistoryItems(
-	providerPayload: { type?: string; items?: unknown } | undefined,
-): ResponseInput | undefined {
-	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) {
-		return undefined;
-	}
-	return providerPayload.items as ResponseInput;
-}
-
 function collectKnownCallIds(messages: ResponseInput): Set<string> {
 	const knownCallIds = new Set<string>();
 	for (const item of messages) {
@@ -592,8 +591,10 @@ function convertConversationMessages(
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
-			const providerPayload = (msg as { providerPayload?: { type?: string; items?: unknown } }).providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload);
+			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
+			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
+				| Array<ResponseInput[number]>
+				| undefined;
 			if (historyItems) {
 				messages.push(...historyItems);
 				knownCallIds = collectKnownCallIds(messages);
@@ -638,9 +639,13 @@ function convertConversationMessages(
 				});
 			}
 		} else if (msg.role === "assistant") {
-			const providerPayload = (msg as { providerPayload?: { type?: string; dt?: boolean; items?: unknown } })
-				.providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload);
+			const assistantMsg = msg as AssistantMessage;
+			const providerPayload = getOpenAIResponsesHistoryPayload(
+				assistantMsg.providerPayload,
+				model.provider,
+				assistantMsg.provider,
+			);
+			const historyItems = providerPayload?.items as Array<ResponseInput[number]> | undefined;
 			if (historyItems) {
 				if (providerPayload?.dt) {
 					messages.push(...historyItems);
@@ -653,7 +658,6 @@ function convertConversationMessages(
 			}
 
 			const output: ResponseInput = [];
-			const assistantMsg = msg as AssistantMessage;
 
 			// Check if this message is from a different model (same provider, different model ID).
 			// For such messages, tool call IDs with fc_ prefix need to be stripped to avoid

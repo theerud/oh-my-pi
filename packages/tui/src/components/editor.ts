@@ -2,7 +2,7 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AutocompleteProvider, CombinedAutocompleteProvider } from "../autocomplete";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { type EditorKeybindingsManager, getEditorKeybindings } from "../keybindings";
-import { matchesKey } from "../keys";
+import { extractPrintableText, matchesKey } from "../keys";
 import { KillRing } from "../kill-ring";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
@@ -255,62 +255,6 @@ function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
 	return chunks.length > 0 ? chunks : [{ text: "", startIndex: 0, endIndex: 0 }];
 }
 
-// Kitty CSI-u sequences for printable keys, including optional shifted/base codepoints and text field.
-const KITTY_CSI_U_REGEX = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?(?:;([\d:]*))?u$/;
-const KITTY_MOD_SHIFT = 1;
-const KITTY_MOD_ALT = 2;
-const KITTY_MOD_CTRL = 4;
-
-// Decode a printable CSI-u sequence, preferring the shifted key when present.
-function decodeKittyPrintable(data: string): string | undefined {
-	const match = data.match(KITTY_CSI_U_REGEX);
-	if (!match) return undefined;
-
-	// CSI-u groups: <codepoint>[:<shifted>[:<base>]];<mod>u
-	const codepoint = Number.parseInt(match[1] ?? "", 10);
-	if (!Number.isFinite(codepoint)) return undefined;
-
-	const shiftedKey = match[2] && match[2].length > 0 ? Number.parseInt(match[2], 10) : undefined;
-	const modValue = match[4] ? Number.parseInt(match[4], 10) : 1;
-	// Modifiers are 1-indexed in CSI-u; normalize to our bitmask.
-	const modifier = Number.isFinite(modValue) ? modValue - 1 : 0;
-
-	// Ignore CSI-u sequences used for Alt/Ctrl shortcuts.
-	if (modifier & (KITTY_MOD_ALT | KITTY_MOD_CTRL)) return undefined;
-
-	const textField = match[6];
-	if (textField && textField.length > 0) {
-		const codepoints = textField
-			.split(":")
-			.filter(Boolean)
-			.map(value => Number.parseInt(value, 10))
-			.filter(value => Number.isFinite(value) && value >= 32);
-		if (codepoints.length > 0) {
-			try {
-				return String.fromCodePoint(...codepoints);
-			} catch {
-				return undefined;
-			}
-		}
-	}
-
-	// Prefer the shifted keycode when Shift is held.
-	let effectiveCodepoint = codepoint;
-	if (modifier & KITTY_MOD_SHIFT && typeof shiftedKey === "number") {
-		effectiveCodepoint = shiftedKey;
-	}
-	if (effectiveCodepoint >= 0xe000 && effectiveCodepoint <= 0xf8ff) {
-		return undefined;
-	}
-	// Drop control characters or invalid codepoints.
-	if (!Number.isFinite(effectiveCodepoint) || effectiveCodepoint < 32) return undefined;
-
-	try {
-		return String.fromCodePoint(effectiveCodepoint);
-	} catch {
-		return undefined;
-	}
-}
 const DEFAULT_PAGE_SCROLL_LINES = 10;
 
 interface EditorState {
@@ -757,11 +701,11 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			if (data.charCodeAt(0) >= 32) {
-				// Printable character - perform the jump
+			const printableText = extractPrintableText(data);
+			if (printableText) {
 				const direction = this.#jumpMode;
 				this.#jumpMode = null;
-				this.#jumpToChar(data, direction);
+				this.#jumpToChar(printableText, direction);
 				return;
 			}
 
@@ -845,6 +789,8 @@ export class Editor implements Component, Focusable {
 						if (this.onChange) {
 							this.onChange(this.getText());
 						}
+
+						result.onApplied?.();
 					}
 					return;
 				}
@@ -874,6 +820,7 @@ export class Editor implements Component, Focusable {
 							this.#state.lines = result.lines;
 							this.#state.cursorLine = result.cursorLine;
 							this.#setCursorCol(result.cursorCol);
+							result.onApplied?.();
 						}
 						this.#cancelAutocomplete();
 					}
@@ -900,6 +847,8 @@ export class Editor implements Component, Focusable {
 						if (this.onChange) {
 							this.onChange(this.getText());
 						}
+
+						result.onApplied?.();
 					}
 					return;
 				}
@@ -1066,16 +1015,11 @@ export class Editor implements Component, Focusable {
 		} else if (kb.matches(data, "jumpBackward")) {
 			this.#jumpMode = "backward";
 		}
-		// Kitty CSI-u printable characters (shifted symbols like @, ?, {, })
+		// Printable keystrokes, including Kitty CSI-u text-producing sequences.
 		else {
-			const kittyChar = decodeKittyPrintable(data);
-			if (kittyChar) {
-				this.insertText(kittyChar);
-				return;
-			}
-			// Regular characters (printable characters and unicode, but not control characters)
-			if (data.charCodeAt(0) >= 32) {
-				this.#insertCharacter(data);
+			const printableText = extractPrintableText(data);
+			if (printableText) {
+				this.#insertCharacter(printableText);
 			}
 		}
 	}
@@ -1193,6 +1137,14 @@ export class Editor implements Component, Focusable {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
 	}
 
+	moveToLineStart(): void {
+		this.#moveToLineStart();
+	}
+
+	moveToLineEnd(): void {
+		this.#moveToLineEnd();
+	}
+
 	setText(text: string): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
@@ -1261,7 +1213,11 @@ export class Editor implements Component, Focusable {
 					this.#tryTriggerAutocomplete();
 				}
 			}
-			// Also auto-trigger when typing letters/path chars in a slash command context
+			// Auto-trigger for "#" prompt actions anywhere in the current token
+			else if (char === "#") {
+				this.#tryTriggerAutocomplete();
+			}
+			// Also auto-trigger when typing letters/path chars in a completable context
 			else if (/[a-zA-Z0-9.\-_/]/.test(char)) {
 				const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
@@ -1271,6 +1227,10 @@ export class Editor implements Component, Focusable {
 				}
 				// Check if we're in an @ file reference context
 				else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+					this.#tryTriggerAutocomplete();
+				}
+				// Check if we're in a # prompt action context
+				else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 					this.#tryTriggerAutocomplete();
 				}
 			}
@@ -1446,6 +1406,10 @@ export class Editor implements Component, Focusable {
 			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
 				this.#tryTriggerAutocomplete();
 			}
+			// # prompt action context
+			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
+				this.#tryTriggerAutocomplete();
+			}
 		}
 	}
 
@@ -1581,6 +1545,8 @@ export class Editor implements Component, Focusable {
 			if (textBeforeCursor.trimStart().startsWith("/")) {
 				this.#tryTriggerAutocomplete();
 			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				this.#tryTriggerAutocomplete();
+			} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 				this.#tryTriggerAutocomplete();
 			}
 		}
@@ -1871,6 +1837,10 @@ export class Editor implements Component, Focusable {
 			}
 			// @ file reference context
 			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				this.#tryTriggerAutocomplete();
+			}
+			// # prompt action context
+			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 				this.#tryTriggerAutocomplete();
 			}
 		}

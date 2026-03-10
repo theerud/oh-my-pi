@@ -151,6 +151,10 @@ export type CacheRetention = "none" | "short" | "long";
 /** OpenAI service tier for processing priority. Only applies to OpenAI-compatible APIs. */
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
+export function isSpecialServiceTier(serviceTier?: ServiceTier | null): serviceTier is "flex" | "scale" | "priority" {
+	return serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority";
+}
+
 export interface ProviderSessionState {
 	close(): void;
 }
@@ -289,6 +293,7 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
 export interface OpenAIResponsesHistoryPayload {
 	type: "openaiResponsesHistory";
+	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
 }

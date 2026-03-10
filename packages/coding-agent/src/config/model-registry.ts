@@ -35,7 +35,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
 
-export type ModelRole = "default" | "smol" | "slow" | "plan" | "commit";
+export type ModelRole = "default" | "smol" | "slow" | "vision" | "plan" | "commit";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -47,11 +47,12 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	default: { tag: "DEFAULT", name: "Default", color: "success" },
 	smol: { tag: "SMOL", name: "Fast", color: "warning" },
 	slow: { tag: "SLOW", name: "Thinking", color: "accent" },
+	vision: { tag: "VISION", name: "Vision", color: "error" },
 	plan: { tag: "PLAN", name: "Architect", color: "muted" },
 	commit: { tag: "COMMIT", name: "Commit", color: "dim" },
 };
 
-export const MODEL_ROLE_IDS: ModelRole[] = ["default", "smol", "slow", "plan", "commit"];
+export const MODEL_ROLE_IDS: ModelRole[] = ["default", "smol", "slow", "vision", "plan", "commit"];
 
 const OpenRouterRoutingSchema = Type.Object({
 	only: Type.Optional(Type.Array(Type.String())),
@@ -1066,10 +1067,9 @@ export class ModelRegistry {
 			return applyModelOverride(model, override);
 		});
 	}
-
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		return models.map(model => {
-			if (model.id === "gpt-5.4") {
+			if (model.id === "gpt-5.4" && model.provider !== "github-copilot") {
 				return { ...model, contextWindow: 1_000_000 };
 			}
 			return model;
