@@ -1,6 +1,40 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `assignment` field to task progress and result objects to track the raw per-task assignment text separately from the full templated task
+- Added `details` field to todo items for storing implementation specifics, file paths, and edge cases (shown only when task is active)
+- Added support for multi-line details in todo items with automatic indentation in interactive and reminder displays
+- Added `todo.eager` setting to automatically create a comprehensive todo list after the first user message
+- Added `buildNamedToolChoice` utility function to build provider-aware tool choice constraints for named tools
+- Support for comma/space-separated path lists in `find`, `grep`, `ast_grep`, and `ast_edit` tools (e.g., `apps/,packages/,phases/` or `apps/ packages/ phases/`)
+- New `resolveMultiSearchPath` and `resolveMultiFindPattern` functions to handle multi-path search inputs with automatic common base path detection
+
+### Changed
+
+- Updated task rendering to display assignment text instead of full task template when available, reducing noise in progress and result displays
+- Modified task section rendering to show trimmed assignment text without stripping context blocks, simplifying the display logic
+- Updated todo item display to show `details` field indented below active tasks in both interactive mode and todo reminder component
+- Modified tool choice resolution to support per-turn tool choice overrides via `consumeNextToolChoiceOverride()`
+- Updated tool documentation to clarify that `path` parameter accepts files, directories, glob patterns, or comma/space-separated path lists
+- Refactored path resolution logic in `find`, `grep`, `ast_grep`, and `ast_edit` tools to use unified multi-path handling
+
+### Fixed
+
+- Fixed path resolution to accept bare directory names without trailing slashes in comma/space-separated path lists (e.g., `apps packages phases`)
+- Per-role `modelRoles` thinking selectors now propagate through commit/title helper model selection, legacy commit analysis, and agentic commit sessions while preserving default thinking inheritance when no role override is configured
+
+## [13.10.1] - 2026-03-10
+### Added
+
+- Exported `submitInteractiveInput()` function for programmatic submission of user input in interactive mode
+- Added proactive OAuth token refresh for MCP server connections with 5-minute expiry buffer
+- Added reactive 401/403 retry with automatic token refresh on HTTP MCP transports
+- Added `refreshMCPOAuthToken()` for standard OAuth 2.0 refresh_token grants
+- Persisted `tokenUrl`, `clientId`, and `clientSecret` in MCP auth config for cross-session token refresh
+### Fixed
+- Respected `PI_CONFIG_DIR` when discovering native user config paths for slash commands and related config directories ([#349](https://github.com/can1357/oh-my-pi/issues/349))
 
 ## [13.10.0] - 2026-03-10
 ### Fixed

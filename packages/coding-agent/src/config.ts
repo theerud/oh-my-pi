@@ -2,7 +2,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_DIR_NAME, getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import {
+	CONFIG_DIR_NAME,
+	getAgentDir,
+	getConfigAgentDirName,
+	getProjectDir,
+	isEnoent,
+	logger,
+} from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
@@ -10,7 +17,7 @@ import { JSONC, YAML } from "bun";
 import { expandTilde } from "./tools/path-utils";
 
 const priorityList = [
-	{ dir: CONFIG_DIR_NAME, globalAgentDir: `${CONFIG_DIR_NAME}/agent` },
+	{ dir: CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
 	{ dir: ".claude" },
 	{ dir: ".codex" },
 	{ dir: ".gemini" },
@@ -255,7 +262,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
  * Project-level: .omp, .claude, .codex, .gemini
  */
 const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
-	base: () => path.join(os.homedir(), globalAgentDir ?? dir),
+	base: () => path.join(os.homedir(), globalAgentDir ? globalAgentDir() : dir),
 	name: dir,
 }));
 
