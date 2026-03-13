@@ -1,8 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+
+## [13.11.0] - 2026-03-12
 ### Added
 
+- Added Parallel as a web search provider with support for fast and research modes
+- Added Parallel extract API integration for URL content fetching and YouTube video extraction
+- Added `providers.parallelFetch` setting to enable/disable Parallel extract for URL fetching
+- Added `/login parallel` command support for Parallel API authentication
+- Added subcommands to `/copy` command: `code` (copy last code block), `all` (copy all code blocks), `cmd` (copy last bash/python command), and `last` (copy full message)
+- Added support for copying last executed bash or python command via `/copy cmd` subcommand
 - Added `assignment` field to task progress and result objects to track the raw per-task assignment text separately from the full templated task
 - Added `details` field to todo items for storing implementation specifics, file paths, and edge cases (shown only when task is active)
 - Added support for multi-line details in todo items with automatic indentation in interactive and reminder displays
@@ -13,6 +21,14 @@
 
 ### Changed
 
+- Updated HTML-to-text rendering to prefer Parallel extract when credentials are available, before falling back to jina, trafilatura, or lynx
+- Updated YouTube scraper to prefer Parallel extract when credentials are available, before falling back to yt-dlp
+- Updated web search provider priority order to include Parallel between Exa and Kagi
+- Updated hashline tool documentation with explicit guidance on `replace` operation semantics, clarifying that `lines` must not extend past `end` to avoid unintended line duplication
+- Improved diagnostic message formatting to group errors by file path with indented details for better readability
+- Modified eager todo prelude to use hidden custom message type instead of visible developer message, preventing duplicate prompt text in session history
+- Updated eager todo prompt to remove dynamic user request injection, simplifying the template and preventing request repetition in displayed messages
+- Modified eager todo enforcement to prepend the todo reminder to the first user turn instead of executing it as a separate synthetic turn, reducing unnecessary prompt calls
 - Updated task rendering to display assignment text instead of full task template when available, reducing noise in progress and result displays
 - Modified task section rendering to show trimmed assignment text without stripping context blocks, simplifying the display logic
 - Updated todo item display to show `details` field indented below active tasks in both interactive mode and todo reminder component
@@ -22,6 +38,8 @@
 
 ### Fixed
 
+- Fixed hashline line normalization to trim trailing whitespace and strip carriage returns instead of removing all whitespace, preserving intentional spacing in code
+- Fixed noop detection in hashline replace operations to check array length equality before comparing lines, preventing false noop classification when single-line replacements expand to multiple lines
 - Fixed path resolution to accept bare directory names without trailing slashes in comma/space-separated path lists (e.g., `apps packages phases`)
 - Per-role `modelRoles` thinking selectors now propagate through commit/title helper model selection, legacy commit analysis, and agentic commit sessions while preserving default thinking inheritance when no role override is configured
 
