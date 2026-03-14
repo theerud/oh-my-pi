@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [13.11.1] - 2026-03-13
+
+### Fixed
+
+- Added `llama.cpp` as local provider
+- Fixed auth schema V0-to-V1 migration crash when the V0 table lacks a `disabled` column
+
 ## [13.11.0] - 2026-03-12
 ### Added
 
