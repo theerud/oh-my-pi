@@ -72,7 +72,20 @@ async function main() {
 	await fs.writeFile(path.join(stagingDir, "package.json"), JSON.stringify(runtimePkg, null, 2));
 
 	console.log(`📥 Running npm install for external native modules (better-sqlite3@${sqliteVersion})...`);
-	await $`npm install --omit=dev --no-package-lock`.cwd(stagingDir);
+	// Use child_process.execSync to bypass Bun's shell environment and explicitly target the system node version
+	const { execSync } = await import("node:child_process");
+	// Find system node/npm that aren't Bun's temporary shims
+	const nodePaths = execSync("which -a node").toString().trim().split("\n");
+	const nodePath = nodePaths.find(p => !p.includes("bun")) || nodePaths[0];
+	const npmPaths = execSync("which -a npm").toString().trim().split("\n");
+	const npmPath = npmPaths.find(p => !p.includes("bun")) || npmPaths[0];
+
+	const nodeVersion = execSync(`${nodePath} -v`).toString().trim().replace("v", "");
+	execSync(`${npmPath} install --omit=dev --no-package-lock --target=${nodeVersion}`, {
+		cwd: stagingDir,
+		stdio: "inherit",
+		env: { ...process.env, npm_config_user_agent: undefined }
+	});
 
 	// 6. Create Tarball
 	console.log("\n🎁 Creating tarball...");
