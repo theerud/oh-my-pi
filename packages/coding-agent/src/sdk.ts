@@ -79,7 +79,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
-import { resolveThinkingLevelForModel, toReasoningEffort } from "./thinking";
+import { parseThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "./thinking";
 import {
 	BashTool,
 	BUILTIN_TOOLS,
@@ -227,17 +227,17 @@ export {
 	BashTool,
 	// Tool classes and factories
 	BUILTIN_TOOLS,
-	HIDDEN_TOOLS,
 	createTools,
 	EditTool,
 	FindTool,
 	GrepTool,
+	HIDDEN_TOOLS,
 	loadSshTool,
 	PythonTool,
 	ReadTool,
 	ResolveTool,
-	WriteTool,
 	type ToolSession,
+	WriteTool,
 };
 
 // Helper Functions
@@ -626,9 +626,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
-	const skillsSettings = settings.getGroup("skills") as SkillsSettings;
+	const skillsSettings = settings.getGroup("skills");
+	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
-		options.skills === undefined ? discoverSkills(cwd, agentDir, skillsSettings) : undefined;
+		options.skills === undefined
+			? discoverSkills(cwd, agentDir, { ...skillsSettings, disabledExtensions: disabledExtensionIds })
+			: undefined;
 
 	// Initialize provider preferences from settings
 	const webSearchProvider = settings.get("providers.webSearch");
@@ -702,25 +705,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	// For subagent sessions using GitHub Copilot, add X-Initiator header
-	// to ensure proper billing (agent-initiated vs user-initiated)
 	const taskDepth = options.taskDepth ?? 0;
-	const forceCopilotAgentInitiator = taskDepth > 0;
-	if (forceCopilotAgentInitiator && model?.provider === "github-copilot") {
-		model = {
-			...model,
-			headers: {
-				...model.headers,
-				"X-Initiator": "agent",
-			},
-		};
-	}
 
 	let thinkingLevel = options.thinkingLevel;
 
 	// If session has data and includes a thinking entry, restore it
 	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
-		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel | undefined;
+		thinkingLevel = parseThinkingLevel(existingSession.thinkingLevel);
 	}
 
 	if (thinkingLevel === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
@@ -944,7 +935,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// Always filter Exa - we have native integration
 				filterExa: true,
 				// Filter browser MCP servers when builtin browser tool is active
-				filterBrowser: (settings.get("browser.enabled") as boolean) ?? false,
+				filterBrowser: settings.get("browser.enabled") ?? false,
 				cacheStorage: settings.getStorage(),
 				authStorage,
 			}),
@@ -1014,16 +1005,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		extensionsResult = options.preloadedExtensions;
 	} else {
 		// Merge CLI extension paths with settings extension paths
-		const configuredPaths = [
-			...(options.additionalExtensionPaths ?? []),
-			...((settings.get("extensions") as string[]) ?? []),
-		];
+		const configuredPaths = [...(options.additionalExtensionPaths ?? []), ...(settings.get("extensions") ?? [])];
+		const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 		extensionsResult = await logger.timeAsync(
 			"discoverAndLoadExtensions",
 			discoverAndLoadExtensions,
 			configuredPaths,
 			cwd,
 			eventBus,
+			disabledExtensionIds,
 		);
 		for (const { path, error } of extensionsResult.errors) {
 			logger.error("Failed to load extension", { path, error });
@@ -1125,11 +1115,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		abort: () => {
 			session.abort();
 		},
+		settings,
 	});
 	const toolContextStore = new ToolContextStore(getSessionContext);
 
 	const registeredTools = extensionRunner?.getAllRegisteredTools() ?? [];
-	let wrappedExtensionTools: AgentTool[];
+	let wrappedExtensionTools: Tool[];
 
 	if (extensionRunner) {
 		// With extension runner: convert CustomTools to ToolDefinitions and wrap all together
@@ -1151,16 +1142,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			isIdle: () => !session?.isStreaming,
 			hasQueuedMessages: () => (session?.queuedMessageCount ?? 0) > 0,
 			abort: () => session?.abort(),
+			settings,
 		});
 		wrappedExtensionTools = (options.customTools ?? [])
 			.filter(isCustomTool)
-			.map(tool => CustomToolAdapter.wrap(tool, customToolContext) as AgentTool);
+			.map(tool => CustomToolAdapter.wrap(tool, customToolContext));
 	}
 
 	// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
-	const toolRegistry = new Map<string, AgentTool>();
+	const toolRegistry = new Map<string, Tool>();
 	for (const tool of builtinTools) {
-		toolRegistry.set(tool.name, tool as AgentTool);
+		toolRegistry.set(tool.name, tool);
 	}
 	for (const tool of wrappedExtensionTools) {
 		toolRegistry.set(tool.name, tool);
@@ -1180,7 +1172,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else if (!toolRegistry.has("resolve")) {
 		const resolveTool = await logger.timeAsync("createTools:resolve:session", HIDDEN_TOOLS.resolve, toolSession);
 		if (resolveTool) {
-			toolRegistry.set(resolveTool.name, wrapToolWithMetaNotice(resolveTool) as AgentTool);
+			toolRegistry.set(resolveTool.name, wrapToolWithMetaNotice(resolveTool));
 		}
 	}
 
@@ -1225,7 +1217,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools,
 			toolNames,
 			rules: rulebookRules,
-			skillsSettings: settings.getGroup("skills") as SkillsSettings,
+			skillsSettings: settings.getGroup("skills"),
 			appendSystemPrompt: appendPrompt,
 			repeatToolDescriptions,
 			eagerTasks,
@@ -1243,7 +1235,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools,
 				toolNames,
 				rules: rulebookRules,
-				skillsSettings: settings.getGroup("skills") as SkillsSettings,
+				skillsSettings: settings.getGroup("skills"),
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: appendPrompt,
 				repeatToolDescriptions,
@@ -1304,17 +1296,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					if (hasImages) {
 						const filteredContent = content
 							.map(c => (c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c))
-							.filter(
-								(c, i, arr) =>
-									// Dedupe consecutive "Image reading is disabled." texts
-									!(
-										c.type === "text" &&
-										c.text === "Image reading is disabled." &&
-										i > 0 &&
-										arr[i - 1].type === "text" &&
-										(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
-									),
-							);
+							.filter((c, i, arr) => {
+								// Dedupe consecutive "Image reading is disabled." texts
+								if (!(c.type === "text" && c.text === "Image reading is disabled." && i > 0)) return true;
+								const prev = arr[i - 1];
+								return !(prev.type === "text" && prev.text === "Image reading is disabled.");
+							});
 						return { ...msg, content: filteredContent };
 					}
 				}
@@ -1340,6 +1327,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (!obfuscator?.hasSecrets()) return converted;
 		return obfuscateMessages(obfuscator, converted);
 	};
+	const transformContext = extensionRunner
+		? async (messages: AgentMessage[], _signal?: AbortSignal) => {
+				return await extensionRunner.emitContext(messages);
+			}
+		: undefined;
+	const onPayload = extensionRunner
+		? async (payload: unknown, _model?: Model) => {
+				return await extensionRunner.emitBeforeProviderRequest(payload);
+			}
+		: undefined;
 
 	const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 		toolContextStore.setUIContext(uiContext, hasUI);
@@ -1362,17 +1359,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: initialTools,
 		},
 		convertToLlm: convertToLlmFinal,
-		onPayload: extensionRunner
-			? async (payload, _model) => {
-					return extensionRunner.emitBeforeProviderRequest(payload);
-				}
-			: undefined,
+		onPayload,
 		sessionId: sessionManager.getSessionId(),
-		transformContext: extensionRunner
-			? async messages => {
-					return extensionRunner.emitContext(messages);
-				}
-			: undefined,
+		transformContext,
 		steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 		followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 		interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -1444,12 +1433,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		customCommands: customCommandsResult.commands,
 		skills,
 		skillWarnings,
-		skillsSettings: settings.getGroup("skills") as Required<SkillsSettings>,
+		skillsSettings: settings.getGroup("skills"),
 		modelRegistry,
 		toolRegistry,
+		transformContext,
+		onPayload,
+		convertToLlm: convertToLlmFinal,
 		rebuildSystemPrompt,
 		ttsrManager,
-		forceCopilotAgentInitiator,
 		obfuscator,
 		asyncJobManager,
 		pendingActionStore,
@@ -1517,7 +1508,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		mcpManager.setOnResourcesChanged((serverName, uri) => {
 			logger.debug("MCP resources changed", { path: `mcp:${serverName}`, uri });
 			if (!settings.get("mcp.notifications")) return;
-			const debounceMs = (settings.get("mcp.notificationDebounceMs") as number) ?? 500;
+			const debounceMs = settings.get("mcp.notificationDebounceMs");
 			const key = `${serverName}:${uri}`;
 			const existing = notificationDebounceTimers.get(key);
 			if (existing) clearTimeout(existing);

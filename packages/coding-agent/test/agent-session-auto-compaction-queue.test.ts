@@ -78,7 +78,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path());
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		getRuntimeSignals().length = 0;
 
 		const extensionsResult = await loadExtensions([extensionPath], tempDir.path());
@@ -126,6 +126,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 	afterEach(async () => {
 		await session.dispose();
+		authStorage.close();
 		tempDir.removeSync();
 		vi.useRealTimers();
 		getRuntimeSignals().length = 0;

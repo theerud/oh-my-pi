@@ -2,6 +2,145 @@
 
 ## [Unreleased]
 
+## [13.12.6] - 2026-03-15
+### Changed
+
+- Updated llama.cpp model discovery to read context window from the `/props` endpoint's `default_generation_settings.n_ctx` field instead of using hardcoded 128000 default
+- Updated llama.cpp model discovery to detect vision capabilities from the `/props` endpoint's `modalities.vision` field instead of defaulting to text-only input
+- Changed llama.cpp `maxTokens` calculation to respect discovered context window limits, capping at 8192 or the server's context window, whichever is smaller
+
+### Fixed
+
+- Fixed llama.cpp auto-discovery to read context window and vision support from the native `/props` endpoint instead of relying on hardcoded defaults
+
+## [13.12.5] - 2026-03-15
+
+### Added
+
+- Automatic discovery of Ollama model context window from model metadata, enabling accurate token limit configuration
+- Added `attribution` option to `PromptOptions` to explicitly control billing/initiator attribution for prompts
+- Added automatic clearing of completed and abandoned todo tasks after ~1 minute
+
+### Changed
+
+- Ollama model registration now uses discovered context window instead of hardcoded 128000 token default
+- Ollama model maxTokens now respects discovered context window constraints
+- Improved session directory migration to handle legacy absolute paths with double-dash format, automatically relocating them to new canonical locations
+- Enhanced session directory encoding to use `-tmp-` prefix for temporary directories instead of legacy double-dash format for better clarity
+- Updated `SessionManager.create()` to require both `cwd` and `sessionDir` parameters for explicit session directory control
+- Improved session directory naming for temporary working directories using `-tmp-` prefix instead of legacy `--` format
+- Made `cwd` and `sessionDir` fields mutable in SessionManager to support session relocation without type casting
+- Changed subagent prompts to explicitly set `attribution: "agent"` for accurate billing attribution
+- Strip already-completed tasks when restoring session from branch history
+
+### Fixed
+
+- Fixed automatic migration of legacy session directories to new `-tmp-` prefixed naming scheme for temp-root sessions
+
+## [13.12.4] - 2026-03-15
+### Added
+
+- Exposed `settings` instance in `CustomToolContext` for session-specific configuration access
+
+### Changed
+
+- Improved artifact spill configuration to use session settings with schema defaults as fallback
+- Refactored type annotations for better type safety in tool result handling
+
+## [13.12.2] - 2026-03-15
+
+### Added
+
+- Added `compaction.thresholdTokens` setting as a fixed token limit alternative to percentage-based compaction threshold
+- Added more artifact spill threshold options (1 KB to 1 MB) with size descriptions
+- Added more artifact tail bytes and tail lines options with descriptions
+- Added `toExtensionId` capability method to enable granular disabling of individual capabilities by ID
+- Added support for disabling specific capabilities (skills, tools, hooks, rules, prompts, instructions, slash commands, MCP servers, extension modules, and context files) via `disabledExtensions` setting
+- Added `includeDisabled` and `disabledExtensions` options to `LoadOptions` for capability loading
+- Added plugin manifest support for `extensions` entry points to allow plugins to contribute extension modules
+- Added `extensions` field to plugin features for feature-specific extension entry points
+- Added automatic discovery of extension modules from installed plugins during extension loading
+- Added `disabledExtensions` setting to allow disabling specific extensions and skills by ID
+- Added support for filtering skills by disabled extension IDs with `skill:` prefix
+
+### Changed
+
+- Changed capability loading to filter out disabled items based on extension IDs before returning results
+- Changed plugin loader to support `extensions` as a manifest entry type alongside tools, hooks, and commands
+- Changed extension discovery to include extension entry points from all enabled plugins
+- Changed context file path handling to use `path.basename()` for consistent cross-platform filename extraction
+
+### Fixed
+
+- Fixed skill loading to properly respect disabled skill names when loading from custom directories
+
+## [13.12.1] - 2026-03-15
+### Added
+
+- Support for move-only operations that preserve exact bytes including binary files
+
+### Fixed
+
+- Fixed handling of file moves when no edits are specified, now correctly preserves binary content
+- Fixed validation to reject move operations where source and destination paths are identical
+
+## [13.12.0] - 2026-03-14
+
+### Added
+
+- Added per-rule TTSR interrupt mode override via `interruptMode` field in rule frontmatter to allow fine-grained control over when TTSR interrupts stream processing
+- Added `task` model role to allow configuring a dedicated model for subtask execution via `modelRoles.task` setting
+- Added `moveCursorToMessageEnd` and `moveCursorToMessageStart` prompt actions to navigate to the beginning and end of the entire message
+- Added support for provider-level `compat` configuration to apply OpenAI compatibility settings across all models from a provider
+- Added `reasoningEffortMap` configuration option to map reasoning effort levels to provider-specific values
+- Added support for `supportsUsageInStreaming`, `requiresToolResultName`, `requiresAssistantAfterToolResult`, `requiresThinkingAsText`, `thinkingFormat`, and `supportsStrictMode` OpenAI compatibility options
+- Added support for provider-configurable `OpenAICompat.extraBody` to inject request-body fields for custom gateway/proxy routing
+- Added `close()` method to SessionManager for properly closing persistent writers after flushing pending data
+- Added `omp config init-xdg` command to initialize XDG Base Directory structure on Linux
+- Added `getHistoryDbPath()`, `getModelDbPath()`, `getMemoriesDir()`, `getTerminalSessionsDir()` path helpers
+
+### Changed
+
+- Path resolution on Linux redirects to XDG locations when `XDG_DATA_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` environment variables are set
+
+### Changed
+
+- Changed TTSR interrupt logic to respect per-rule `interruptMode` settings, falling back to global `ttsr.interruptMode` when rule-level override is not specified
+- Reorganized settings tabs from 12 tabs (display, agent, input, tools, config, services, bash, lsp, ttsr, status) to 8 focused tabs (appearance, model, interaction, context, editing, tools, tasks, providers) for improved discoverability
+- Consolidated status line settings into the Appearance tab instead of a separate Status tab
+- Reorganized sampling parameters (temperature, topP, topK, minP, presencePenalty, repetitionPenalty) into the Model tab
+- Moved edit tool settings (mode, fuzzyMatch, fuzzyThreshold, streamingAbort) to the Editing tab
+- Moved read tool settings (readLineNumbers, readHashLines, read.defaultLimit) to the Editing tab
+- Moved LSP settings (lsp.enabled, lsp.formatOnWrite, lsp.diagnosticsOnWrite, lsp.diagnosticsOnEdit) to the Editing tab
+- Moved bash interceptor settings to the Editing tab
+- Moved Python settings (python.toolMode, python.kernelMode, python.sharedGateway) to the Editing tab
+- Moved task delegation settings (task.isolation.*, task.eager, task.maxConcurrency, task.maxRecursionDepth) to the Tasks tab
+- Moved skill and command settings to the Tasks tab
+- Moved provider selection settings (providers.webSearch, providers.codeSearch, providers.image, etc.) to the Providers tab
+- Moved Exa settings to the Providers tab
+- Moved secret handling settings to the Providers tab
+- Moved speech-to-text settings to the Interaction tab
+- Moved context promotion, compaction, branch summary, memories, and TTSR settings to the Context tab
+- Updated tab icon symbols across unicode, nerd, and ASCII presets to match new tab structure
+- Changed default agent model from `default` to `pi/task` to enable independent model configuration for subtasks
+- Changed agent model resolution to support single-pattern inheritance fallback, allowing `pi/task` agents to inherit the active session model when the task role is unconfigured
+- Changed system prompt to use ISO 8601 date format (YYYY-MM-DD) instead of locale-specific formatting
+- Changed system prompt template to use `{{date}}` instead of `{{dateTime}}` for current date display
+- Changed tool download timeout from 15 seconds to 120 seconds to accommodate slower network conditions
+- Changed working directory paths in system prompt to use forward slashes for consistency across platforms
+- Modified bash executor to fall back to one-shot shell execution after a persistent session hard timeout, preventing subsequent commands from hanging
+
+### Removed
+
+- Removed bash executor hard timeout recovery test file (functionality already documented in existing entries)
+
+### Fixed
+
+- Fixed bash execution to fall back to one-shot shell runs after a persistent session hard timeout, preventing later commands from hanging until restart
+- Fixed timeout handling in RpcClient to properly clear timeouts and prevent resource leaks
+- Fixed AgentSession disposal to call SessionManager's `close()` method when available, ensuring proper cleanup of persistent writers
+- Removed redundant `path.join()` call wrapping `getHistoryDbPath()` in history-storage.ts
+
 ## [13.11.1] - 2026-03-13
 
 ### Added
@@ -46,6 +185,7 @@
 - Added `buildNamedToolChoice` utility function to build provider-aware tool choice constraints for named tools
 - Support for comma/space-separated path lists in `find`, `grep`, `ast_grep`, and `ast_edit` tools (e.g., `apps/,packages/,phases/` or `apps/ packages/ phases/`)
 - New `resolveMultiSearchPath` and `resolveMultiFindPattern` functions to handle multi-path search inputs with automatic common base path detection
+- Added `display.showTokenUsage` setting to show per-turn token usage (input, output, cache) on assistant messages
 
 ### Changed
 

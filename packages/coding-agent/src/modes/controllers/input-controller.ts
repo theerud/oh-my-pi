@@ -29,6 +29,7 @@ export class InputController {
 		this.ctx.editor.shouldBypassAutocompleteOnEscape = () =>
 			Boolean(
 				this.ctx.loadingAnimation ||
+					this.ctx.hasActiveBtw() ||
 					this.ctx.session.isStreaming ||
 					this.ctx.session.isCompacting ||
 					this.ctx.session.isGeneratingHandoff ||
@@ -40,6 +41,9 @@ export class InputController {
 					this.ctx.retryEscapeHandler,
 			);
 		this.ctx.editor.onEscape = () => {
+			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+				return;
+			}
 			if (this.ctx.loadingAnimation) {
 				if (this.ctx.cancelPendingSubmission()) {
 					return;
@@ -318,7 +322,7 @@ export class InputController {
 			const hasUserMessages = this.ctx.session.messages.some((m: AgentMessage) => m.role === "user");
 			if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE) {
 				const registry = this.ctx.session.modelRegistry;
-				generateSessionTitle(text, registry, this.ctx.settings, this.ctx.session.sessionId)
+				generateSessionTitle(text, registry, this.ctx.settings, this.ctx.session.sessionId, this.ctx.session.model)
 					.then(async title => {
 						if (title) {
 							await this.ctx.sessionManager.setSessionName(title);
@@ -435,6 +439,9 @@ export class InputController {
 			this.ctx.showWarning("Agent is idle; nothing to background");
 			return;
 		}
+		if (this.ctx.hasActiveBtw()) {
+			this.ctx.handleBtwEscape();
+		}
 
 		this.ctx.isBackgrounded = true;
 		const backgroundUiContext = this.ctx.createBackgroundUiContext();
@@ -528,6 +535,8 @@ export class InputController {
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),
+			moveCursorToMessageEnd: () => this.ctx.editor.moveToMessageEnd(),
+			moveCursorToMessageStart: () => this.ctx.editor.moveToMessageStart(),
 			moveCursorToLineStart: () => this.ctx.editor.moveToLineStart(),
 			moveCursorToLineEnd: () => this.ctx.editor.moveToLineEnd(),
 		});

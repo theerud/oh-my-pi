@@ -31,9 +31,11 @@ import type {
 	Effort,
 	ImageContent,
 	Message,
+	MessageAttribution,
 	Model,
 	ProviderSessionState,
 	ServiceTier,
+	SimpleStreamOptions,
 	TextContent,
 	ToolCall,
 	ToolChoice,
@@ -104,6 +106,7 @@ import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
 import type { PendingActionStore } from "../tools/pending-action";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
+import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
@@ -126,6 +129,7 @@ import {
 	bashExecutionToText,
 	type CompactionSummaryMessage,
 	type CustomMessage,
+	convertToLlm,
 	type FileMentionMessage,
 	type HookMessage,
 	type PythonExecutionMessage,
@@ -145,11 +149,14 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
+			skipped?: boolean;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "ttsr_triggered"; rules: Rule[] }
-	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number };
+	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
+	| { type: "todo_auto_clear" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -186,17 +193,21 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
-	skillsSettings?: Required<SkillsSettings>;
+	skillsSettings?: SkillsSettings;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	/** Current session pre-LLM message transform pipeline */
+	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	/** Provider payload hook used by the active session request path */
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Current session message-to-LLM conversion pipeline */
+	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>;
 	/** TTSR manager for time-traveling stream rules */
 	ttsrManager?: TtsrManager;
-	/** Force X-Initiator: agent for GitHub Copilot model selections in this session. */
-	forceCopilotAgentInitiator?: boolean;
 	/** Secret obfuscator for deobfuscating streaming edit content */
 	obfuscator?: SecretObfuscator;
 	/** Pending action store for preview/apply workflows */
@@ -215,6 +226,8 @@ export interface PromptOptions {
 	toolChoice?: ToolChoice;
 	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
 	synthetic?: boolean;
+	/** Explicit billing/initiator attribution for the prompt. Defaults to user prompts as `user` and synthetic prompts as `agent`. */
+	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
 	skipCompactionCheck?: boolean;
 }
@@ -352,6 +365,7 @@ export class AgentSession {
 	// Todo completion reminder state
 	#todoReminderCount = 0;
 	#todoPhases: TodoPhase[] = [];
+	#todoClearTimers = new Map<string, Timer>();
 	#nextToolChoiceOverride: ToolChoice | undefined = undefined;
 
 	// Bash execution state
@@ -374,16 +388,18 @@ export class AgentSession {
 	/** MCP prompt commands (updated dynamically when prompts are loaded) */
 	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
-	#skillsSettings: Required<SkillsSettings> | undefined;
+	#skillsSettings: SkillsSettings | undefined;
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
 
 	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
+	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
+	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#rebuildSystemPrompt: ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>) | undefined;
 	#baseSystemPrompt: string;
-	#forceCopilotAgentInitiator = false;
 
 	// TTSR manager for time-traveling stream rules
 	#ttsrManager: TtsrManager | undefined = undefined;
@@ -425,10 +441,12 @@ export class AgentSession {
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#toolRegistry = config.toolRegistry ?? new Map();
+		this.#transformContext = config.transformContext ?? (messages => messages);
+		this.#onPayload = config.onPayload;
+		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#ttsrManager = config.ttsrManager;
-		this.#forceCopilotAgentInitiator = config.forceCopilotAgentInitiator ?? false;
 		this.#obfuscator = config.obfuscator;
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#pendingActionStore = config.pendingActionStore;
@@ -580,7 +598,7 @@ export class AgentSession {
 
 					this.#addPendingTtsrInjections(matches);
 
-					if (this.#shouldInterruptForTtsrMatch(matchContext)) {
+					if (this.#shouldInterruptForTtsrMatch(matches, matchContext)) {
 						// Abort the stream immediately — do not gate on extension callbacks
 						this.#ttsrAbortPending = true;
 						this.#ensureTtsrResumePromise();
@@ -1014,18 +1032,17 @@ export class AgentSession {
 		return -1;
 	}
 
-	#shouldInterruptForTtsrMatch(matchContext: TtsrMatchContext): boolean {
-		const mode = this.#ttsrManager?.getSettings().interruptMode ?? "always";
-		if (mode === "never") {
-			return false;
+	#shouldInterruptForTtsrMatch(matches: Rule[], matchContext: TtsrMatchContext): boolean {
+		const globalMode = this.#ttsrManager?.getSettings().interruptMode ?? "always";
+		for (const rule of matches) {
+			const mode = rule.interruptMode ?? globalMode;
+			if (mode === "never") continue;
+			if (mode === "prose-only" && (matchContext.source === "text" || matchContext.source === "thinking"))
+				return true;
+			if (mode === "tool-only" && matchContext.source === "tool") return true;
+			if (mode === "always") return true;
 		}
-		if (mode === "prose-only") {
-			return matchContext.source === "text" || matchContext.source === "thinking";
-		}
-		if (mode === "tool-only") {
-			return matchContext.source === "tool";
-		}
-		return true;
+		return false;
 	}
 
 	#queueDeferredTtsrInjectionIfNeeded(assistantMsg: AssistantMessage): void {
@@ -1442,6 +1459,7 @@ export class AgentSession {
 				aborted: event.aborted,
 				willRetry: event.willRetry,
 				errorMessage: event.errorMessage,
+				skipped: event.skipped,
 			});
 		} else if (event.type === "auto_retry_start") {
 			await this.#extensionRunner.emit({
@@ -1521,12 +1539,13 @@ export class AgentSession {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 		this.#cancelPostPromptTasks();
+		this.#clearTodoClearTimers();
 		const drained = await this.#asyncJobManager?.dispose({ timeoutMs: 3_000 });
 		const deliveryState = this.#asyncJobManager?.getDeliveryState();
 		if (drained === false && deliveryState) {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
-		await this.sessionManager.flush();
+		await this.sessionManager.close();
 		for (const state of this.#providerSessionState.values()) {
 			state.close();
 		}
@@ -1549,19 +1568,6 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
-	}
-
-	#applySessionModelOverrides(model: Model): Model {
-		if (!this.#forceCopilotAgentInitiator || model.provider !== "github-copilot") {
-			return model;
-		}
-		return {
-			...model,
-			headers: {
-				...model.headers,
-				"X-Initiator": "agent",
-			},
-		};
 	}
 
 	/** Current thinking level */
@@ -1712,6 +1718,31 @@ export class AgentSession {
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
+	}
+
+	/** Convert session messages using the same pre-LLM pipeline as the active session. */
+	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+		const transformedMessages = await this.#transformContext(messages, signal);
+		return await this.#convertToLlm(transformedMessages);
+	}
+
+	/** Apply session-level stream hooks to a direct side request. */
+	prepareSimpleStreamOptions(options: SimpleStreamOptions): SimpleStreamOptions {
+		if (!this.#onPayload) return options;
+		if (!options.onPayload) {
+			return { ...options, onPayload: this.#onPayload };
+		}
+		const sessionOnPayload = this.#onPayload;
+		const requestOnPayload = options.onPayload;
+		return {
+			...options,
+			onPayload: async (payload, model) => {
+				const sessionPayload = await sessionOnPayload(payload, model);
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
+				return requestPayload ?? sessionResolvedPayload;
+			},
+		};
 	}
 
 	/** Current steering mode */
@@ -1966,9 +1997,10 @@ export class AgentSession {
 			userContent.push(...options.images);
 		}
 
+		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		const message = options?.synthetic
-			? { role: "developer" as const, content: userContent, attribution: "agent" as const, timestamp: Date.now() }
-			: { role: "user" as const, content: userContent, attribution: "user" as const, timestamp: Date.now() };
+			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
+			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
 		if (eagerTodoPrelude) {
 			this.#nextToolChoiceOverride = eagerTodoPrelude.toolChoice;
@@ -2493,7 +2525,7 @@ export class AgentSession {
 		return undefined;
 	}
 
-	get skillsSettings(): Required<SkillsSettings> | undefined {
+	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
 	}
 
@@ -2513,10 +2545,17 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todoPhases = this.#cloneTodoPhases(phases);
+		this.#scheduleTodoAutoClear(phases);
 	}
 
 	#syncTodoPhasesFromBranch(): void {
-		this.setTodoPhases(getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()));
+		const phases = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
+		// Strip completed/abandoned tasks — they were done in a previous run,
+		// so the auto-clear grace period has already elapsed.
+		for (const phase of phases) {
+			phase.tasks = phase.tasks.filter(t => t.status !== "completed" && t.status !== "abandoned");
+		}
+		this.setTodoPhases(phases.filter(p => p.tasks.length > 0));
 	}
 
 	#cloneTodoPhases(phases: TodoPhase[]): TodoPhase[] {
@@ -2530,6 +2569,68 @@ export class AgentSession {
 				notes: task.notes,
 			})),
 		}));
+	}
+
+	/** Schedule auto-removal of completed/abandoned tasks after a delay. */
+	#scheduleTodoAutoClear(phases: TodoPhase[]): void {
+		const delaySec = this.settings.get("tasks.todoClearDelay") ?? 60;
+		if (delaySec < 0) return; // "Never" — no auto-clear
+		const delayMs = delaySec * 1000;
+		const doneTaskIds = new Set<string>();
+		for (const phase of phases) {
+			for (const task of phase.tasks) {
+				if (task.status === "completed" || task.status === "abandoned") {
+					doneTaskIds.add(task.id);
+				}
+			}
+		}
+
+		// Cancel timers for tasks that are no longer done (e.g. status was reverted)
+		for (const [id, timer] of this.#todoClearTimers) {
+			if (!doneTaskIds.has(id)) {
+				clearTimeout(timer);
+				this.#todoClearTimers.delete(id);
+			}
+		}
+
+		// Schedule new timers for newly-done tasks
+		for (const id of doneTaskIds) {
+			if (this.#todoClearTimers.has(id)) continue;
+			if (delayMs === 0) {
+				// Instant — run synchronously on next microtask to batch removals
+				const timer = setTimeout(() => this.#runTodoAutoClear(id), 0);
+				this.#todoClearTimers.set(id, timer);
+			} else {
+				const timer = setTimeout(() => this.#runTodoAutoClear(id), delayMs);
+				this.#todoClearTimers.set(id, timer);
+			}
+		}
+	}
+
+	/** Remove a single completed task and notify the UI. */
+	#runTodoAutoClear(taskId: string): void {
+		this.#todoClearTimers.delete(taskId);
+		let removed = false;
+		for (const phase of this.#todoPhases) {
+			const idx = phase.tasks.findIndex(t => t.id === taskId);
+			if (idx !== -1 && (phase.tasks[idx].status === "completed" || phase.tasks[idx].status === "abandoned")) {
+				phase.tasks.splice(idx, 1);
+				removed = true;
+				break;
+			}
+		}
+		if (!removed) return;
+
+		// Remove empty phases
+		this.#todoPhases = this.#todoPhases.filter(p => p.tasks.length > 0);
+		this.#emit({ type: "todo_auto_clear" });
+	}
+
+	#clearTodoClearTimers(): void {
+		for (const timer of this.#todoClearTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.#todoClearTimers.clear();
 	}
 
 	/**
@@ -2905,14 +3006,12 @@ export class AgentSession {
 	 * Cycle to next thinking level.
 	 * @returns New level, or undefined if model doesn't support thinking
 	 */
-	cycleThinkingLevel(): Effort | undefined {
+	cycleThinkingLevel(): ThinkingLevel | undefined {
 		if (!this.model?.reasoning) return undefined;
 
-		const levels = this.getAvailableThinkingLevels();
-		const currentIndex =
-			this.thinkingLevel && this.thinkingLevel !== ThinkingLevel.Off && this.thinkingLevel !== ThinkingLevel.Inherit
-				? levels.indexOf(this.thinkingLevel)
-				: -1;
+		const levels = [ThinkingLevel.Off, ...this.getAvailableThinkingLevels()];
+		const currentLevel = this.thinkingLevel === ThinkingLevel.Inherit ? ThinkingLevel.Off : this.thinkingLevel;
+		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];
 		if (!nextLevel) return undefined;
@@ -3685,7 +3784,7 @@ export class AgentSession {
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 		}
-		this.agent.setModel(this.#applySessionModelOverrides(model));
+		this.agent.setModel(model);
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
@@ -3853,6 +3952,7 @@ export class AgentSession {
 					result: undefined,
 					aborted: false,
 					willRetry: false,
+					skipped: true,
 				});
 				return;
 			}
@@ -3865,6 +3965,7 @@ export class AgentSession {
 					result: undefined,
 					aborted: false,
 					willRetry: false,
+					skipped: true,
 				});
 				return;
 			}
@@ -3879,6 +3980,7 @@ export class AgentSession {
 					result: undefined,
 					aborted: false,
 					willRetry: false,
+					skipped: true,
 				});
 				if (!willRetry && this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
@@ -3966,6 +4068,7 @@ export class AgentSession {
 								promptOverride: hookPrompt,
 								extraContext: hookContext,
 								remoteInstructions: this.#baseSystemPrompt,
+								initiatorOverride: "agent",
 							});
 							break;
 						} catch (error) {
@@ -4429,6 +4532,7 @@ export class AgentSession {
 				onChunk,
 				signal: this.#bashAbortController.signal,
 				sessionKey: this.sessionId,
+				timeout: clampTimeout("bash") * 1000,
 			});
 
 			this.recordBashResult(command, result, options);

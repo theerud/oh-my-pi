@@ -1121,17 +1121,21 @@ export class Editor implements Component, Focusable {
 		return this.#state.lines.join("\n");
 	}
 
+	#expandPasteMarkers(text: string): string {
+		let result = text;
+		for (const [pasteId, pasteContent] of this.#pastes) {
+			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
+			result = result.replace(markerRegex, () => pasteContent);
+		}
+		return result;
+	}
+
 	/**
 	 * Get text with paste markers expanded to their actual content.
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		let result = this.#state.lines.join("\n");
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, pasteContent);
-		}
-		return result;
+		return this.#expandPasteMarkers(this.#state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
@@ -1148,6 +1152,14 @@ export class Editor implements Component, Focusable {
 
 	moveToLineEnd(): void {
 		this.#moveToLineEnd();
+	}
+
+	moveToMessageStart(): void {
+		this.#moveToMessageStart();
+	}
+
+	moveToMessageEnd(): void {
+		this.#moveToMessageEnd();
 	}
 
 	setText(text: string): void {
@@ -1343,11 +1355,7 @@ export class Editor implements Component, Focusable {
 	#submitValue(): void {
 		this.#resetKillSequence();
 
-		let result = this.#state.lines.join("\n").trim();
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, pasteContent);
-		}
+		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
 
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.#pastes.clear();
@@ -1506,6 +1514,19 @@ export class Editor implements Component, Focusable {
 
 	#moveToLineEnd(): void {
 		this.#resetKillSequence();
+		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		this.#setCursorCol(currentLine.length);
+	}
+
+	#moveToMessageStart(): void {
+		this.#resetKillSequence();
+		this.#state.cursorLine = 0;
+		this.#setCursorCol(0);
+	}
+
+	#moveToMessageEnd(): void {
+		this.#resetKillSequence();
+		this.#state.cursorLine = this.#state.lines.length - 1;
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		this.#setCursorCol(currentLine.length);
 	}

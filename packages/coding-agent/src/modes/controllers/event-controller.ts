@@ -257,6 +257,7 @@ export class EventController {
 						}
 					}
 					this.#lastAssistantComponent = this.ctx.streamingComponent;
+					this.#lastAssistantComponent.setUsageInfo(event.message.usage);
 					this.ctx.streamingComponent = undefined;
 					this.ctx.streamingMessage = undefined;
 					this.ctx.statusLine.invalidate();
@@ -484,6 +485,9 @@ export class EventController {
 					this.ctx.updateEditorTopBorder();
 					await this.ctx.reloadTodos();
 					this.ctx.showStatus("Auto-handoff completed");
+				} else if (event.skipped) {
+					// Benign skip: no model selected, no candidate models available, or nothing
+					// to compact yet. Not a failure — suppress the warning.
 				} else {
 					this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
 				}
@@ -544,6 +548,10 @@ export class EventController {
 				this.ctx.ui.requestRender();
 				break;
 			}
+
+			case "todo_auto_clear":
+				await this.ctx.reloadTodos();
+				break;
 		}
 	}
 

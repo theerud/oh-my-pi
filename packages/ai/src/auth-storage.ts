@@ -10,7 +10,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -292,6 +292,7 @@ export class AuthStorage {
 	#fallbackResolver?: (provider: string) => string | undefined;
 	#store: AuthCredentialStore;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
+	#closed = false;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
@@ -317,6 +318,17 @@ export class AuthStorage {
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await AuthCredentialStore.open(dbPath);
 		return new AuthStorage(store, options);
+	}
+
+	/**
+	 * Close the underlying credential store.
+	 *
+	 * After calling this, the instance must not be reused.
+	 */
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#store.close();
 	}
 
 	/**
@@ -2106,14 +2118,6 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 		return undefined;
 	}
 }
-
-/**
- * Get default path to agent.db
- */
-function getAgentDbPath(): string {
-	return path.join(getAgentDir(), "agent.db");
-}
-
 /**
  * Standalone SQLite-backed implementation of AuthCredentialStore interface.
  * Used by the pi-ai CLI and as the default store for AuthStorage.create().
@@ -2132,6 +2136,7 @@ export class AuthCredentialStore {
 	#getCacheStmt: Statement;
 	#upsertCacheStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
+	#closed = false;
 
 	constructor(db: Database) {
 		this.#db = db;
@@ -2578,6 +2583,19 @@ export class AuthCredentialStore {
 	}
 
 	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#listActiveStmt.finalize();
+		this.#listActiveByProviderStmt.finalize();
+		this.#listDisabledByProviderStmt.finalize();
+		this.#insertStmt.finalize();
+		this.#updateStmt.finalize();
+		this.#deleteStmt.finalize();
+		this.#deleteByProviderStmt.finalize();
+		this.#hardDeleteStmt.finalize();
+		this.#getCacheStmt.finalize();
+		this.#upsertCacheStmt.finalize();
+		this.#deleteExpiredCacheStmt.finalize();
 		this.#db.close();
 	}
 }

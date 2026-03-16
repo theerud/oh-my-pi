@@ -1,9 +1,53 @@
-//! Shell execution exported via N-API.
+//! Brush-based shell execution exported via N-API.
+//!
+//! # Overview
+//! Executes shell commands in a non-interactive brush-core shell, streaming
+//! output back to JavaScript via a threadsafe callback.
+//!
+//! # Example
+//! ```ignore
+//! const shell = new natives.Shell();
+//! const result = await shell.run({ command: "ls" }, (chunk) => {
+//!   console.log(chunk);
+//! });
+//! ```
 
 use std::collections::HashMap;
+#[cfg(feature = "shell-native")]
+use std::sync::Arc;
 
 use napi::{bindgen_prelude::*, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
+
+#[cfg(windows)]
+use windows::configure_windows_path;
+
+#[cfg(feature = "shell-native")]
+use tokio::sync::Mutex as TokioMutex;
+#[cfg(feature = "shell-native")]
+use crate::task;
+
+#[cfg(feature = "shell-native")]
+#[derive(Clone, Default)]
+struct ShellAbortState(Arc<TokioMutex<Option<task::AbortToken>>>);
+
+#[cfg(feature = "shell-native")]
+impl ShellAbortState {
+	async fn set(&self, abort_token: task::AbortToken) {
+		*self.0.lock().await = Some(abort_token);
+	}
+
+	async fn clear(&self) {
+		*self.0.lock().await = None;
+	}
+
+	async fn abort(&self) {
+		let abort_token = self.0.lock().await.clone();
+		if let Some(abort_token) = abort_token {
+			abort_token.abort(task::AbortReason::Signal);
+		}
+	}
+}
 
 /// Options for configuring a persistent shell session.
 #[napi(object)]
@@ -41,7 +85,7 @@ pub struct ShellRunResult {
 	pub timed_out: bool,
 }
 
-/// Options for executing a shell command.
+/// Options for executing a shell command via brush-core.
 #[napi(object)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -72,6 +116,9 @@ pub struct ShellExecuteResult {
 	/// Whether the command timed out before completion.
 	pub timed_out: bool,
 }
+
+#[cfg(all(windows, feature = "shell-native"))]
+mod windows;
 
 #[cfg(feature = "shell-native")]
 mod native_impl {
@@ -111,9 +158,7 @@ mod native_impl {
 	use crate::task;
 
 	#[cfg(windows)]
-	mod windows;
-	#[cfg(windows)]
-	use windows::configure_windows_path;
+	use super::windows::configure_windows_path;
 
 	struct ShellSessionCore {
 		shell:         BrushShell,
@@ -134,8 +179,9 @@ mod native_impl {
 
 	#[napi]
 	pub struct Shell {
-		session: Arc<TokioMutex<Option<ShellSessionCore>>>,
-		config:  ShellConfig,
+		session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
+		abort_state: ShellAbortState,
+		config:      ShellConfig,
 	}
 
 	#[napi]
@@ -146,7 +192,11 @@ mod native_impl {
 				|| ShellConfig { session_env: None, snapshot_path: None },
 				|opt| ShellConfig { session_env: opt.session_env, snapshot_path: opt.snapshot_path },
 			);
-			Self { session: Arc::new(TokioMutex::new(None)), config }
+			Self {
+				session: Arc::new(TokioMutex::new(None)),
+				abort_state: ShellAbortState::default(),
+				config,
+			}
 		}
 
 		#[napi]
@@ -162,28 +212,26 @@ mod native_impl {
 
 			let ct = task::CancelToken::new(timeout_ms, signal);
 			let session = self.session.clone();
+			let abort_state = self.abort_state.clone();
 			let config = self.config.clone();
 
 			let run_config = ShellRunConfig { command, cwd, env: run_env };
 
 			task::future(env, "shell.run", async move {
-				run_shell_session(session, config, run_config, on_chunk, ct).await
+				run_shell_session(session, abort_state, config, run_config, on_chunk, ct).await
 			})
 		}
 
 		#[napi]
 		pub async fn abort(&self) -> Result<()> {
-			if let Some(session) = self.session.lock().await.as_ref()
-				&& let Some(at) = &session.current_abort
-			{
-				at.abort(task::AbortReason::Signal);
-			}
+			self.abort_state.abort().await;
 			Ok(())
 		}
 	}
 
 	async fn run_shell_session(
 		session: Arc<TokioMutex<Option<ShellSessionCore>>>,
+		abort_state: ShellAbortState,
 		config: ShellConfig,
 		run_config: ShellRunConfig,
 		on_chunk: Option<ThreadsafeFunction<String>>,
@@ -193,6 +241,7 @@ mod native_impl {
 
 		let mut run_task = tokio::spawn({
 			let session = session.clone();
+			let abort_state = abort_state.clone();
 			let tokio_cancel = tokio_cancel.clone();
 			let at = ct.emplace_abort_token();
 			async move {
@@ -202,7 +251,8 @@ mod native_impl {
 					Some(session) => session,
 					None => session_guard.insert(create_session(&config).await?),
 				};
-				session.current_abort = Some(at);
+				session.current_abort = Some(at.clone());
+				abort_state.set(at).await;
 				run_shell_command(session, &run_config, on_chunk, tokio_cancel).await
 			}
 		});
@@ -216,6 +266,7 @@ mod native_impl {
 					run_task.abort();
 					let _ = run_task.await;
 				}
+				abort_state.clear().await;
 				if let Ok(mut guard) = session.try_lock() {
 					*guard = None;
 				}
@@ -228,6 +279,7 @@ mod native_impl {
 		};
 		let res = res
 			.unwrap_or_else(|e| Err(Error::from_reason(format!("Shell execution task failed: {e}"))));
+		abort_state.clear().await;
 
 		let keepalive = res.as_ref().is_ok_and(session_keepalive);
 		if keepalive {
@@ -439,7 +491,10 @@ mod native_impl {
 			source_snapshot(&mut shell, snapshot_path).await?;
 		}
 
-		Ok(ShellSessionCore { shell, current_abort: None })
+		Ok(ShellSessionCore {
+			shell,
+			current_abort: None,
+		})
 	}
 
 	async fn source_snapshot(shell: &mut BrushShell, snapshot_path: &str) -> Result<()> {
@@ -495,10 +550,11 @@ mod native_impl {
 				}
 				let mut var = ShellVariable::new(ShellValue::String(value.clone()));
 				var.export();
-				if let Err(err) = session
-					.shell
-					.env
-					.add(normalized_key, var, EnvironmentScope::Command)
+				if let Err(err) =
+					session
+						.shell
+						.env
+						.add(normalized_key, var, EnvironmentScope::Command)
 				{
 					let _ = session.shell.env.pop_scope(EnvironmentScope::Command);
 					return Err(Error::from_reason(format!("Failed to set env: {err}")));
@@ -1036,7 +1092,11 @@ mod system_impl {
 			.map_err(|e| Error::from_reason(format!("Error waiting for bash: {e}")))?;
 		let _ = tokio::join!(stdout_task, stderr_task);
 
-		Ok(ShellExecuteResult { exit_code: status.code(), cancelled: false, timed_out: false })
+		Ok(ShellExecuteResult {
+			exit_code: status.code(),
+			cancelled: false,
+			timed_out: false,
+		})
 	}
 
 	pub struct ShellRunConfig {
@@ -1123,10 +1183,31 @@ pub fn execute_shell<'env>(
 			run_shell_oneshot((), run_config, on_chunk, ct).await
 		})
 	}
+
 	#[cfg(all(not(feature = "shell-native"), not(feature = "shell-system")))]
 	{
 		crate::task::future(env, "shell.execute", async move {
 			Err(Error::from_reason("Shell execution is disabled in this build."))
 		})
+	}
+}
+
+#[cfg(all(test, feature = "shell-native"))]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn abort_state_signals_cancel_token() {
+		let abort_state = ShellAbortState::default();
+		let mut cancel_token = task::CancelToken::default();
+		let abort_token = cancel_token.emplace_abort_token();
+
+		abort_state.set(abort_token).await;
+		abort_state.abort().await;
+
+		let reason = tokio::time::timeout(Duration::from_millis(100), cancel_token.wait())
+			.await
+			.expect("cancel token should be signalled");
+		assert!(matches!(reason, task::AbortReason::Signal));
 	}
 }

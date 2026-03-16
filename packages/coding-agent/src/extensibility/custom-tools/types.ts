@@ -10,6 +10,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { Rule } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import type { Theme } from "../../modes/theme/theme";
@@ -20,11 +21,10 @@ import type { TodoItem } from "../../tools/todo-write";
 /** Alias for clarity */
 export type CustomToolUIContext = HookUIContext;
 
-/** Re-export for custom tools to use in execute signature */
-export type { AgentToolResult, AgentToolUpdateCallback };
-
 // Re-export for backward compatibility
 export type { ExecOptions, ExecResult } from "../../exec/exec";
+/** Re-export for custom tools to use in execute signature */
+export type { AgentToolResult, AgentToolUpdateCallback };
 
 /** Pending action entry consumed by the hidden resolve tool */
 export interface CustomToolPendingAction {
@@ -77,6 +77,8 @@ export interface CustomToolContext {
 	hasQueuedMessages(): boolean;
 	/** Abort the current agent operation (fire-and-forget, does not wait) */
 	abort(): void;
+	/** Settings instance for the current session. Prefer over the global singleton. */
+	settings?: Settings;
 }
 
 /** Session event passed to onSession callback */

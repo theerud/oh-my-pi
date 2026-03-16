@@ -16,6 +16,8 @@ import {
 	getBlobsDir,
 	getAgentDir as getDefaultAgentDir,
 	getProjectDir,
+	getSessionsDir,
+	getTerminalSessionsDir,
 	isEnoent,
 	logger,
 	parseJsonlLenient,
@@ -23,7 +25,16 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutResult, BlobStore, externalizeImageData, isBlobRef, resolveImageData } from "./blob-store";
+import {
+	type BlobPutResult,
+	BlobStore,
+	externalizeImageData,
+	externalizeImageDataUrl,
+	isBlobRef,
+	isImageDataUrl,
+	resolveImageData,
+	resolveImageDataUrl,
+} from "./blob-store";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -337,6 +348,44 @@ export function migrateSessionEntries(entries: FileEntry[]): void {
 let sessionDirsMigrated = false;
 
 /**
+ * Merge or rename a legacy session directory into its canonical target.
+ * Best effort: callers decide whether migration failures should surface.
+ */
+function migrateSessionDirPath(oldPath: string, newPath: string): void {
+	const existing = fs.statSync(newPath, { throwIfNoEntry: false });
+	if (existing?.isDirectory()) {
+		for (const file of fs.readdirSync(oldPath)) {
+			const src = path.join(oldPath, file);
+			const dst = path.join(newPath, file);
+			if (!fs.existsSync(dst)) {
+				fs.renameSync(src, dst);
+			}
+		}
+		fs.rmSync(oldPath, { recursive: true, force: true });
+		return;
+	}
+	if (existing) {
+		fs.rmSync(newPath, { recursive: true, force: true });
+	}
+	fs.renameSync(oldPath, newPath);
+}
+
+function encodeLegacyAbsoluteSessionDirName(cwd: string): string {
+	const resolvedCwd = path.resolve(cwd);
+	return `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function encodeRelativeSessionDirName(prefix: string, root: string, cwd: string): string {
+	const relative = path.relative(root, cwd).replace(/[/\\:]/g, "-");
+	return relative ? `${prefix}-${relative}` : prefix;
+}
+
+/**
  * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
  * Runs once on first access, best-effort.
  */
@@ -348,7 +397,7 @@ function migrateHomeSessionDirs(): void {
 	const homeEncoded = home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
 	const oldPrefix = `--${homeEncoded}-`;
 	const oldExact = `--${homeEncoded}--`;
-	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
+	const sessionsRoot = getSessionsDir();
 
 	let entries: string[];
 	try {
@@ -367,31 +416,26 @@ function migrateHomeSessionDirs(): void {
 			continue;
 		}
 
-		const newName = `-${remainder}`;
+		const newName = remainder ? `-${remainder}` : "-";
 		const oldPath = path.join(sessionsRoot, entry);
 		const newPath = path.join(sessionsRoot, newName);
 
 		try {
-			const existing = fs.statSync(newPath, { throwIfNoEntry: false });
-			if (existing?.isDirectory()) {
-				// Merge files from old dir into existing new dir
-				for (const file of fs.readdirSync(oldPath)) {
-					const src = path.join(oldPath, file);
-					const dst = path.join(newPath, file);
-					if (!fs.existsSync(dst)) {
-						fs.renameSync(src, dst);
-					}
-				}
-				fs.rmSync(oldPath, { recursive: true, force: true });
-			} else {
-				if (existing) {
-					fs.rmSync(newPath, { recursive: true, force: true });
-				}
-				fs.renameSync(oldPath, newPath);
-			}
+			migrateSessionDirPath(oldPath, newPath);
 		} catch {
 			// Best effort
 		}
+	}
+}
+
+function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string): void {
+	const legacyDir = path.join(getSessionsDir(), encodeLegacyAbsoluteSessionDirName(cwd));
+	if (legacyDir === sessionDir || !fs.existsSync(legacyDir)) return;
+
+	try {
+		migrateSessionDirPath(legacyDir, sessionDir);
+	} catch {
+		// Best effort
 	}
 }
 
@@ -592,24 +636,31 @@ export function buildSessionContext(
 /**
  * Encode a cwd into a safe directory name for session storage.
  * Home-relative paths use single-dash format: `/Users/x/Projects/pi` → `-Projects-pi`
- * Absolute paths use double-dash format: `/tmp/foo` → `--tmp-foo--`
+ * Temp-root paths use `-tmp-` prefixes: `/tmp/foo` → `-tmp-foo`
+ * Other absolute paths keep the legacy double-dash format for compatibility.
  */
 function encodeSessionDirName(cwd: string): string {
-	const home = os.homedir();
-	if (cwd === home || cwd.startsWith(`${home}/`) || cwd.startsWith(`${home}\\`)) {
-		const relative = cwd.slice(home.length).replace(/^[/\\]/, "");
-		return `-${relative.replace(/[/\\:]/g, "-")}`;
+	const resolvedCwd = path.resolve(cwd);
+	const home = path.resolve(os.homedir());
+	if (pathIsWithin(home, resolvedCwd)) {
+		return encodeRelativeSessionDirName("-", home, resolvedCwd);
 	}
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	const tempRoot = path.resolve(os.tmpdir());
+	if (pathIsWithin(tempRoot, resolvedCwd)) {
+		return encodeRelativeSessionDirName("-tmp", tempRoot, resolvedCwd);
+	}
+	return encodeLegacyAbsoluteSessionDirName(resolvedCwd);
 }
+
 /**
  * Compute the default session directory for a cwd.
  * Encodes cwd into a safe directory name under ~/.omp/agent/sessions/.
  */
 function getDefaultSessionDir(cwd: string, storage: SessionStorage): string {
+	const resolvedCwd = path.resolve(cwd);
 	migrateHomeSessionDirs();
-	const dirName = encodeSessionDirName(cwd);
-	const sessionDir = path.join(getDefaultAgentDir(), "sessions", dirName);
+	const sessionDir = path.join(getSessionsDir(), encodeSessionDirName(resolvedCwd));
+	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
 }
@@ -617,8 +668,6 @@ function getDefaultSessionDir(cwd: string, storage: SessionStorage): string {
 // =============================================================================
 // Terminal breadcrumbs: maps terminal (TTY) -> last session file for --continue
 // =============================================================================
-
-const TERMINAL_SESSIONS_DIR = "terminal-sessions";
 
 /**
  * Write a breadcrumb linking the current terminal to a session file.
@@ -629,7 +678,7 @@ function writeTerminalBreadcrumb(cwd: string, sessionFile: string): void {
 	const terminalId = getTerminalId();
 	if (!terminalId) return;
 
-	const breadcrumbDir = path.join(getDefaultAgentDir(), TERMINAL_SESSIONS_DIR);
+	const breadcrumbDir = getTerminalSessionsDir();
 	const breadcrumbFile = path.join(breadcrumbDir, terminalId);
 	const content = `${cwd}\n${sessionFile}\n`;
 	// Best-effort — don't break session creation if breadcrumb fails
@@ -645,7 +694,7 @@ async function readTerminalBreadcrumb(cwd: string): Promise<string | null> {
 	if (!terminalId) return null;
 
 	try {
-		const breadcrumbFile = path.join(getDefaultAgentDir(), TERMINAL_SESSIONS_DIR, terminalId);
+		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
 		const content = await Bun.file(breadcrumbFile).text();
 		const lines = content.trim().split("\n");
 		if (lines.length < 2) return null;
@@ -691,35 +740,54 @@ export async function loadEntriesFromFile(
 }
 
 /**
- * Resolve blob references in loaded entries, replacing `blob:sha256:<hash>` data fields
- * with the actual base64 content from the blob store. Mutates entries in place.
+ * Resolve blob references in loaded entries, restoring both session image blocks and persisted
+ * provider image URLs back to the inline data expected by downstream transports. Mutates entries in place.
  */
+function hasImageUrl(value: unknown): value is { image_url: string } {
+	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
+}
+
+async function resolvePersistedImageUrlRefs(value: unknown, blobStore: BlobStore): Promise<void> {
+	if (Array.isArray(value)) {
+		await Promise.all(value.map(item => resolvePersistedImageUrlRefs(item, blobStore)));
+		return;
+	}
+
+	if (typeof value !== "object" || value === null) return;
+
+	if (hasImageUrl(value) && isBlobRef(value.image_url)) {
+		value.image_url = await resolveImageDataUrl(blobStore, value.image_url);
+	}
+
+	await Promise.all(Object.values(value).map(item => resolvePersistedImageUrlRefs(item, blobStore)));
+}
+
 async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
 	const promises: Promise<void>[] = [];
 
 	for (const entry of entries) {
 		if (entry.type === "session") continue;
 
-		// Resolve image blocks in message content arrays
 		let contentArray: unknown[] | undefined;
-		if (entry.type === "message") {
-			const content = (entry.message as { content?: unknown }).content;
-			if (Array.isArray(content)) contentArray = content;
+		if (entry.type === "message" && "content" in entry.message && Array.isArray(entry.message.content)) {
+			contentArray = entry.message.content;
 		} else if (entry.type === "custom_message" && Array.isArray(entry.content)) {
 			contentArray = entry.content;
 		}
 
-		if (!contentArray) continue;
-
-		for (const block of contentArray) {
-			if (isImageBlock(block) && isBlobRef(block.data)) {
-				promises.push(
-					resolveImageData(blobStore, block.data).then(resolved => {
-						(block as { data: string }).data = resolved;
-					}),
-				);
+		if (contentArray) {
+			for (const block of contentArray) {
+				if (isImageBlock(block) && isBlobRef(block.data)) {
+					promises.push(
+						resolveImageData(blobStore, block.data).then(resolved => {
+							block.data = resolved;
+						}),
+					);
+				}
 			}
 		}
+
+		promises.push(resolvePersistedImageUrlRefs(entry, blobStore));
 	}
 
 	await Promise.all(promises);
@@ -891,19 +959,34 @@ function isImageBlock(value: unknown): value is { type: "image"; data: string; m
 	);
 }
 
-async function truncateForPersistence<T>(obj: T, blobStore: BlobStore, key?: string): Promise<T> {
+async function truncateForPersistence(obj: FileEntry, blobStore: BlobStore, key?: string): Promise<FileEntry>;
+async function truncateForPersistence(obj: string, blobStore: BlobStore, key?: string): Promise<string>;
+async function truncateForPersistence(obj: unknown[], blobStore: BlobStore, key?: string): Promise<unknown[]>;
+async function truncateForPersistence(obj: object, blobStore: BlobStore, key?: string): Promise<object>;
+async function truncateForPersistence(
+	obj: null | undefined,
+	blobStore: BlobStore,
+	key?: string,
+): Promise<null | undefined>;
+async function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string): Promise<unknown> {
 	if (obj === null || obj === undefined) return obj;
 
 	if (typeof obj === "string") {
+		if (key === "image_url" && isImageDataUrl(obj)) {
+			return externalizeImageDataUrl(blobStore, obj);
+		}
+
 		if (obj.length > MAX_PERSIST_CHARS) {
 			// Cryptographic signatures must be preserved exactly or cleared entirely — never truncated.
 			// Truncation would produce an invalid signature that the API rejects.
 			if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
-				return "" as T;
+				return "";
 			}
+
 			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
-			return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}` as T;
+			return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}`;
 		}
+
 		return obj;
 	}
 
@@ -919,34 +1002,54 @@ async function truncateForPersistence<T>(obj: T, blobStore: BlobStore, key?: str
 						return { ...item, data: blobRef };
 					}
 				}
+
 				const newItem = await truncateForPersistence(item, blobStore, key);
 				if (newItem !== item) changed = true;
 				return newItem;
 			}),
 		);
-		return changed ? (result as T) : obj;
+		return changed ? result : obj;
 	}
 
 	if (typeof obj === "object") {
 		let changed = false;
-		const result: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-			// Strip transient/redundant properties that shouldn't be persisted
-			// - partialJson: streaming accumulator for tool call JSON parsing
-			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
-			if (k === "partialJson" || k === "jsonlEvents") {
-				changed = true;
-				continue;
-			}
-			const newV = await truncateForPersistence(v, blobStore, k);
-			result[k] = newV;
-			if (newV !== v) changed = true;
+		const entries: Array<readonly [string, unknown]> = await Promise.all(
+			Object.entries(obj).flatMap(([childKey, value]) => {
+				// Strip transient/redundant properties that shouldn't be persisted.
+				// - partialJson: streaming accumulator for tool call JSON parsing
+				// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
+				if (childKey === "partialJson" || childKey === "jsonlEvents") {
+					changed = true;
+					return [];
+				}
+
+				return [
+					(async () => {
+						const newValue = await truncateForPersistence(value, blobStore, childKey);
+						if (newValue !== value) changed = true;
+						return [childKey, newValue] as const;
+					})(),
+				];
+			}),
+		);
+
+		if (!changed) return obj;
+
+		const contentEntry = entries.find(([childKey]) => childKey === "content");
+		const lineCountEntry = entries.find(([childKey]) => childKey === "lineCount");
+		if (
+			contentEntry &&
+			typeof contentEntry[1] === "string" &&
+			lineCountEntry &&
+			typeof lineCountEntry[1] === "number"
+		) {
+			const content = contentEntry[1];
+			const updatedEntries = entries.map(([childKey, value]) =>
+				childKey === "lineCount" ? ([childKey, content.split("\n").length] as const) : ([childKey, value] as const),
+			);
+			return Object.fromEntries(updatedEntries);
 		}
-		// Update lineCount if content was truncated (for FileMentionFile)
-		if (changed && "lineCount" in result && "content" in result && typeof result.content === "string") {
-			result.lineCount = result.content.split("\n").length;
-		}
-		return changed ? (result as T) : obj;
+		return Object.fromEntries(entries);
 	}
 
 	return obj;
@@ -1245,7 +1348,7 @@ export class SessionManager {
 	#fileEntries: FileEntry[] = [];
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
-	#leafId = null as string | null;
+	#leafId: string | null = null;
 	#usageStatistics = {
 		input: 0,
 		output: 0,
@@ -1254,7 +1357,7 @@ export class SessionManager {
 		premiumRequests: 0,
 		cost: 0,
 	} satisfies UsageStatistics;
-	#persistWriter = undefined as NdjsonFileWriter | undefined;
+	#persistWriter: NdjsonFileWriter | undefined;
 	#persistWriterPath: string | undefined;
 	#persistChain: Promise<void> = Promise.resolve();
 	#persistError: Error | undefined;
@@ -1264,8 +1367,8 @@ export class SessionManager {
 	readonly #blobStore: BlobStore;
 
 	private constructor(
-		private readonly cwd: string,
-		private readonly sessionDir: string,
+		private cwd: string,
+		private sessionDir: string,
 		private readonly persist: boolean,
 		private readonly storage: SessionStorage,
 	) {
@@ -1367,7 +1470,7 @@ export class SessionManager {
 		this.#sessionName = newHeader.title;
 
 		// Replace the header in fileEntries
-		const entries = this.#fileEntries.filter(e => e.type !== "session") as SessionEntry[];
+		const entries = this.#fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 		this.#fileEntries = [newHeader, ...entries];
 
 		// Write the new session file
@@ -1387,6 +1490,7 @@ export class SessionManager {
 		if (resolvedCwd === this.cwd) return;
 
 		const newSessionDir = getDefaultSessionDir(resolvedCwd, this.storage);
+		let hadSessionFile = false;
 
 		if (this.persist && this.#sessionFile) {
 			// Close the persist writer before moving files
@@ -1399,12 +1503,16 @@ export class SessionManager {
 			const newSessionFile = path.join(newSessionDir, path.basename(oldSessionFile));
 			const oldArtifactDir = oldSessionFile.slice(0, -6); // strip .jsonl
 			const newArtifactDir = newSessionFile.slice(0, -6);
+			hadSessionFile = this.storage.existsSync(oldSessionFile);
 			let movedSessionFile = false;
 			let movedArtifactDir = false;
 
 			try {
-				await fs.promises.rename(oldSessionFile, newSessionFile);
-				movedSessionFile = true;
+				// Guard: session file may not exist yet (no assistant messages persisted)
+				if (hadSessionFile) {
+					await fs.promises.rename(oldSessionFile, newSessionFile);
+					movedSessionFile = true;
+				}
 
 				try {
 					const stat = await fs.promises.stat(oldArtifactDir);
@@ -1439,9 +1547,9 @@ export class SessionManager {
 			this.#sessionFile = newSessionFile;
 		}
 
-		// Update cwd and sessionDir (controlled mutation of readonly fields)
-		(this as unknown as { cwd: string }).cwd = resolvedCwd;
-		(this as unknown as { sessionDir: string }).sessionDir = newSessionDir;
+		// Update cwd and sessionDir after the move succeeds.
+		this.cwd = resolvedCwd;
+		this.sessionDir = newSessionDir;
 
 		// Update the session header in fileEntries
 		const header = this.#fileEntries.find(e => e.type === "session") as SessionHeader | undefined;
@@ -1449,8 +1557,12 @@ export class SessionManager {
 			header.cwd = resolvedCwd;
 		}
 
-		// Rewrite the session file at its new location with updated header
-		if (this.persist && this.#sessionFile) {
+		// Rewrite the session file at its new location with updated header.
+		// hadSessionFile: file existed before move → must rewrite to update cwd
+		// hasAssistant: assistant messages in memory but file missing → recreate from memory
+		// Neither true → fresh session, never written → preserve lazy-persist
+		const hasAssistant = this.#fileEntries.some(e => e.type === "message" && e.message.role === "assistant");
+		if (this.persist && this.#sessionFile && (hadSessionFile || hasAssistant)) {
 			await this.#rewriteFile();
 		}
 
@@ -1633,12 +1745,21 @@ export class SessionManager {
 
 	/** Flush pending writes to disk. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
-		if (!this.#persistWriter) return;
 		await this.#queuePersistTask(async () => {
 			if (this.#persistWriter) {
 				await this.#persistWriter.flush();
 				await this.#persistWriter.fsync();
 			}
+		});
+		if (this.#persistError) throw this.#persistError;
+	}
+
+	/** Close the persistent writer after flushing all pending data. */
+	async close(): Promise<void> {
+		if (!this.#persistWriter) return;
+		await this.#queuePersistTask(async () => {
+			await this.#closePersistWriterInternal();
+			this.#flushed = true;
 		});
 		if (this.#persistError) throw this.#persistError;
 	}
