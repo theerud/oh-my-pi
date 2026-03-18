@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [13.13.0] - 2026-03-18
+### Changed
+
+- Changed tool argument validation to always normalize optional null values before type coercion, ensuring consistent handling of LLM-generated 'null' strings
+
+### Fixed
+
+- Fixed tool argument validation to properly handle string 'null' values from LLMs on optional fields by stripping them during normalization
+- Improved type safety of `validateToolCall` and `validateToolArguments` functions by returning properly typed `ToolCall["arguments"]` instead of `any`
+
+## [13.12.9] - 2026-03-17
+### Changed
+
+- Extracted OpenAI compatibility detection and resolution logic into dedicated `openai-completions-compat` module for improved maintainability and reusability
+
+### Fixed
+
+- Fixed `openai-responses` manual history replay to strip replay-only item IDs and preserve normalized tool `call_id` values for GitHub Copilot follow-up turns ([#457](https://github.com/can1357/oh-my-pi/issues/457))
+
 ## [13.12.0] - 2026-03-14
 
 ### Added
