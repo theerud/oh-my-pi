@@ -46,6 +46,7 @@ import {
 	calculateRateLimitBackoffMs,
 	getSupportedEfforts,
 	isContextOverflow,
+	isUsageLimitError,
 	modelsAreEqual,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai";
@@ -363,6 +364,7 @@ export class AgentSession {
 	#followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#planModeState: PlanModeState | undefined;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -781,7 +783,6 @@ export class AgentSession {
 						attempt: this.#retryAttempt,
 					});
 					this.#retryAttempt = 0;
-					this.#resolveRetry();
 				}
 			}
 
@@ -857,6 +858,7 @@ export class AgentSession {
 				const didRetry = await this.#handleRetryableError(msg);
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
+			this.#resolveRetry();
 
 			if (msg.stopReason === "aborted" && this.#checkpointState) {
 				this.#checkpointState = undefined;
@@ -2566,6 +2568,74 @@ export class AgentSession {
 		});
 	}
 
+	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
+		this.#pendingNextTurnMessages.push(message);
+		if (!triggerTurn) return;
+		const generation = this.#promptGeneration;
+		if (this.#scheduledHiddenNextTurnGeneration === generation) {
+			return;
+		}
+		this.#scheduledHiddenNextTurnGeneration = generation;
+		this.#schedulePostPromptTask(
+			async () => {
+				if (this.#scheduledHiddenNextTurnGeneration === generation) {
+					this.#scheduledHiddenNextTurnGeneration = undefined;
+				}
+				if (this.#pendingNextTurnMessages.length === 0) {
+					return;
+				}
+				try {
+					await this.#promptQueuedHiddenNextTurnMessages();
+				} catch {
+					// Leave the hidden next-turn messages queued for the next explicit prompt.
+				}
+			},
+			{
+				generation,
+				onSkip: () => {
+					if (this.#scheduledHiddenNextTurnGeneration === generation) {
+						this.#scheduledHiddenNextTurnGeneration = undefined;
+					}
+				},
+			},
+		);
+	}
+
+	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
+		if (this.#pendingNextTurnMessages.length === 0) {
+			return;
+		}
+
+		const queuedMessages = [...this.#pendingNextTurnMessages];
+		this.#pendingNextTurnMessages = [];
+		const message = queuedMessages[queuedMessages.length - 1];
+		if (!message) {
+			return;
+		}
+
+		const prependMessages = queuedMessages.slice(0, -1);
+		const textContent = this.#getCustomMessageTextContent(message);
+		try {
+			await this.#promptWithMessage(message, textContent, {
+				prependMessages,
+				skipPostPromptRecoveryWait: true,
+			});
+		} catch (error) {
+			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+			throw error;
+		}
+	}
+
+	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
+		if (typeof message.content === "string") {
+			return message.content;
+		}
+		return message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map(content => content.text)
+			.join("");
+	}
+
 	/**
 	 * Throw an error if the text is an extension command.
 	 */
@@ -2606,7 +2676,7 @@ export class AgentSession {
 		};
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
-				this.#pendingNextTurnMessages.push(appMessage);
+				this.#queueHiddenNextTurnMessage(appMessage, options?.triggerTurn ?? false);
 				return;
 			}
 
@@ -2615,6 +2685,22 @@ export class AgentSession {
 			} else {
 				this.agent.steer(appMessage);
 			}
+			return;
+		}
+
+		if (options?.deliverAs === "nextTurn") {
+			if (options?.triggerTurn) {
+				await this.agent.prompt(appMessage);
+				return;
+			}
+			this.agent.appendMessage(appMessage);
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution ?? "agent",
+			);
 			return;
 		}
 
@@ -2685,9 +2771,9 @@ export class AgentSession {
 		return { steering, followUp };
 	}
 
-	/** Number of pending messages (includes both steering and follow-up) */
+	/** Number of pending messages (includes steering, follow-up, and next-turn messages) */
 	get queuedMessageCount(): number {
-		return this.#steeringMessages.length + this.#followUpMessages.length;
+		return this.#steeringMessages.length + this.#followUpMessages.length + this.#pendingNextTurnMessages.length;
 	}
 
 	/** Get pending messages (read-only) */
@@ -2829,6 +2915,7 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.#promptGeneration++;
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#resolveTtsrResume();
 		this.#cancelPostPromptTasks();
 		this.agent.abort();
@@ -2878,6 +2965,7 @@ export class AgentSession {
 		this.#steeringMessages = [];
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
 		this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
@@ -3611,6 +3699,7 @@ export class AgentSession {
 			this.#steeringMessages = [];
 			this.#followUpMessages = [];
 			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#todoReminderCount = 0;
 
 			// Inject the handoff document as a custom message
@@ -4278,7 +4367,9 @@ export class AgentSession {
 							const shouldRetry =
 								retrySettings.enabled &&
 								attempt < retrySettings.maxRetries &&
-								(retryAfterMs !== undefined || this.#isRetryableErrorMessage(message));
+								(retryAfterMs !== undefined ||
+									this.#isTransientErrorMessage(message) ||
+									isUsageLimitError(message));
 							if (!shouldRetry) {
 								lastError = error;
 								break;
@@ -4476,8 +4567,9 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable (overloaded, rate limit, server errors).
+	 * Check if an error is retryable (transient errors or usage limits).
 	 * Context overflow errors are NOT retryable (handled by compaction instead).
+	 * Usage-limit errors are retryable because the retry handler performs credential switching.
 	 */
 	#isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
@@ -4487,18 +4579,15 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
-		return this.#isRetryableErrorMessage(err);
+		return this.#isTransientErrorMessage(err) || isUsageLimitError(err);
 	}
 
-	#isRetryableErrorMessage(errorMessage: string): boolean {
-		// Match: overloaded_error, rate limit, usage limit, 429, 500, 502, 503, 504, service unavailable, connection error, fetch failed, retry delay exceeded, stream stall
-		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay|stream stall/i.test(
+	#isTransientErrorMessage(errorMessage: string): boolean {
+		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
+		// service unavailable, network/connection errors, fetch failed, terminated, retry delay exceeded
+		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall/i.test(
 			errorMessage,
 		);
-	}
-
-	#isUsageLimitErrorMessage(errorMessage: string): boolean {
-		return /usage.?limit|usage_limit_reached|limit_reached|quota.?exceeded|resource.?exhausted/i.test(errorMessage);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
@@ -4582,7 +4671,7 @@ export class AgentSession {
 		const errorMessage = message.errorMessage || "Unknown error";
 		let delayMs = retrySettings.baseDelayMs * 2 ** (this.#retryAttempt - 1);
 
-		if (this.model && this.#isUsageLimitErrorMessage(errorMessage)) {
+		if (this.model && isUsageLimitError(errorMessage)) {
 			const retryAfterMs =
 				this.#parseRetryAfterMsFromError(errorMessage) ??
 				calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
@@ -4960,6 +5049,7 @@ export class AgentSession {
 		this.#steeringMessages = [];
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		// Flush pending writes before switching
 		await this.sessionManager.flush();
@@ -5059,6 +5149,7 @@ export class AgentSession {
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
