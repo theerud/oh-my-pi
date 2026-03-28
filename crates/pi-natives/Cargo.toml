@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
+mimalloc = "0.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 napi = { version = "3", features = ["napi10", "tokio_rt", "tokio_time"] }
@@ -25,7 +26,8 @@ clap = { version = "4", features = ["derive"] }
 os_pipe = "1"
 portable-pty = "0.9"
 grep-regex = { version = "0.1", optional = true }
-grep-searcher = { version = "0.1", optional = true }
+fff-grep = { version = "0.4", optional = true }
+fff = { package = "fff-search", version = "0.4.2", default-features = false, features = ["zlob"], optional = true }
 grep-matcher = { version = "0.1", optional = true }
 globset = "0.4"
 ignore = "0.4"
@@ -96,6 +98,7 @@ smallvec = { version = "1.15.1", features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+memmap2 = "0.9"
 
 [features]
 default = ["full"]
@@ -162,8 +165,16 @@ shell-native = ["dep:brush-core", "dep:brush-builtins"]
 shell-system = []
 
 # Text search (grep) - Native (grep crates) or System (rg)
-text-search-native = ["dep:grep-regex", "dep:grep-searcher", "dep:grep-matcher"]
+text-search-native = ["dep:grep-regex", "dep:fff-grep", "dep:fff", "dep:grep-matcher"]
 text-search-system = []
+
+# Fuzzy search (fff) - Native (fff-search crate) or System (fzf)
+fuzzy-search-native = ["dep:fff"]
+fuzzy-search-system = []
+
+# File discovery (glob) - Native (walkdir/ignore) or System (fd)
+discovery-native = []
+discovery-system = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

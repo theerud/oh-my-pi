@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [13.16.3] - 2026-03-28
+### Changed
+
+- Modified OAuth credential saving to preserve unrelated identities instead of replacing all credentials for a provider
+- Updated credential identity resolution to use provider context for more accurate email deduplication
+
+### Fixed
+
+- Fixed OAuth credential updates to replace matching credentials in-place rather than creating disabled rows, preventing unbounded accumulation of soft-deleted credentials
+
 ## [13.15.0] - 2026-03-23
 
 ### Added

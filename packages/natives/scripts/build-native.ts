@@ -152,10 +152,14 @@ if (isLean) {
 	features.add("structural-search-system");
 	features.add("text-search-system");
 	features.add("shell-system");
+	features.add("fuzzy-search-system");
+	features.add("discovery-system");
 } else {
 	features.add("structural-search-native");
 	features.add("text-search-native");
 	features.add("shell-native");
+	features.add("fuzzy-search-native");
+	features.add("discovery-native");
 }
 
 if (!noHighlights) {
