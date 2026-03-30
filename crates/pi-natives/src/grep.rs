@@ -774,14 +774,36 @@ mod native_impl {
 	}
 
 	pub fn read_file_bytes(path: &Path, prefer_text_fast_path: bool) -> io::Result<Option<FileBytes>> {
-		let file = File::open(path)?;
-		let metadata = file.metadata()?;
-		if metadata.len() > MAX_FILE_BYTES { return Ok(None); }
-		if metadata.len() == 0 { return Ok(Some(FileBytes::Owned(Vec::new()))); }
+        let metadata = std::fs::symlink_metadata(path)?;
+        let resolved_metadata = if metadata.file_type().is_symlink() {
+            let target_metadata = std::fs::metadata(path)?;
+            if !target_metadata.is_file() {
+                return Ok(None);
+            }
+            target_metadata
+        } else if metadata.is_file() {
+            metadata
+        } else {
+            return Ok(None);
+        };
+        if resolved_metadata.len() > MAX_FILE_BYTES {
+		    return Ok(None);
+        } else if resolved_metadata.len() == 0 {
+            return Ok(Some(FileBytes::Owned(Vec::new())));
+        }
+        let file = File::open(path)?;
 
-		let bytes = match unsafe { memmap2::Mmap::map(&file) } {
-			Ok(mapped) => FileBytes::Mapped(mapped),
-			Err(_) => FileBytes::Owned(std::fs::read(path)?),
+        let mapping = unsafe {
+            // SAFETY: The mapping is read-only and tied to the opened file
+            // handle. We do not mutate through this view; the map is dropped
+            // immediately after search for each file.
+            memmap2::Mmap::map(&file)
+        };
+
+		let bytes = if let Ok(mapped) = mapping {
+			FileBytes::Mapped(mapped)
+        } else {
+			FileBytes::Owned(std::fs::read(path)?)
 		};
 
 		if prefer_text_fast_path && is_known_text_path(path) {
