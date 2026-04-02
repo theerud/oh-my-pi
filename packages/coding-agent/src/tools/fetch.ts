@@ -1,16 +1,15 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { ptree, truncate } from "@oh-my-pi/pi-utils";
-import { type Static, Type } from "@sinclair/typebox";
 import { parseHTML } from "linkedom";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
-import fetchDescription from "../prompts/tools/fetch.md" with { type: "text" };
+import type { ToolSession } from "../sdk";
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
@@ -20,8 +19,7 @@ import { extractWithParallel, findParallelApiKey, getParallelExtractContent } fr
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
-import { convertWithMarkitdown, fetchBinary } from "../web/scrapers/utils";
-import type { ToolSession } from ".";
+import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { formatExpandHint, getDomain } from "./render-utils";
@@ -34,7 +32,7 @@ import { clampTimeout } from "./tool-timeouts";
 // =============================================================================
 
 const FETCH_DEFAULT_MAX_LINES = 300;
-// Convertible document types (markitdown supported)
+// Convertible document types handled by markit.
 const CONVERTIBLE_MIMES = new Set([
 	"application/pdf",
 	"application/msword",
@@ -45,6 +43,7 @@ const CONVERTIBLE_MIMES = new Set([
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	"application/rtf",
 	"application/epub+zip",
+	"application/x-ipynb+json",
 	"application/zip",
 	"image/png",
 	"image/jpeg",
@@ -65,6 +64,7 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".xlsx",
 	".rtf",
 	".epub",
+	".ipynb",
 	".png",
 	".jpg",
 	".jpeg",
@@ -133,6 +133,10 @@ function normalizeUrl(url: string): string {
 	return url;
 }
 
+export function isReadableUrlPath(value: string): boolean {
+	return /^https?:\/\//i.test(value) || /^www\./i.test(value);
+}
+
 /**
  * Normalize MIME type (lowercase, strip charset/params)
  */
@@ -164,7 +168,7 @@ function getExtensionHint(url: string, contentDisposition?: string): string {
 }
 
 /**
- * Check if content type is convertible via markitdown
+ * Check if content type is convertible via markit.
  */
 function isConvertible(mime: string, extensionHint: string): boolean {
 	if (CONVERTIBLE_MIMES.has(mime)) return true;
@@ -711,18 +715,18 @@ async function renderUrl(
 				notes.push("Fetched image binary");
 				const conversionExtension = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
 				let convertedText: string | null = null;
-				const converted = await convertWithMarkitdown(binary.buffer, conversionExtension, timeout, signal);
+				const converted = await convertWithMarkit(binary.buffer, conversionExtension, timeout, signal);
 				if (converted.ok) {
 					if (converted.content.trim().length > 50) {
-						notes.push("Converted with markitdown");
+						notes.push("Converted with markit");
 						convertedText = converted.content;
 					} else {
-						notes.push("markitdown conversion produced no usable output");
+						notes.push("markit conversion produced no usable output");
 					}
 				} else if (converted.error) {
-					notes.push(`markitdown conversion failed: ${converted.error}`);
+					notes.push(`markit conversion failed: ${converted.error}`);
 				} else {
-					notes.push("markitdown conversion failed");
+					notes.push("markit conversion failed");
 				}
 
 				if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
@@ -736,7 +740,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-too-large",
+						method: convertedText ? "markit" : "image-too-large",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -761,7 +765,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-invalid",
+						method: convertedText ? "markit" : "image-invalid",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -779,7 +783,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-too-large",
+						method: convertedText ? "markit" : "image-too-large",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -819,27 +823,27 @@ async function renderUrl(
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
-			const converted = await convertWithMarkitdown(binary.buffer, ext, timeout, signal);
+			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
 			if (converted.ok) {
 				if (converted.content.trim().length > 50) {
-					notes.push("Converted with markitdown");
+					notes.push("Converted with markit");
 					const output = finalizeOutput(converted.content);
 					return {
 						url,
 						finalUrl,
 						contentType: mime,
-						method: "markitdown",
+						method: "markit",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
 						notes,
 					};
 				}
-				notes.push("markitdown conversion produced no usable output");
+				notes.push("markit conversion produced no usable output");
 			} else if (converted.error) {
-				notes.push(`markitdown conversion failed: ${converted.error}`);
+				notes.push(`markit conversion failed: ${converted.error}`);
 			} else {
-				notes.push("markitdown conversion failed");
+				notes.push("markit conversion failed");
 			}
 		} else if (binary.error) {
 			notes.push(`Binary fetch failed: ${binary.error}`);
@@ -1007,7 +1011,7 @@ async function renderUrl(
 				const binary = await fetchBinary(docUrl, timeout, signal);
 				if (binary.ok) {
 					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkitdown(binary.buffer, ext, timeout, signal);
+					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
 					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
 						notes.push(`Extracted and converted document: ${docUrl}`);
 						const output = finalizeOutput(converted.content);
@@ -1023,7 +1027,7 @@ async function renderUrl(
 						};
 					}
 					if (!converted.ok && converted.error) {
-						notes.push(`markitdown conversion failed: ${converted.error}`);
+						notes.push(`markit conversion failed: ${converted.error}`);
 					}
 				} else if (binary.error) {
 					notes.push(`Binary fetch failed: ${binary.error}`);
@@ -1080,13 +1084,8 @@ async function renderUrl(
 // Tool Definition
 // =============================================================================
 
-const fetchSchema = Type.Object({
-	url: Type.String({ description: "URL to fetch" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 20)" })),
-	raw: Type.Optional(Type.Boolean({ description: "Return raw HTML without transforms" })),
-});
-
-export interface FetchToolDetails {
+export interface ReadUrlToolDetails {
+	kind: "url";
 	url: string;
 	finalUrl: string;
 	contentType: string;
@@ -1096,96 +1095,180 @@ export interface FetchToolDetails {
 	meta?: OutputMeta;
 }
 
-export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails> {
-	readonly name = "fetch";
-	readonly label = "Fetch";
-	readonly description: string;
-	readonly parameters = fetchSchema;
-	readonly strict = true;
+interface ReadUrlCacheEntry {
+	artifactId?: string;
+	details: ReadUrlToolDetails;
+	image?: FetchImagePayload;
+	output: string;
+}
 
-	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(fetchDescription);
+const readUrlCache = new Map<string, ReadUrlCacheEntry>();
+
+function getReadUrlCacheKey(session: ToolSession, requestedUrl: string, raw: boolean): string {
+	const scope = session.getSessionFile() ?? session.cwd;
+	return `${scope}::${raw ? "raw" : "rendered"}::${normalizeUrl(requestedUrl)}`;
+}
+
+async function readArtifactOutput(session: ToolSession, artifactId: string): Promise<string | null> {
+	const artifactsDir = session.getArtifactsDir?.();
+	if (!artifactsDir) return null;
+
+	try {
+		const files = await fs.readdir(artifactsDir);
+		const match = files.find(file => file.startsWith(`${artifactId}.`));
+		if (!match) return null;
+		return await Bun.file(path.join(artifactsDir, match)).text();
+	} catch {
+		return null;
+	}
+}
+
+async function materializeReadUrlCacheEntry(
+	session: ToolSession,
+	entry: ReadUrlCacheEntry,
+): Promise<ReadUrlCacheEntry | null> {
+	if (entry.artifactId) {
+		const artifactOutput = await readArtifactOutput(session, entry.artifactId);
+		if (artifactOutput !== null) {
+			return { ...entry, output: artifactOutput };
+		}
 	}
 
-	async execute(
-		_toolCallId: string,
-		params: Static<typeof fetchSchema>,
-		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<FetchToolDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<FetchToolDetails>> {
-		const { url, timeout: rawTimeout = 20, raw = false } = params;
+	return entry.output.length > 0 ? entry : null;
+}
 
-		// Clamp to valid range (seconds)
-		const effectiveTimeout = clampTimeout("fetch", rawTimeout);
+async function persistReadUrlArtifact(session: ToolSession, output: string): Promise<string | undefined> {
+	const { path: artifactPath, id } = (await session.allocateOutputArtifact?.("read")) ?? {};
+	if (!artifactPath) return undefined;
+	await Bun.write(artifactPath, output);
+	return id;
+}
 
-		if (signal?.aborted) {
-			throw new ToolAbortError();
-		}
+async function ensureReadUrlCacheArtifact(session: ToolSession, entry: ReadUrlCacheEntry): Promise<ReadUrlCacheEntry> {
+	if (entry.artifactId) return entry;
+	const artifactId = await persistReadUrlArtifact(session, entry.output);
+	return artifactId ? { ...entry, artifactId } : entry;
+}
 
-		const result = await renderUrl(url, effectiveTimeout, raw, this.session.settings, signal);
-		const truncation = truncateHead(result.content, {
-			maxBytes: DEFAULT_MAX_BYTES,
-			maxLines: FETCH_DEFAULT_MAX_LINES,
-		});
-		const needsArtifact = truncation.truncated;
-		let artifactId: string | undefined;
+function cacheReadUrlEntry(session: ToolSession, requestedUrl: string, raw: boolean, entry: ReadUrlCacheEntry): void {
+	readUrlCache.set(getReadUrlCacheKey(session, requestedUrl, raw), entry);
+	readUrlCache.set(getReadUrlCacheKey(session, entry.details.finalUrl, raw), entry);
+}
 
-		const buildOutput = (content: string): string => {
-			let output = "";
-			output += `URL: ${result.finalUrl}\n`;
-			output += `Content-Type: ${result.contentType}\n`;
-			output += `Method: ${result.method}\n`;
-			if (result.notes.length > 0) {
-				output += `Notes: ${result.notes.join("; ")}\n`;
-			}
-			output += `\n---\n\n`;
-			output += content;
-			return output;
-		};
+async function buildReadUrlCacheEntry(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+	options?: { ensureArtifact?: boolean },
+): Promise<ReadUrlCacheEntry> {
+	const { path: url, timeout: rawTimeout = 20, raw = false } = params;
 
-		if (needsArtifact) {
-			const { path: artifactPath, id } = (await this.session.allocateOutputArtifact?.("fetch")) ?? {};
-			if (artifactPath) {
-				await Bun.write(artifactPath, buildOutput(result.content));
-				artifactId = id;
-			}
-		}
+	const effectiveTimeout = clampTimeout("fetch", rawTimeout);
 
-		const output = buildOutput(needsArtifact ? truncation.content : result.content);
+	if (signal?.aborted) {
+		throw new ToolAbortError();
+	}
 
-		const details: FetchToolDetails = {
+	const result = await renderUrl(url, effectiveTimeout, raw, session.settings, signal);
+	const output = buildUrlReadOutput(result, result.content);
+	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
+
+	return {
+		artifactId,
+		details: {
+			kind: "url",
 			url: result.url,
 			finalUrl: result.finalUrl,
 			contentType: result.contentType,
 			method: result.method,
-			truncated: Boolean(result.truncated || needsArtifact),
+			truncated: Boolean(result.truncated),
 			notes: result.notes,
-		};
+		},
+		image: result.image,
+		output,
+	};
+}
 
-		const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: output }];
-		if (result.image) {
-			contentBlocks.push({ type: "image", data: result.image.data, mimeType: result.image.mimeType });
+export async function loadReadUrlCacheEntry(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+	options?: { ensureArtifact?: boolean; preferCached?: boolean },
+): Promise<ReadUrlCacheEntry> {
+	const raw = params.raw ?? false;
+	const cached = readUrlCache.get(getReadUrlCacheKey(session, params.path, raw));
+	if (options?.preferCached && cached) {
+		const prepared = options.ensureArtifact ? await ensureReadUrlCacheArtifact(session, cached) : cached;
+		const materialized = await materializeReadUrlCacheEntry(session, prepared);
+		if (materialized) {
+			cacheReadUrlEntry(session, params.path, raw, materialized);
+			return materialized;
 		}
-
-		const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(result.finalUrl);
-		if (needsArtifact) {
-			resultBuilder.truncation(truncation, { direction: "head", artifactId });
-		} else if (result.truncated) {
-			const outputLines = result.content.split("\n").length;
-			const outputBytes = Buffer.byteLength(result.content, "utf-8");
-			const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
-			const totalLines = outputLines + 1;
-			resultBuilder.truncationFromText(result.content, {
-				direction: "tail",
-				totalLines,
-				totalBytes,
-				maxBytes: MAX_OUTPUT_CHARS,
-			});
-		}
-
-		return resultBuilder.done();
 	}
+
+	const fresh = await buildReadUrlCacheEntry(session, params, signal, {
+		ensureArtifact: options?.ensureArtifact,
+	});
+	cacheReadUrlEntry(session, params.path, raw, fresh);
+	return fresh;
+}
+
+function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
+	let output = "";
+	output += `URL: ${result.finalUrl}\n`;
+	output += `Content-Type: ${result.contentType}\n`;
+	output += `Method: ${result.method}\n`;
+	if (result.notes.length > 0) {
+		output += `Notes: ${result.notes.join("; ")}\n`;
+	}
+	output += `\n---\n\n`;
+	output += content;
+	return output;
+}
+
+export async function executeReadUrl(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+): Promise<AgentToolResult<ReadUrlToolDetails>> {
+	let cacheEntry = await loadReadUrlCacheEntry(session, params, signal, { preferCached: true });
+	const truncation = truncateHead(cacheEntry.output, {
+		maxBytes: DEFAULT_MAX_BYTES,
+		maxLines: FETCH_DEFAULT_MAX_LINES,
+	});
+	const needsArtifact = truncation.truncated;
+	if (needsArtifact && !cacheEntry.artifactId) {
+		cacheEntry = await ensureReadUrlCacheArtifact(session, cacheEntry);
+		cacheReadUrlEntry(session, params.path, params.raw ?? false, cacheEntry);
+	}
+	const output = needsArtifact ? truncation.content : cacheEntry.output;
+	const details: ReadUrlToolDetails = {
+		...cacheEntry.details,
+		truncated: Boolean(cacheEntry.details.truncated || needsArtifact),
+	};
+
+	const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: output }];
+	if (cacheEntry.image) {
+		contentBlocks.push({ type: "image", data: cacheEntry.image.data, mimeType: cacheEntry.image.mimeType });
+	}
+
+	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
+	if (needsArtifact) {
+		resultBuilder.truncation(truncation, { direction: "head", artifactId: cacheEntry.artifactId });
+	} else if (cacheEntry.details.truncated) {
+		const outputLines = cacheEntry.output.split("\n").length;
+		const outputBytes = Buffer.byteLength(cacheEntry.output, "utf-8");
+		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
+		const totalLines = outputLines + 1;
+		resultBuilder.truncationFromText(cacheEntry.output, {
+			direction: "tail",
+			totalLines,
+			totalBytes,
+			maxBytes: MAX_OUTPUT_CHARS,
+		});
+	}
+
+	return resultBuilder.done();
 }
 
 // =============================================================================
@@ -1197,26 +1280,26 @@ function countNonEmptyLines(text: string): number {
 	return text.split("\n").filter(l => l.trim()).length;
 }
 
-/** Render fetch call (URL preview) */
-export function renderFetchCall(
-	args: { url?: string; timeout?: number; raw?: boolean },
+/** Render URL read call (URL preview) */
+export function renderReadUrlCall(
+	args: { path?: string; url?: string; timeout?: number; raw?: boolean },
 	_options: RenderResultOptions,
 	uiTheme: Theme = theme,
 ): Component {
-	const url = args.url ?? "";
+	const url = args.path ?? args.url ?? "";
 	const domain = getDomain(url);
 	const path = truncate(url.replace(/^https?:\/\/[^/]+/, ""), 50, "\u2026");
 	const description = `${domain}${path ? ` ${path}` : ""}`.trim();
 	const meta: string[] = [];
 	if (args.raw) meta.push("raw");
 	if (args.timeout !== undefined) meta.push(`timeout:${args.timeout}s`);
-	const text = renderStatusLine({ icon: "pending", title: "Fetch", description, meta }, uiTheme);
+	const text = renderStatusLine({ icon: "pending", title: "Read", description, meta }, uiTheme);
 	return new Text(text, 0, 0);
 }
 
-/** Render fetch result with tree-based layout */
-export function renderFetchResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: FetchToolDetails },
+/** Render URL read result with tree-based layout */
+export function renderReadUrlResult(
+	result: { content: Array<{ type: string; text?: string }>; details?: ReadUrlToolDetails },
 	options: RenderResultOptions,
 	uiTheme: Theme = theme,
 ): Component {
@@ -1236,7 +1319,7 @@ export function renderFetchResult(
 	const header = renderStatusLine(
 		{
 			icon: truncated ? "warning" : "success",
-			title: "Fetch",
+			title: "Read",
 			description: `${domain}${path ? ` ${path}` : ""}`,
 		},
 		uiTheme,
@@ -1314,9 +1397,3 @@ export function renderFetchResult(
 		},
 	};
 }
-
-export const fetchToolRenderer = {
-	renderCall: renderFetchCall,
-	renderResult: renderFetchResult,
-	mergeCallAndResult: true,
-};

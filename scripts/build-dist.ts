@@ -56,9 +56,10 @@ async function main() {
 	console.log("\n📋 Setting up external dependencies...");
 	const agentPkg = JSON.parse(await fs.readFile(path.join(agentPkgDir, "package.json"), "utf-8"));
 	const rootPkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf-8"));
-	
-	// Identify better-sqlite3 version from root devDeps
+
+	// Identify better-sqlite3 and mupdf version from root devDeps
 	const sqliteVersion = rootPkg.devDependencies["better-sqlite3"] || "latest";
+  const mupdfVersion = rootPkg.devDependencies["mupdf"] || "latest";
 
 	const runtimePkg = {
 		name: "omp-runtime",
@@ -66,7 +67,8 @@ async function main() {
 		private: true,
 		type: "module",
 		dependencies: {
-			"better-sqlite3": sqliteVersion
+			"better-sqlite3": sqliteVersion,
+			"mupdf": mupdfVersion
 		}
 	};
 	await fs.writeFile(path.join(stagingDir, "package.json"), JSON.stringify(runtimePkg, null, 2));

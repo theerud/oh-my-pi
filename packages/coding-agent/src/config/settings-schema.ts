@@ -372,6 +372,12 @@ export const SETTINGS_SCHEMA = {
 			"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
 	},
 
+	"tui.maxInlineImageRows": {
+		type: "number",
+		default: 20,
+		description:
+			"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	},
 	// Display rendering
 	"display.tabWidth": {
 		type: "number",
@@ -1201,7 +1207,17 @@ export const SETTINGS_SCHEMA = {
 	"fetch.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Fetch", description: "Enable the fetch tool for URL fetching" },
+		ui: { tab: "tools", label: "Read URLs", description: "Allow the read tool to fetch and process URLs" },
+	},
+
+	"github.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "GitHub CLI",
+			description: "Enable read-only gh_* tools for GitHub repository, issue, pull request, diff, and search access",
+		},
 	},
 
 	"web_search.enabled": {

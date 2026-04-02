@@ -6,7 +6,11 @@ import { getConfigDirName } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers.js";
+import {
+	clearClaudePluginRootsCache,
+	resolveActiveProjectRegistryPath,
+	resolveOrDefaultProjectRegistryPath,
+} from "../discovery/helpers.js";
 import { PluginManager } from "../extensibility/plugins";
 import {
 	getInstalledPluginsRegistryPath,
@@ -16,6 +20,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import type { InteractiveModeContext } from "../modes/types";
+import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 
 function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -297,6 +302,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
+		name: "tools",
+		description: "Show tools currently visible to the agent",
+		handle: (_command, runtime) => {
+			runtime.ctx.handleToolsCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "extensions",
 		aliases: ["status"],
 		description: "Open Extension Control Center dashboard",
@@ -574,6 +587,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 			{ name: "uninstall", description: "Uninstall a plugin (selector if no args)", usage: "[name@marketplace]" },
 			{ name: "installed", description: "List installed marketplace plugins" },
 			{ name: "upgrade", description: "Upgrade outdated plugins", usage: "[name@marketplace]" },
+			{ name: "help", description: "Show usage guide" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -595,12 +609,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 			const mgr = new MarketplaceManager({
 				marketplacesRegistryPath: getMarketplacesRegistryPath(),
 				installedRegistryPath: getInstalledPluginsRegistryPath(),
+				projectInstalledRegistryPath: await resolveOrDefaultProjectRegistryPath(
+					runtime.ctx.sessionManager.getCwd(),
+				),
 				marketplacesCacheDir: getMarketplacesCacheDir(),
 				pluginsCacheDir: getPluginsCacheDir(),
-				clearPluginRootsCache: () => {
+				clearPluginRootsCache: (extraPaths?: readonly string[]) => {
 					const home = os.homedir();
 					invalidateFsCache(path.join(home, ".claude", "plugins", "installed_plugins.json"));
 					invalidateFsCache(path.join(home, getConfigDirName(), "plugins", "installed_plugins.json"));
+					for (const p of extraPaths ?? []) invalidateFsCache(p);
 					clearClaudePluginRootsCache();
 				},
 			});
@@ -639,7 +657,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 					case "discover": {
 						const plugins = await mgr.listAvailablePlugins(rest || undefined);
 						if (plugins.length === 0) {
-							runtime.ctx.showStatus("No plugins available");
+							const marketplaces = await mgr.listMarketplaces();
+							if (marketplaces.length === 0) {
+								runtime.ctx.showStatus(
+									"No marketplaces configured. Try:\n  /marketplace add anthropics/claude-plugins-official",
+								);
+							} else {
+								runtime.ctx.showStatus("No plugins available in configured marketplaces");
+							}
 						} else {
 							const lines = plugins.map(
 								p =>
@@ -650,17 +675,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 						break;
 					}
 					case "install": {
-						// Parse: /marketplace install [--force] name@marketplace
-						const force = rest.startsWith("--force ");
-						const installSpec = force ? rest.slice("--force ".length).trim() : rest;
-						if (!installSpec?.includes("@")) {
-							runtime.ctx.showStatus("Usage: /marketplace install [--force] <name@marketplace>");
+						// Parse: /marketplace install [--force] [--scope user|project] name@marketplace
+						const parsed = parseMarketplaceInstallArgs(rest);
+						if ("error" in parsed) {
+							runtime.ctx.showStatus(parsed.error);
 							return;
 						}
-						const atIdx = installSpec.lastIndexOf("@");
-						const name = installSpec.slice(0, atIdx);
-						const marketplace = installSpec.slice(atIdx + 1);
-						await mgr.installPlugin(name, marketplace, { force });
+						const atIdx = parsed.installSpec.lastIndexOf("@");
+						const name = parsed.installSpec.slice(0, atIdx);
+						const marketplace = parsed.installSpec.slice(atIdx + 1);
+						await mgr.installPlugin(name, marketplace, { force: parsed.force, scope: parsed.scope });
 						runtime.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 						break;
 					}
@@ -670,8 +694,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 							runtime.ctx.showPluginSelector("uninstall");
 							return;
 						}
-						await mgr.uninstallPlugin(rest);
-						runtime.ctx.showStatus(`Uninstalled ${rest}`);
+						const uninstArgs = parsePluginScopeArgs(
+							rest,
+							"Usage: /marketplace uninstall [--scope user|project] <name@marketplace>",
+						);
+						if ("error" in uninstArgs) {
+							runtime.ctx.showStatus(uninstArgs.error);
+							return;
+						}
+						await mgr.uninstallPlugin(uninstArgs.pluginId, uninstArgs.scope);
+						runtime.ctx.showStatus(`Uninstalled ${uninstArgs.pluginId}`);
 						break;
 					}
 					case "installed": {
@@ -679,15 +711,25 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 						if (installed.length === 0) {
 							runtime.ctx.showStatus("No marketplace plugins installed");
 						} else {
-							const lines = installed.map(p => `  ${p.id} (${p.entries.length} entry)`);
+							const lines = installed.map(
+								p => `  ${p.id} [${p.scope}]${p.shadowedBy ? " [shadowed]" : ""} (${p.entries.length} entry)`,
+							);
 							runtime.ctx.showStatus(`Installed plugins:\n${lines.join("\n")}`);
 						}
 						break;
 					}
 					case "upgrade": {
 						if (rest) {
-							const result = await mgr.upgradePlugin(rest);
-							runtime.ctx.showStatus(`Upgraded ${rest} to ${result.version}`);
+							const upArgs = parsePluginScopeArgs(
+								rest,
+								"Usage: /marketplace upgrade [--scope user|project] <name@marketplace>",
+							);
+							if ("error" in upArgs) {
+								runtime.ctx.showStatus(upArgs.error);
+								return;
+							}
+							const result = await mgr.upgradePlugin(upArgs.pluginId, upArgs.scope);
+							runtime.ctx.showStatus(`Upgraded ${upArgs.pluginId} to ${result.version}`);
 						} else {
 							const results = await mgr.upgradeAllPlugins();
 							if (results.length === 0) {
@@ -699,20 +741,46 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 						}
 						break;
 					}
+					case "help": {
+						runtime.ctx.showStatus(
+							[
+								"Marketplace commands:",
+								"  /marketplace                              Browse and install plugins",
+								"  /marketplace add <source>                  Add a marketplace (e.g. owner/repo)",
+								"  /marketplace remove <name>                 Remove a marketplace",
+								"  /marketplace update [name]                 Re-fetch catalog(s)",
+								"  /marketplace list                          List configured marketplaces",
+								"  /marketplace discover [marketplace]        Browse available plugins",
+								"  /marketplace install <name@marketplace>    Install a plugin",
+								"  /marketplace uninstall <name@marketplace>  Uninstall a plugin",
+								"  /marketplace installed                     List installed plugins",
+								"  /marketplace upgrade [name@marketplace]    Upgrade plugin(s)",
+								"",
+								"Quick start:",
+								"  /marketplace add anthropics/claude-plugins-official",
+								"  /marketplace                               (opens interactive browser)",
+							].join("\n"),
+						);
+						break;
+					}
 					default: {
-						// Default to list marketplaces
 						const marketplaces = await mgr.listMarketplaces();
 						if (marketplaces.length === 0) {
-							runtime.ctx.showStatus("No marketplaces configured. Use /marketplace add <source>");
+							runtime.ctx.showStatus(
+								"No marketplaces configured.\n\nGet started:\n  /marketplace add anthropics/claude-plugins-official\n\nThen browse plugins with /marketplace or /marketplace discover",
+							);
 						} else {
 							const lines = marketplaces.map(m => `  ${m.name}  ${m.sourceUri}`);
-							runtime.ctx.showStatus(`Marketplaces:\n${lines.join("\n")}`);
+							runtime.ctx.showStatus(
+								`Marketplaces:\n${lines.join("\n")}\n\nUse /marketplace discover to browse plugins, or /marketplace help for all commands`,
+							);
 						}
 						break;
 					}
 				}
 			} catch (err) {
-				runtime.ctx.showStatus(`Marketplace error: ${err}`);
+				const msg = err instanceof Error ? err.message : String(err);
+				runtime.ctx.showStatus(`Marketplace error: ${msg}`);
 			}
 		},
 	},
@@ -735,33 +803,34 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 				const mgr = new MarketplaceManager({
 					marketplacesRegistryPath: getMarketplacesRegistryPath(),
 					installedRegistryPath: getInstalledPluginsRegistryPath(),
+					projectInstalledRegistryPath: await resolveOrDefaultProjectRegistryPath(
+						runtime.ctx.sessionManager.getCwd(),
+					),
 					marketplacesCacheDir: getMarketplacesCacheDir(),
 					pluginsCacheDir: getPluginsCacheDir(),
-					clearPluginRootsCache: () => {
+					clearPluginRootsCache: (extraPaths?: readonly string[]) => {
 						const home = os.homedir();
 						invalidateFsCache(path.join(home, ".claude", "plugins", "installed_plugins.json"));
 						invalidateFsCache(path.join(home, getConfigDirName(), "plugins", "installed_plugins.json"));
+						for (const p of extraPaths ?? []) invalidateFsCache(p);
 						clearClaudePluginRootsCache();
 					},
 				});
 
 				switch (sub) {
-					case "enable": {
-						if (!rest) {
-							runtime.ctx.showStatus("Usage: /plugins enable <name@marketplace>");
-							return;
-						}
-						await mgr.setPluginEnabled(rest, true);
-						runtime.ctx.showStatus(`Enabled ${rest}`);
-						break;
-					}
+					case "enable":
 					case "disable": {
-						if (!rest) {
-							runtime.ctx.showStatus("Usage: /plugins disable <name@marketplace>");
+						const parsed = parsePluginScopeArgs(
+							rest ?? "",
+							`Usage: /plugins ${sub} [--scope user|project] <name@marketplace>`,
+						);
+						if ("error" in parsed) {
+							runtime.ctx.showStatus(parsed.error);
 							return;
 						}
-						await mgr.setPluginEnabled(rest, false);
-						runtime.ctx.showStatus(`Disabled ${rest}`);
+						const isEnable = sub === "enable";
+						await mgr.setPluginEnabled(parsed.pluginId, isEnable, parsed.scope);
+						runtime.ctx.showStatus(`${isEnable ? "Enabled" : "Disabled"} ${parsed.pluginId}`);
 						break;
 					}
 					default: {
@@ -784,7 +853,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 							for (const p of mktPlugins) {
 								const entry = p.entries[0];
 								const status = entry?.enabled === false ? " (disabled)" : "";
-								lines.push(`  ${p.id} v${entry?.version ?? "?"}${status}`);
+								const shadowed = p.shadowedBy ? " [shadowed]" : "";
+								lines.push(`  ${p.id} v${entry?.version ?? "?"}${status} [${p.scope}]${shadowed}`);
 							}
 						}
 
@@ -805,11 +875,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		name: "reload-plugins",
 		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
 		handle: async (_command, runtime) => {
-			// Invalidate the fs content cache for both registry files so
+			// Invalidate the fs content cache for all registry files so
 			// listClaudePluginRoots re-reads from disk on next access.
 			const home = os.homedir();
 			invalidateFsCache(path.join(home, ".claude", "plugins", "installed_plugins.json"));
 			invalidateFsCache(path.join(home, getConfigDirName(), "plugins", "installed_plugins.json"));
+			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
+			if (projectPath) invalidateFsCache(projectPath);
 			clearClaudePluginRootsCache();
 			await runtime.ctx.refreshSlashCommandState();
 			runtime.ctx.showStatus("Plugins reloaded.");

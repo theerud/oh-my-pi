@@ -145,6 +145,7 @@ async function build() {
       external: [
         'fsevents',
         'better-sqlite3',
+        'mupdf',
       ],
       loader: {
         '.json': 'json',

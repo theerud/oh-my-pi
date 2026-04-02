@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "13.17.0",
+	"version": "13.18.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://github.com/can1357/oh-my-pi",
 	"author": "Can Boluk",
@@ -35,7 +35,7 @@
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"generate-docs-index": "bun scripts/generate-docs-index.ts",
 		"prepack": "bun scripts/generate-docs-index.ts",
-		"build:binary": "cd ../.. && bun --cwd=packages/stats scripts/generate-client-bundle.ts && bun --cwd=packages/natives run embed:native && bun build --compile --define PI_COMPILED=true --root . ./packages/coding-agent/src/cli.ts --outfile packages/coding-agent/dist/omp && bun --cwd=packages/natives run embed:native --reset && bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset",
+		"build:binary": "cd ../.. && bun --cwd=packages/stats scripts/generate-client-bundle.ts && bun --cwd=packages/natives run embed:native && bun build --compile --define PI_COMPILED=true --external mupdf --root . ./packages/coding-agent/src/cli.ts --outfile packages/coding-agent/dist/omp && bun --cwd=packages/natives run embed:native --reset && bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset",
 		"build:bundle": "cd ../.. && bun --cwd=packages/stats scripts/generate-client-bundle.ts && node packages/coding-agent/scripts/build-node.js && bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset",
 		"generate-template": "bun scripts/generate-template.ts",
 		"test": "bun test"
@@ -54,8 +54,10 @@
 		"ajv": "^8.18",
 		"chalk": "^5.6",
 		"diff": "^8.0",
+		"fflate": "0.8.2",
 		"handlebars": "^4.7",
 		"linkedom": "^0.18",
+		"markit-ai": "0.5.0",
 		"puppeteer": "^24.37",
 		"zod": "4.3.6"
 	},

@@ -2,6 +2,130 @@
 
 ## [Unreleased]
 
+## [13.18.0] - 2026-04-02
+### Breaking Changes
+
+- Removed standalone `fetch` tool; URL fetching is now integrated into the `read` tool
+
+### Added
+
+- Added URL reading capability to `read` tool with support for web pages, GitHub issues, Stack Overflow, Wikipedia, Reddit, NPM, arXiv, technical blogs, RSS/Atom feeds, and JSON endpoints
+- Added `offset` and `limit` parameter support for paginating cached URL fetch results
+- Added URL caching mechanism to avoid redundant network requests when reading the same URL multiple times
+
+### Changed
+
+- Renamed `fetch.enabled` setting to `Read URLs` with updated description to reflect integration with read tool
+- Updated `read` tool to accept `timeout` and `raw` parameters for URL handling
+- Updated `read` tool to support `file://` URLs for local file paths
+- Removed `fetch` tool from agent tool lists (explore, librarian, oracle, plan, reviewer agents)
+
+### Fixed
+
+- Fixed `read` tool to properly handle `file://` URL scheme by converting to filesystem paths
+
+## [13.17.5] - 2026-04-01
+### Added
+
+- Added support for writing to ZIP archives using fflate library for cross-platform compatibility
+
+### Changed
+
+- Modified archive writing to detect and handle ZIP files separately from Bun archives
+
+### Removed
+
+- Removed GhPrPushTool test case
+
+## [13.17.4] - 2026-04-01
+### Added
+
+- Support for writing to archive entries in `.tar`, `.tar.gz`, `.tgz`, and `.zip` files using `archive.ext:path/inside/archive` syntax
+- Ability to create new archives when writing to archive subpaths that don't yet exist
+
+## [13.17.3] - 2026-04-01
+
+### Added
+
+- Added support for converting Jupyter notebooks (`.ipynb`) to markdown via markit
+- Added `markit-ai` npm package for native document and notebook conversion
+- Added support for reading files from `.tar`, `.tar.gz`, `.tgz`, and `.zip` archives using virtual subpaths like `archive.ext:path/to/file`
+- Added ability to list archive contents and navigate subdirectories within supported archive formats
+- Added archive-aware `read` support for `.tar`, `.tar.gz`, `.tgz`, and `.zip`, including virtual subpaths like `archive.ext:path/to/file`
+- Added `/tools` slash command to show the tools currently visible to the agent in the interactive session
+
+### Changed
+
+- Replaced Python-based markitdown CLI tool with native `markit-ai` library for document conversion
+- Updated document conversion to use markit library instead of external markitdown command
+- Removed markitdown from Python tools manager (no longer needed as external dependency)
+- Updated `read` tool documentation to reflect archive support and usage patterns
+
+## [13.17.2] - 2026-04-01
+### Added
+
+- Added `/marketplace help` command to display usage guide for all marketplace operations
+- Added dedicated `gh-renderer.ts` module for rich terminal rendering of GitHub Actions workflow runs with live status snapshots and job details
+- Added `gh_pr_checkout` tool to check out GitHub pull requests into dedicated git worktrees with contributor push metadata
+- Added `gh_pr_push` tool to push checked-out pull request branches back to their source branches
+- Added `gh_repo_view` tool to read GitHub repository metadata using the local GitHub CLI
+- Added `gh_issue_view` tool to read GitHub issues with optional comment context
+- Added `gh_pr_view` tool to read GitHub pull requests with optional comment context
+- Added `gh_pr_diff` tool to read GitHub pull request diffs with optional file filtering
+- Added `gh_search_issues` tool to search GitHub issues with repository scoping
+- Added `gh_search_prs` tool to search GitHub pull requests with repository scoping
+- Added `gh_run_watch` tool to watch GitHub Actions workflow runs, fast-fail on job failures, and stream tailed logs for failed jobs
+- Added `github.enabled` setting to enable read-only `gh_*` GitHub CLI tools for repository, issue, pull request, diff, and search workflows
+- Added bundled `/green` command to generate iterative CI fix prompts with optional tag instructions when HEAD is tagged
+- Added `github.enabled` setting to enable read-only `gh_*` GitHub CLI tools for repository, issue, pull request, diff, and search workflows
+- Added `gh_repo_view` tool to read GitHub repository metadata using the local GitHub CLI
+- Added `gh_issue_view` tool to read GitHub issues with optional comment context
+- Added `gh_pr_view` tool to read GitHub pull requests with optional comment context
+- Added `gh_pr_diff` tool to read GitHub pull request diffs with optional file filtering
+- Added `gh_search_issues` tool to search GitHub issues with repository scoping
+- Added `gh_search_prs` tool to search GitHub pull requests with repository scoping
+- Added `gh_run_watch` tool to watch GitHub Actions workflow runs, fast-fail on job failures, and stream tailed logs for failed jobs
+- Added bundled `/green` command to generate iterative CI fix prompts with optional tag instructions when HEAD is tagged
+- Project-scoped marketplace plugin installs: `omp plugin install --scope project name@marketplace` and `/marketplace install --scope project name@marketplace` install plugins into the nearest `.omp/` or `.git`-rooted project directory instead of the user directory ([#581](https://github.com/can1357/oh-my-pi/issues/581))
+- `--scope user|project` flag added to `/marketplace uninstall`, `/marketplace upgrade`, `/plugins enable`, and `/plugins disable` to disambiguate when a plugin is installed in both scopes
+- `omp plugin upgrade --scope project` with no plugin ID warns that `--scope` is ignored for bulk upgrades
+- Added opt-in `gh_*` GitHub CLI tools behind the `github.enabled` setting for repository, issue, pull request, diff, and search workflows
+- Added opt-in `gh_run_watch` to fast-fail GitHub Actions runs, stream job status snapshots, and return tailed logs for failed jobs
+- Added bundled `/green` command to generate the iterative “fix CI until green” prompt, with final tag instructions included only when `HEAD` already has a tag
+
+### Changed
+
+- Improved marketplace catalog parsing to skip invalid plugin entries with warnings instead of failing the entire catalog load
+- Enhanced `/marketplace discover` command to suggest adding the official marketplace when no plugins are available
+- Improved `/marketplace` command messaging with clearer guidance for first-time setup and available commands
+- Enhanced `gh_run_watch` tool call rendering to display animated spinner status and target description (run ID, branch, or current HEAD) with improved visual hierarchy
+- Enhanced `gh_pr_view` tool to include inline review comments alongside pull request reviews for improved discussion context
+- Improved `gh_run_watch` tool output rendering with dedicated visual component for streaming run snapshots and job status updates
+
+### Fixed
+
+- Fixed marketplace error messages to display error details instead of object stringification
+- Fixed artifact storage for non-persistent sessions to use in-memory fallback instead of returning undefined, enabling proper spill truncation for all session types
+- Fixed prompt file formatting to include trailing newlines at EOF for consistency across all prompt markdown files
+- Fixed `gh_pr_diff` to preserve raw patch content instead of normalizing tabs and whitespace
+- Fixed `gh_pr_view` to include inline review comments alongside pull request reviews and issue-style comments for discussion context
+- Fixed `gh_run_watch` to resolve explicit branch watches against the selected branch head instead of local `HEAD`
+- Fixed `gh_run_watch` to hide repo and polling internals from the tool schema and save full failed-job logs as session artifacts alongside the inline tailed output
+- Fixed `gh_*` tool outputs to spill full large results to artifacts instead of pre-truncating the head with unusable `offset=` guidance
+- Fixed bundled `/green` to watch the workflow runs for the current `HEAD` commit instead of whichever branch run was newest
+- Fixed OpenAI Responses session rehydration to strip stale assistant replay payloads before resumed requests ([#594](https://github.com/can1357/oh-my-pi/pull/594) by [@daandden](https://github.com/daandden))
+- Fixed inline image rendering to cap image height and preserve multiplexer scrollback during terminal resizes ([#587](https://github.com/can1357/oh-my-pi/pull/587) by [@smileynet](https://github.com/smileynet))
+
+## [13.17.1] - 2026-04-01
+### Removed
+
+- Removed `code_search` tool for code snippet and documentation search
+
+### Fixed
+
+- Fixed edit tool diff rendering to wrap long diff lines with continuation gutters instead of truncating them at terminal width ([#578](https://github.com/can1357/oh-my-pi/issues/578))
+- Fixed `--list-models` and `/model` provider filtering to hide models from disabled providers ([#588](https://github.com/can1357/oh-my-pi/issues/588))
+- Fixed edit tool diffstats to use diff-specific add/remove theme colors instead of success/error status colors ([#589](https://github.com/can1357/oh-my-pi/issues/589))
 ## [13.17.0] - 2026-03-30
 
 ### Added

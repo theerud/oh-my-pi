@@ -36,6 +36,7 @@ ast-grep-core = { version = "0.39", default-features = false, features = ["tree-
 tree-sitter = { version = "0.25", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
 tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-clojure = { version = "0.1", optional = true }
 tree-sitter-c-sharp = { version = "0.23", optional = true }
 tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-css = { version = "0.25", optional = true }
@@ -122,6 +123,7 @@ structural-search-native = [
    "dep:tree-sitter",
    "dep:tree-sitter-bash",
    "dep:tree-sitter-c",
+   "dep:tree-sitter-clojure",
    "dep:tree-sitter-c-sharp",
    "dep:tree-sitter-cpp",
    "dep:tree-sitter-css",

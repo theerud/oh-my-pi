@@ -12,6 +12,10 @@ pub fn language_c() -> TSLanguage {
 	tree_sitter_c::LANGUAGE.into()
 }
 #[cfg(feature = "structural-search-native")]
+pub fn language_clojure() -> TSLanguage {
+	tree_sitter_clojure::LANGUAGE.into()
+}
+#[cfg(feature = "structural-search-native")]
 pub fn language_cpp() -> TSLanguage {
 	tree_sitter_cpp::LANGUAGE.into()
 }

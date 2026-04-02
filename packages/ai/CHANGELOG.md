@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [13.17.6] - 2026-04-01
+
+### Fixed
+
+- Fixed Anthropic first-event timeouts to exclude stream connection setup from the watchdog, preserve timeout-specific retry classification after local aborts, and reset retry state cleanly between attempts
+
+## [13.17.5] - 2026-04-01
+### Changed
+
+- Increased default first-event timeout from 15s to 45s to better accommodate longer request setup times
+- Modified first-event watchdog to inherit idle timeout when it exceeds the default, ensuring consistent timeout behavior across different configurations
+
+### Fixed
+
+- Fixed first-event watchdog initialization timing so it no longer starts before the actual stream request is created, preventing premature timeouts during request setup
+- Fixed first-event watchdog timing so OpenAI-family providers no longer count slow request setup against the first streamed event timeout, and raised the default first-event timeout to avoid false aborts after long tool turns
+
+## [13.17.2] - 2026-04-01
+
+### Fixed
+
+- Fixed OpenAI-family first-event timeouts to preserve provider-specific timeout errors for retry classification instead of flattening them to generic aborts ([#591](https://github.com/can1357/oh-my-pi/issues/591))
+
+## [13.17.1] - 2026-04-01
+
+### Added
+
+- Added `thinkingSignature` field to thinking content blocks to preserve the original reasoning field name (e.g., `reasoning_text`, `reasoning_content`) for accurate follow-up requests
+- Added first-event timeout detection for streaming responses to abort stuck requests before user-visible content arrives
+- Added `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` environment variable to configure first-event timeout (defaults to 15 seconds or idle timeout, whichever is lower)
+
+### Changed
+
+- Changed thinking block handling to track and distinguish between different reasoning field types, enabling proper field name preservation across multiple turns
+
+### Fixed
+
+- Fixed Anthropic stream timeout errors to be properly retried by recognizing first-event timeout messages
+- Fixed stream stall detection to distinguish between first-event timeouts and idle timeouts, enabling faster recovery for stuck connections
+
+### Added
+
+- Added Vercel AI Gateway to `/login` providers for interactive API key setup
+
+### Fixed
+- Fixed `omp commit` failing with HTTP 400 errors when using reasoning-enabled models on OpenAI-compatible endpoints that don't support the `developer` role (e.g., GitHub Copilot, custom proxies). Now falls back to `system` role when `developer` is unsupported.
+
 ## [13.17.0] - 2026-03-30
 
 ### Changed
