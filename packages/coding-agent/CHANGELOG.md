@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [13.19.0] - 2026-04-05
+### Added
+
+- Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
+- Added `onExternalEditor` callback to extension UI dialog options for handling external editor shortcut in select dialogs
+- Added external editor shortcut support in plan review selector, allowing users to open and edit the plan in their configured editor
+- Added `matchesAppExternalEditor` keybinding matcher to detect external editor shortcut (Ctrl+G or configured binding)
+- Added `trimTrailingNewline` option to `openInEditor` function to preserve trailing newlines when editing files
+- Added GitHub CLI utilities to git module (`utils/git.github`) with `available()`, `run()`, `json()`, and `text()` methods for GitHub CLI operations
+- Exported git utilities from main package entry point for use by extensions
+- Added comprehensive git utility module (`utils/git`) with organized namespaces for common git operations (branch, commit, diff, log, patch, ref, stage, status, head, repository)
+
+### Changed
+
+- Changed idle compaction settings (`compaction.idleThresholdTokens` and `compaction.idleTimeoutSeconds`) from enum to numeric type for flexible configuration
+- Modified secret obfuscation to deobfuscate restored session messages for local display while keeping outbound LLM messages obfuscated
+- Updated stash pop operation to preserve staged changes with `--index` flag when restoring after task branch merges
+- Changed secret placeholders to deterministic hash-style redaction tokens and deobfuscated assistant output for local display.
+- Updated hook editor and hook selector components to use `matchesAppExternalEditor` matcher for consistent external editor keybinding detection
+- Modified plan review flow to read the latest plan content from disk before approval, allowing changes made in external editor to be reflected
+- Enhanced plan review help text to dynamically display the configured external editor keybinding
+- Refactored git operations to use centralized utility module instead of `ControlledGit` class throughout codebase
+- Replaced `ControlledGit` dependency injection pattern with direct `cwd` parameter in commit agent tools
+- Migrated git HEAD resolution in footer and status-line components to use new synchronous and asynchronous utilities
+- Updated git status summary calculation in status-line component to use new git utility API
+- Simplified git branch operations in task execution and cleanup to use new utility functions
+- Refactored patch application logic in task worktree to use new git patch utilities
+
+### Removed
+
+- Removed `gh-cli.ts` module; GitHub CLI functionality now available via `utils/git.github`
+- Removed `ControlledGit` class and associated git wrapper infrastructure from `commit/git` module
+- Removed `mergeStdoutStderr` helper function from autoresearch git utilities
+- Removed `findGitHeadPathAsync` and `findGitHeadPathSync` from modes/shared module (replaced by git utilities)
+- Removed `./commit/git` export from package.json (internal diff parsing still available via `./commit/git/*`)
+
+### Fixed
+
+- Fixed idle compaction timer to properly cancel when event controller is disposed, preventing memory leaks
+- Fixed session resumption to preserve the last non-empty session when starting a fresh session
+- Fixed stash detection to use git ref resolution instead of output parsing for reliable stash state tracking
+- Fixed isolated task merge-back to preserve task outputs on merge failure and stash dirty worktrees before cherry-pick.
+- Fixed web search source rendering to truncate long title, metadata, and URL lines before they overflow the UI.
+- Fixed PR checkout tool to resolve symlinks in worktree paths, ensuring consistent path references in results and metadata
+- Fixed `read` output for file-backed internal URLs like `local://...` to include hashline prefixes in hashline edit mode, preserving usable line refs for follow-up edits
+- Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
+
 ## [13.18.0] - 2026-04-02
 ### Breaking Changes
 
@@ -354,6 +401,9 @@
 
 - Fixed resumed and session-switched GitHub Copilot/OpenAI Responses conversations replaying stale assistant native history from older saved sessions by sanitizing persisted assistant replay metadata on rehydration and resetting provider session state across live session boundaries ([#505](https://github.com/can1357/oh-my-pi/issues/505))
 
+### Added
+
+- Session observer overlay (`Ctrl+S`): view running subagent sessions with a picker and read-only transcript showing thinking, text, tool calls, and results
 ## [13.14.0] - 2026-03-20
 
 ### Added
