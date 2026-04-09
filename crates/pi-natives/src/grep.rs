@@ -29,6 +29,21 @@ use crate::{
 #[cfg(feature = "text-search-native")]
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Output mode for [`search`] and [`grep`] (string values match JS callers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum GrepOutputMode {
+	/// Emit matched lines (and optional context lines).
+	#[napi(value = "content")]
+	Content,
+	/// Emit per-file or total counts instead of line content.
+	#[napi(value = "count")]
+	Count,
+	/// Emit one row per file that matched, without line content.
+	#[napi(value = "filesWithMatches")]
+	FilesWithMatches,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
 	Content,
@@ -62,7 +77,7 @@ pub struct SearchOptions {
 	#[napi(js_name = "maxColumns")]
 	pub max_columns:    Option<u32>,
 	/// Output mode (content or count).
-	pub mode:           Option<String>,
+	pub mode:           Option<GrepOutputMode>,
 }
 
 /// Options for searching files on disk.
@@ -105,7 +120,7 @@ pub struct GrepOptions<'env> {
 	#[napi(js_name = "maxColumns")]
 	pub max_columns:    Option<u32>,
 	/// Output mode (content, filesWithMatches, or count).
-	pub mode:           Option<String>,
+	pub mode:           Option<GrepOutputMode>,
 	/// Abort signal for cancelling the operation.
 	pub signal:         Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
@@ -117,6 +132,7 @@ pub struct GrepOptions<'env> {
 #[derive(Clone)]
 #[napi(object)]
 pub struct ContextLine {
+	/// 1-indexed line number in the source file.
 	#[napi(js_name = "lineNumber")]
 	pub line_number: u32,
 	/// Raw line content (trimmed line ending).
@@ -217,7 +233,7 @@ pub struct GrepConfig {
 	pub context_after:  Option<u32>,
 	pub context:        Option<u32>,
 	pub max_columns:    Option<u32>,
-	pub mode:           Option<String>,
+	pub mode:           Option<GrepOutputMode>,
 }
 
 pub enum TypeFilter {
@@ -265,9 +281,9 @@ pub struct FileEntry {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "text-search-native")]
-fn parse_output_mode(mode: Option<&str>) -> OutputMode {
+fn parse_output_mode(mode: Option<GrepOutputMode>) -> OutputMode {
 	match mode {
-		Some("count" | "filesWithMatches") => OutputMode::Count,
+		Some(GrepOutputMode::Count | GrepOutputMode::FilesWithMatches) => OutputMode::Count,
 		_ => OutputMode::Content,
 	}
 }
@@ -989,7 +1005,7 @@ mod native_impl {
 	pub fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
 		let ignore_case = options.ignore_case.unwrap_or(false);
 		let multiline = options.multiline.unwrap_or(false);
-		let mode = parse_output_mode(options.mode.as_deref());
+		let mode = parse_output_mode(options.mode);
 		let matcher = match build_matcher(&options.pattern, ignore_case, multiline) {
 			Ok(matcher) => matcher,
 			Err(err) => return empty_search_result(Some(err.to_string())),
@@ -1025,7 +1041,7 @@ mod native_impl {
 		let metadata = std::fs::metadata(&search_path).map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
 		let ignore_case = options.ignore_case.unwrap_or(false);
 		let multiline = options.multiline.unwrap_or(false);
-		let output_mode = parse_output_mode(options.mode.as_deref());
+		let output_mode = parse_output_mode(options.mode);
 		let matcher = build_matcher(&options.pattern, ignore_case, multiline)?;
 
 		let (context_before, context_after) = resolve_context(options.context, options.context_before, options.context_after);
@@ -1228,6 +1244,16 @@ use system_impl::*;
 #[cfg(all(not(feature = "text-search-native"), not(feature = "text-search-system")))]
 use no_impl::*;
 
+/// Search content for a pattern (one-shot, compiles pattern each time).
+/// For repeated searches with the same pattern, use [`grep`] with file
+/// filters.
+///
+/// # Arguments
+/// - `content`: `Uint8Array`/`Buffer` (zero-copy) or `string` (UTF-8).
+/// - `options`: Regex settings, context, and output mode.
+///
+/// # Returns
+/// Match list plus counts/limit status; errors are surfaced in `error`.
 #[napi(js_name = "search")]
 pub fn search(content: Either<JsString, Uint8Array>, options: SearchOptions) -> SearchResult {
 	match &content {
@@ -1242,6 +1268,16 @@ pub fn search(content: Either<JsString, Uint8Array>, options: SearchOptions) -> 
 	}
 }
 
+/// Quick check if content matches a pattern.
+///
+/// # Arguments
+/// - `content`: `Uint8Array`/`Buffer` (zero-copy) or `string` (UTF-8).
+/// - `pattern`: `Uint8Array`/`Buffer` (zero-copy) or `string` (UTF-8).
+/// - `ignore_case`: Case-insensitive matching.
+/// - `multiline`: Enable multiline regex mode.
+///
+/// # Returns
+/// True if any match exists; false on no match.
 #[napi(js_name = "hasMatch")]
 pub fn has_match(
 	content: Either<JsString, Uint8Array>,
@@ -1269,8 +1305,16 @@ pub fn has_match(
 	}
 }
 
+/// Search files for a regex pattern.
+///
+/// # Arguments
+/// - `options`: Pattern, path, filters, and output mode.
+/// - `on_match`: Optional callback invoked per match/result.
+///
+/// # Returns
+/// Aggregated results across matching files.
 #[napi(js_name = "grep")]
-pub fn grep(options: GrepOptions<'_>, #[napi(ts_arg_type = "((match: GrepMatch) => void) | undefined | null")] on_match: Option<ThreadsafeFunction<GrepMatch>>, db: Option<&SearchDb>) -> task::Async<GrepResult> {
+pub fn grep(options: GrepOptions<'_>, #[napi(ts_arg_type = "((match: GrepMatch) => void) | undefined | null")] on_match: Option<ThreadsafeFunction<GrepMatch>>, db: Option<&SearchDb>) -> task::Promise<GrepResult> {
 	let GrepOptions { pattern, path, glob, type_filter, ignore_case, multiline, hidden, gitignore, cache, max_count, offset, context_before, context_after, context, max_columns, mode, signal, timeout_ms } = options;
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let db = db.cloned();

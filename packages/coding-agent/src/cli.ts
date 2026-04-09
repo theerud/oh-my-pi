@@ -5,6 +5,7 @@ import { APP_NAME, MIN_BUN_VERSION, VERSION } from "@oh-my-pi/pi-utils";
  * lightweight CLI runner from pi-utils.
  */
 import { type CommandEntry, run } from "@oh-my-pi/pi-utils/cli";
+import { renderTopLevelHelp, type RootCommandSummary } from "./cli/help-text";
 
 function parseSemver(version: string): [number, number, number] {
 	function toint(value: string): number {
@@ -42,31 +43,25 @@ if (Bun.stringWidth("\x1b[0m\x1b]8;;\x07") !== 0) {
 
 process.title = APP_NAME;
 
-const commands: CommandEntry[] = [
-	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
-	{ name: "agents", load: () => import("./commands/agents").then(m => m.default) },
-	{ name: "commit", load: () => import("./commands/commit").then(m => m.default) },
-	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
-	{ name: "grep", load: () => import("./commands/grep").then(m => m.default) },
-	{ name: "jupyter", load: () => import("./commands/jupyter").then(m => m.default) },
-	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
-	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
-	{ name: "shell", load: () => import("./commands/shell").then(m => m.default) },
-	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },
-	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
-	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
-	{ name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
-];
+type RegisteredCommand = CommandEntry & RootCommandSummary;
 
-async function showHelp(config: import("@oh-my-pi/pi-utils/cli").CliConfig): Promise<void> {
-	const { renderRootHelp } = await import("@oh-my-pi/pi-utils/cli");
-	const { getExtraHelpText } = await import("./cli/args");
-	renderRootHelp(config);
-	const extra = getExtraHelpText();
-	if (extra.trim().length > 0) {
-		process.stdout.write(`\n${extra}\n`);
-	}
-}
+const commands: RegisteredCommand[] = [
+	{ name: "launch", description: "AI coding assistant", hidden: true, load: () => import("./commands/launch").then(m => m.default) },
+	{ name: "agents", description: "Manage bundled task agents", load: () => import("./commands/agents").then(m => m.default) },
+	{ name: "commit", description: "Generate a commit message and update changelogs", load: () => import("./commands/commit").then(m => m.default) },
+	{ name: "config", description: "Manage configuration settings", load: () => import("./commands/config").then(m => m.default) },
+	{ name: "grep", description: "Test grep tool", load: () => import("./commands/grep").then(m => m.default) },
+	{ name: "grievances", description: "View reported tool issues (auto-QA grievances)", load: () => import("./commands/grievances").then(m => m.default) },
+	{ name: "read", description: "Read a file as a chunk tree", load: () => import("./commands/read").then(m => m.default) },
+	{ name: "jupyter", description: "Manage the shared Jupyter gateway", load: () => import("./commands/jupyter").then(m => m.default) },
+	{ name: "plugin", description: "Manage plugins (install, uninstall, list, etc.)", load: () => import("./commands/plugin").then(m => m.default) },
+	{ name: "setup", description: "Install dependencies for optional features", load: () => import("./commands/setup").then(m => m.default) },
+	{ name: "shell", description: "Interactive shell console", load: () => import("./commands/shell").then(m => m.default) },
+	{ name: "ssh", description: "Manage SSH host configurations", load: () => import("./commands/ssh").then(m => m.default) },
+	{ name: "stats", description: "View usage statistics", load: () => import("./commands/stats").then(m => m.default) },
+	{ name: "update", description: "Check for and install updates", load: () => import("./commands/update").then(m => m.default) },
+	{ name: "search", description: "Test web search providers", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
+];
 
 /**
  * Determine whether argv[0] is a known subcommand name.
@@ -79,16 +74,20 @@ function isSubcommand(first: string | undefined): boolean {
 
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export function runCli(argv: string[]): Promise<void> {
-	// --help and --version are handled by run() directly, don't rewrite those.
-	// Everything else that isn't a known subcommand routes to "launch".
 	const first = argv[0];
+	if (first === "--help" || first === "-h" || first === "help") {
+		renderTopLevelHelp(APP_NAME, VERSION, commands);
+		return Promise.resolve();
+	}
 	const runArgv =
-		first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help"
-			? argv
-			: isSubcommand(first)
-				? argv
-				: ["launch", ...argv];
-	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands, help: showHelp });
+		first === "--version" || first === "-v" ? argv : isSubcommand(first) ? argv : ["launch", ...argv];
+	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands });
 }
 
-await runCli(process.argv.slice(2));
+try {
+	await runCli(process.argv.slice(2));
+} catch (error) {
+	const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+	process.stderr.write(`${message}\n`);
+	process.exit(1);
+}

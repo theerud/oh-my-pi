@@ -386,7 +386,7 @@ pub fn glob(
 		ThreadsafeFunction<GlobMatch>,
 	>,
 	db: Option<&SearchDb>,
-) -> task::Async<GlobResult> {
+) -> task::Promise<GlobResult> {
 	let GlobOptions {
 		pattern,
 		path,

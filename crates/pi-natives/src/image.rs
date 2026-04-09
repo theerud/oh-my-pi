@@ -10,6 +10,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 #[napi]
+/// Sampling filter for resize operations.
 pub enum SamplingFilter {
 	/// Nearest-neighbor sampling (fast, low quality).
 	Nearest    = 1,
@@ -51,12 +52,13 @@ mod implementation {
 
 	/// Image container for native interop.
 	#[napi]
+	/// Image container for native interop.
 	pub struct PhotonImage {
 		/// Shared decoded image data.
 		img: Arc<DynamicImage>,
 	}
 
-	type ImageTask = task::Async<PhotonImage>;
+	type ImageTask = task::Promise<PhotonImage>;
 
 	#[napi]
 	impl PhotonImage {
@@ -97,7 +99,7 @@ mod implementation {
 		/// # Errors
 		/// Returns an error if encoding fails or format is invalid.
 		#[napi(js_name = "encode")]
-		pub fn encode(&self, format: u8, quality: u8) -> task::Async<Vec<u8>> {
+		pub fn encode(&self, format: u8, quality: u8) -> task::Promise<Vec<u8>> {
 			let img = Arc::clone(&self.img);
 			task::blocking("image.encode", (), move |_| encode_image(&img, format, quality))
 		}
@@ -192,47 +194,74 @@ mod implementation {
 	use crate::task;
 
 	#[napi]
+	/// Image container for native interop.
 	pub struct PhotonImage {}
 
 	#[napi]
 	impl PhotonImage {
+		/// Create a new `PhotonImage` from encoded image bytes (PNG, JPEG, WebP,
+		/// GIF). Returns the decoded image handle on success.
+		///
+		/// # Errors
+		/// Returns an error if the image format cannot be detected or decoded.
 		#[napi(js_name = "parse")]
-		pub fn parse(_bytes: Uint8Array) -> task::Async<PhotonImage> {
+		pub fn parse(_bytes: Uint8Array) -> task::Promise<PhotonImage> {
 			task::blocking("image.decode", (), |_| {
 				Err(Error::from_reason("Feature 'image' is not enabled in this build"))
 			})
 		}
 
+		/// Get the image width in pixels.
 		#[napi(getter, js_name = "width")]
 		pub fn get_width(&self) -> u32 {
 			0
 		}
 
+		/// Get the image height in pixels.
 		#[napi(getter, js_name = "height")]
 		pub fn get_height(&self) -> u32 {
 			0
 		}
 
+		/// Encode the image to bytes in the specified format.
+		///
+		/// Format values (matching the historical TS `ImageFormat` enum):
+		/// - 0: PNG
+		/// - 1: JPEG
+		/// - 2: WebP
+		/// - 3: GIF
+		///
+		/// # Errors
+		/// Returns an error when image support is disabled in this build.
 		#[napi(js_name = "encode")]
-		pub fn encode(&self, _format: u8, _quality: u8) -> task::Async<Vec<u8>> {
+		pub fn encode(&self, _format: u8, _quality: u8) -> task::Promise<Vec<u8>> {
 			task::blocking("image.encode", (), |_| {
 				Err(Error::from_reason("Feature 'image' is not enabled in this build"))
 			})
 		}
 
+		/// Resize the image to the specified pixel dimensions using the filter.
+		/// Returns a new `PhotonImage` containing the resized image.
 		#[napi(js_name = "resize")]
 		pub fn resize(
 			&self,
 			_width: u32,
 			_height: u32,
 			_filter: SamplingFilter,
-		) -> task::Async<PhotonImage> {
+		) -> task::Promise<PhotonImage> {
 			task::blocking("image.resize", (), |_| {
 				Err(Error::from_reason("Feature 'image' is not enabled in this build"))
 			})
 		}
 	}
 
+	/// Encode image bytes into a SIXEL escape sequence for terminal rendering.
+	///
+	/// The input image is decoded and resized to the requested pixel dimensions
+	/// before encoding.
+	///
+	/// # Errors
+	/// Returns an error when image support is disabled in this build.
 	#[napi(js_name = "encodeSixel")]
 	pub fn encode_sixel(
 		_bytes: Uint8Array,

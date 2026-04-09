@@ -190,6 +190,10 @@ mod native_impl {
 	#[napi]
 	impl Shell {
 		#[napi(constructor)]
+		/// Create a new shell session from optional configuration.
+		///
+		/// The options set session-scoped environment variables and a snapshot
+		/// path.
 		pub fn new(options: Option<ShellOptions>) -> Self {
 			let config = options.map_or_else(
 				|| ShellConfig { session_env: None, snapshot_path: None },
@@ -203,6 +207,11 @@ mod native_impl {
 		}
 
 		#[napi]
+		/// Run a shell command using the provided options.
+		///
+		/// The `on_chunk` callback receives streamed stdout/stderr output.
+		/// Returns the exit code when the command completes, or flags when
+		/// cancelled or timed out.
 		pub fn run<'e>(
 			&self,
 			env: &'e Env,
@@ -226,6 +235,9 @@ mod native_impl {
 		}
 
 		#[napi]
+		/// Abort all running commands for this shell session.
+		///
+		/// Returns `Ok(())` even when no commands are running.
 		pub async fn abort(&self) -> Result<()> {
 			self.abort_state.abort().await;
 			Ok(())
@@ -1082,16 +1094,19 @@ mod system_impl {
 	use super::*;
 
 	#[napi]
+	/// Persistent shell session backed by an external `bash` process.
 	pub struct Shell {}
 
 	#[napi]
 	impl Shell {
 		#[napi(constructor)]
+		/// Create a new shell session from optional configuration.
 		pub fn new(_options: Option<ShellOptions>) -> Self {
 			Self {}
 		}
 
 		#[napi]
+		/// Run a shell command using the provided options.
 		pub fn run<'e>(
 			&self,
 			env: &'e Env,
@@ -1114,6 +1129,7 @@ mod system_impl {
 		}
 
 		#[napi]
+		/// Abort all running commands for this shell session.
 		pub async fn abort(&self) -> Result<()> {
 			Ok(())
 		}
@@ -1192,15 +1208,18 @@ mod system_impl {
 mod no_impl {
 	use super::*;
 	#[napi]
+	/// Persistent shell session placeholder used when shell support is disabled.
 	pub struct Shell {}
 	#[napi]
 	impl Shell {
 		#[napi(constructor)]
+		/// Create a new shell session from optional configuration.
 		pub fn new(_options: Option<ShellOptions>) -> Self {
 			Self {}
 		}
 
 		#[napi]
+		/// Run a shell command using the provided options.
 		pub fn run<'e>(
 			&self,
 			_env: &'e Env,
@@ -1211,6 +1230,7 @@ mod no_impl {
 		}
 
 		#[napi]
+		/// Abort all running commands for this shell session.
 		pub async fn abort(&self) -> Result<()> {
 			Ok(())
 		}
@@ -1224,7 +1244,10 @@ use no_impl::*;
 #[cfg(all(not(feature = "shell-native"), feature = "shell-system"))]
 use system_impl::*;
 
-/// Execute a bash shell command.
+/// Execute a shell command.
+///
+/// In native builds this uses the embedded brush shell. In slim/system builds
+/// it falls back to the external `bash` program.
 #[napi(js_name = "executeShell")]
 pub fn execute_shell<'env>(
 	env: &'env Env,

@@ -148,6 +148,10 @@ Examples:
 }
 
 // Run if executed directly
-if (import.meta.main) {
+const IS_NODE_BUNDLE = Boolean(
+	(globalThis as typeof globalThis & { __OMP_NODE_BUNDLE__?: unknown }).__OMP_NODE_BUNDLE__,
+);
+
+if (!IS_NODE_BUNDLE && import.meta.main) {
 	main();
 }

@@ -31,7 +31,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirs } from "../../config";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -41,11 +41,10 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
-import { renderPromptTemplate } from "../../config/prompt-templates";
 import { Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
-import { createAgentSession } from "../../sdk";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../sdk";
 import { discoverAgents } from "../../task/discovery";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
@@ -84,6 +83,10 @@ interface AgentDashboardModelContext {
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
 }
+
+type CreateAgentSessionFn = (
+	options?: CreateAgentSessionOptions,
+) => Promise<CreateAgentSessionResult>;
 
 const SOURCE_ORDER: Record<AgentSource, number> = {
 	project: 0,
@@ -360,6 +363,7 @@ export class AgentDashboard extends Container {
 		private readonly settings: Settings | null,
 		private readonly terminalHeight: number,
 		private readonly modelContext: AgentDashboardModelContext,
+		private readonly createAgentSession?: CreateAgentSessionFn,
 	) {
 		super();
 	}
@@ -369,8 +373,15 @@ export class AgentDashboard extends Container {
 		settings: Settings | null = null,
 		terminalHeight?: number,
 		modelContext: AgentDashboardModelContext = {},
+		createAgentSession?: CreateAgentSessionFn,
 	): Promise<AgentDashboard> {
-		const dashboard = new AgentDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24, modelContext);
+		const dashboard = new AgentDashboard(
+			cwd,
+			settings,
+			terminalHeight ?? process.stdout.rows ?? 24,
+			modelContext,
+			createAgentSession,
+		);
 		await dashboard.#init();
 		return dashboard;
 	}
@@ -611,6 +622,9 @@ export class AgentDashboard extends Container {
 		if (!modelRegistry) {
 			throw new Error("Model registry unavailable in current session.");
 		}
+		if (!this.createAgentSession) {
+			throw new Error("Agent creation is unavailable in current session.");
+		}
 		await modelRegistry.refresh();
 
 		const settings = this.#settingsManager ?? undefined;
@@ -627,10 +641,10 @@ export class AgentDashboard extends Container {
 			throw new Error("No available model to generate agent specification.");
 		}
 
-		const systemPrompt = renderPromptTemplate(agentCreationArchitectPrompt, { TASK_TOOL_NAME: "task" });
-		const userPrompt = renderPromptTemplate(agentCreationUserPrompt, { request: description });
+		const systemPrompt = prompt.render(agentCreationArchitectPrompt, { TASK_TOOL_NAME: "task" });
+		const userPrompt = prompt.render(agentCreationUserPrompt, { request: description });
 
-		const { session } = await createAgentSession({
+		const { session } = await this.createAgentSession({
 			cwd: this.cwd,
 			authStorage: modelRegistry.authStorage,
 			modelRegistry,

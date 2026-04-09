@@ -458,7 +458,7 @@ mod system_impl {
 pub fn fuzzy_find(
 	mut options: FuzzyFindOptions<'_>,
 	db: Option<&crate::search_db::SearchDb>,
-) -> task::Async<FuzzyFindResult> {
+) -> task::Promise<FuzzyFindResult> {
 	let timeout_ms = options.timeout_ms;
 	let signal = options.signal.take();
 

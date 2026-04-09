@@ -3,12 +3,11 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import { type AstReplaceChange, astEdit } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
+import { computeLineHash } from "../edit/line-hash";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
-import { computeLineHash } from "../patch/hashline";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -31,6 +30,7 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
+import { queueResolveHandler } from "./resolve";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -71,7 +71,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly strict = true;
 	readonly deferrable = true;
 	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(astEditDescription);
+		this.description = prompt.render(astEditDescription);
 	}
 
 	async execute(
@@ -201,7 +201,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				filesSearched: result.filesSearched,
 				applied: result.applied,
 				limitReached: result.limitReached,
-				parseErrors: dedupedParseErrors,
+				...(dedupedParseErrors.length > 0 ? { parseErrors: dedupedParseErrors } : {}),
 				scopePath,
 				files: fileList,
 				fileReplacements: [],
@@ -289,7 +289,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (!result.applied && result.totalReplacements > 0) {
 				const previewReplacementPlural = result.totalReplacements !== 1 ? "s" : "";
 				const previewFilePlural = result.filesTouched !== 1 ? "s" : "";
-				this.session.pendingActionStore?.push({
+				queueResolveHandler(this.session, {
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
@@ -311,7 +311,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							filesSearched: applyResult.filesSearched,
 							applied: applyResult.applied,
 							limitReached: applyResult.limitReached,
-							parseErrors: dedupedApplyParseErrors,
+							...(dedupedApplyParseErrors.length > 0 ? { parseErrors: dedupedApplyParseErrors } : {}),
 							scopePath,
 							files: fileList,
 							fileReplacements,

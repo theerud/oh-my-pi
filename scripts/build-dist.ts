@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
@@ -8,6 +9,26 @@ const distDir = path.join(repoRoot, "dist");
 const stagingDir = path.join(distDir, "omp");
 const isLean = process.argv.includes("--lean");
 const isMinimal = process.argv.includes("--minimal");
+
+function pickSystemBinary(name: string): string {
+	const candidates = childProcess.execSync(`which -a ${name}`).toString().trim().split("\n").filter(Boolean);
+	return candidates.find(candidate => !candidate.includes("bun")) || candidates[0] || name;
+}
+
+function buildSystemNodePath(nodePath: string): string {
+	const nodeDir = path.dirname(nodePath);
+	const bunDir = path.dirname(process.execPath);
+	const existing = (process.env.PATH ?? "")
+		.split(path.delimiter)
+		.filter(Boolean)
+		.filter(entry => path.resolve(entry) !== path.resolve(bunDir) && path.resolve(entry) !== path.resolve(nodeDir));
+	return [nodeDir, ...existing].join(path.delimiter);
+}
+
+function findLockedPackageVersion(lockText: string, packageName: string): string | null {
+	const match = lockText.match(new RegExp(`"${packageName}": \\["${packageName}@([^"]+)"`));
+	return match?.[1] ?? null;
+}
 
 async function main() {
 	console.log("🚀 Starting distribution build...");
@@ -57,9 +78,14 @@ async function main() {
 	const agentPkg = JSON.parse(await fs.readFile(path.join(agentPkgDir, "package.json"), "utf-8"));
 	const rootPkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf-8"));
 
-	// Identify better-sqlite3 and mupdf version from root devDeps
-	const sqliteVersion = rootPkg.devDependencies["better-sqlite3"] || "latest";
-  const mupdfVersion = rootPkg.devDependencies["mupdf"] || "latest";
+	// Identify runtime-native dependency versions from the current workspace.
+	const lockText = await Bun.file(path.join(repoRoot, "bun.lock")).text();
+	const sqliteVersion =
+		rootPkg.devDependencies?.["better-sqlite3"] ??
+		findLockedPackageVersion(lockText, "better-sqlite3") ??
+		"12.8.0";
+	const mupdfVersion =
+		rootPkg.devDependencies?.mupdf ?? findLockedPackageVersion(lockText, "mupdf") ?? "1.27.0";
 
 	const runtimePkg = {
 		name: "omp-runtime",
@@ -68,25 +94,29 @@ async function main() {
 		type: "module",
 		dependencies: {
 			"better-sqlite3": sqliteVersion,
-			"mupdf": mupdfVersion
-		}
+			"mupdf": mupdfVersion,
+		},
 	};
 	await fs.writeFile(path.join(stagingDir, "package.json"), JSON.stringify(runtimePkg, null, 2));
 
-	console.log(`📥 Running npm install for external native modules (better-sqlite3@${sqliteVersion})...`);
-	// Use child_process.execSync to bypass Bun's shell environment and explicitly target the system node version
-	const { execSync } = await import("node:child_process");
-	// Find system node/npm that aren't Bun's temporary shims
-	const nodePaths = execSync("which -a node").toString().trim().split("\n");
-	const nodePath = nodePaths.find(p => !p.includes("bun")) || nodePaths[0];
-	const npmPaths = execSync("which -a npm").toString().trim().split("\n");
-	const npmPath = npmPaths.find(p => !p.includes("bun")) || npmPaths[0];
+	console.log(
+		`📥 Running npm install for external runtime modules (better-sqlite3@${sqliteVersion}, mupdf@${mupdfVersion})...`,
+	);
+	const nodePath = pickSystemBinary("node");
+	const npmPath = pickSystemBinary("npm");
+	const nodeVersion = childProcess.execFileSync(nodePath, ["-p", "process.versions.node"], { encoding: "utf-8" }).trim();
+	const installPath = buildSystemNodePath(nodePath);
 
-	const nodeVersion = execSync(`${nodePath} -v`).toString().trim().replace("v", "");
-	execSync(`${npmPath} install --omit=dev --no-package-lock --target=${nodeVersion}`, {
+	childProcess.execFileSync(npmPath, ["install", "--omit=dev", "--no-package-lock", `--target=${nodeVersion}`], {
 		cwd: stagingDir,
 		stdio: "inherit",
-		env: { ...process.env, npm_config_user_agent: undefined }
+		env: {
+			...process.env,
+			PATH: installPath,
+			npm_config_runtime: "node",
+			npm_config_target: nodeVersion,
+			npm_config_user_agent: undefined,
+		},
 	});
 
 	// 6. Create Tarball

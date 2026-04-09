@@ -1,4 +1,4 @@
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import OpenAI from "openai";
 import type {
 	Tool as OpenAITool,
@@ -191,8 +191,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				body: params,
 			};
 			const openaiStream = await client.responses.create(params, { signal: requestSignal });
-			const firstEventWatchdog = createFirstEventWatchdog(getStreamFirstEventTimeoutMs(idleTimeoutMs), () =>
-				abortTracker.abortLocally(firstEventTimeoutAbortError),
+			const firstEventWatchdog = createFirstEventWatchdog(
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs),
+				() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 			);
 			if (copilotPremiumRequests !== undefined) output.usage.premiumRequests = copilotPremiumRequests;
 			stream.push({ type: "start", partial: output });
@@ -212,7 +213,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 						if (!firstTokenTime) firstTokenTime = Date.now();
 					},
 					onOutputItemDone: item => {
-						nativeOutputItems.push(structuredClone(item as unknown as Record<string, unknown>));
+						nativeOutputItems.push(structuredCloneJSON<unknown>(item) as unknown as Record<string, unknown>);
 					},
 				},
 			);

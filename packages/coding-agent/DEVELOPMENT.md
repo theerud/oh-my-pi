@@ -515,7 +515,6 @@ extensions loader  hooks loader   skills loader
 ```
 
 ### Discovery bootstrap and provider registration
->>>>>>> main
 
 `packages/coding-agent/src/discovery/index.ts` is a side-effect bootstrap module:
 
@@ -1117,11 +1116,7 @@ Use only script names that exist in `packages/coding-agent/package.json`:
 - Regenerate template artifacts:
   - `bun --cwd=packages/coding-agent run generate-template`
 - Build compiled binary artifact (`dist/omp`):
-  - `bun --cwd=packages/coding-agent run build:binary`
-- Build Node.js bundle artifact (`dist/omp.js`):
-  - `bun --cwd=packages/coding-agent run build:bundle`
-
-### Testing
+  - `bun --cwd=packages/coding-agent run build`
 
 `packages/coding-agent/README.md` intentionally delegates install/config/CLI docs to the monorepo root README (`../../README.md`) and keeps package-specific references to `CHANGELOG.md`, `docs/`, and `DEVELOPMENT.md`.
 

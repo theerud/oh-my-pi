@@ -1,10 +1,13 @@
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as yaml from "js-yaml";
 import * as toml from "smol-toml";
+
+const require = createRequire(import.meta.url);
 
 // Re-export for convenience
 export { path, os };
@@ -435,13 +438,144 @@ export function ptr() {
 }
 export const CString = {};
 
+const BetterSqlite3 = require("better-sqlite3") as new (
+	path: string,
+	options?: { readonly?: boolean; fileMustExist?: boolean },
+) => {
+	close(): void;
+	exec(source: string): void;
+	prepare(source: string): {
+		all(...params: unknown[]): unknown[];
+		get(...params: unknown[]): unknown;
+		run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+	};
+	transaction<TArgs extends unknown[], TResult>(fn: (...args: TArgs) => TResult): (...args: TArgs) => TResult;
+};
+
+function normalizeSqliteParams(params: unknown[]): unknown[] {
+	if (params.length === 1 && Array.isArray(params[0])) {
+		return params[0];
+	}
+	return params;
+}
+
+export class Statement {
+	#statement: {
+		all(...params: unknown[]): unknown[];
+		get(...params: unknown[]): unknown;
+		run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+	};
+
+	constructor(statement: {
+		all(...params: unknown[]): unknown[];
+		get(...params: unknown[]): unknown;
+		run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+	}) {
+		this.#statement = statement;
+	}
+
+	run(...params: unknown[]) {
+		return this.#statement.run(...normalizeSqliteParams(params));
+	}
+
+	get(...params: unknown[]) {
+		return this.#statement.get(...normalizeSqliteParams(params));
+	}
+
+	all(...params: unknown[]) {
+		return this.#statement.all(...normalizeSqliteParams(params));
+	}
+
+	values(...params: unknown[]) {
+		return this.#statement.all(...normalizeSqliteParams(params)) as unknown[][];
+	}
+
+	finalize(): void {}
+}
+
+export class Database {
+	#db: InstanceType<typeof BetterSqlite3>;
+
+	constructor(dbPath: string, options?: { readonly?: boolean; create?: boolean }) {
+		const openOptions: { readonly?: boolean; fileMustExist?: boolean } = {};
+		if (options?.readonly !== undefined) {
+			openOptions.readonly = options.readonly;
+		}
+		if (options?.create === false) {
+			openOptions.fileMustExist = true;
+		}
+		this.#db = new BetterSqlite3(dbPath, openOptions);
+	}
+
+	run(source: string, ...params: unknown[]) {
+		const normalizedParams = normalizeSqliteParams(params);
+		if (normalizedParams.length === 0) {
+			this.#db.exec(source);
+			return { changes: 0, lastInsertRowid: 0 };
+		}
+		return this.prepare(source).run(...normalizedParams);
+	}
+
+	exec(source: string): void {
+		this.#db.exec(source);
+	}
+
+	prepare(source: string): Statement {
+		return new Statement(this.#db.prepare(source));
+	}
+
+	query(source: string): Statement {
+		return this.prepare(source);
+	}
+
+	transaction<TArgs extends unknown[], TResult>(fn: (...args: TArgs) => TResult): (...args: TArgs) => TResult {
+		return this.#db.transaction(fn);
+	}
+
+	close(): void {
+		this.#db.close();
+	}
+}
+
 export const JSONL = {
-	parseChunk: (chunk: Uint8Array) => {
-		const text = new TextDecoder().decode(chunk);
-		return text
-			.split("\n")
-			.filter(line => line.trim().length > 0)
-			.map(line => JSON.parse(line));
+	parseChunk: (chunk: Uint8Array, start = 0, end = chunk.length) => {
+		const safeStart = Math.max(0, Math.min(start, chunk.length));
+		const safeEnd = Math.max(safeStart, Math.min(end, chunk.length));
+		const values: unknown[] = [];
+		let cursor = safeStart;
+		let lineStart = safeStart;
+
+		while (cursor < safeEnd) {
+			if (chunk[cursor] !== 0x0a) {
+				cursor++;
+				continue;
+			}
+			const lineBytes = chunk.subarray(lineStart, cursor);
+			const line = new TextDecoder().decode(lineBytes).replace(/\r$/, "");
+			if (line.trim().length > 0) {
+				try {
+					values.push(JSON.parse(line));
+				} catch (error) {
+					return { values, error, read: cursor + 1, done: false };
+				}
+			}
+			cursor++;
+			lineStart = cursor;
+		}
+
+		if (lineStart < safeEnd) {
+			const lineBytes = chunk.subarray(lineStart, safeEnd);
+			const line = new TextDecoder().decode(lineBytes).replace(/\r$/, "");
+			if (line.trim().length > 0) {
+				try {
+					values.push(JSON.parse(line));
+				} catch (error) {
+					return { values, error, read: lineStart, done: false };
+				}
+			}
+		}
+
+		return { values, error: null, read: safeEnd, done: safeEnd >= end };
 	},
 };
 
@@ -476,9 +610,9 @@ export const Bun = {
 	FFIType,
 	ptr,
 	CString,
+	Database,
+	Statement,
 	path,
 	os,
 	JSONL,
 };
-
-export default Bun;

@@ -16,121 +16,192 @@ use crate::task;
 #[cfg(feature = "structural-search-native")]
 const DEFAULT_FIND_LIMIT: u32 = 50;
 
+/// Options for `astGrep`: patterns, scan scope, and match limits.
 #[napi(object)]
 pub struct AstFindOptions<'env> {
+	/// ast-grep patterns to search for (OR across patterns).
 	pub patterns:     Option<Vec<String>>,
+	/// Language override; otherwise inferred from file extension per candidate.
 	pub lang:         Option<String>,
+	/// Single file or directory to scan (combined with `glob` when set).
 	pub path:         Option<String>,
+	/// Optional glob filter relative to the search root.
 	pub glob:         Option<String>,
+	/// Rule selector for multi-rule ast-grep configurations.
 	pub selector:     Option<String>,
+	/// Pattern strictness; defaults to smart matching when omitted.
 	pub strictness:   Option<String>,
+	/// Maximum matches to return after `offset` (default applies when omitted).
 	pub limit:        Option<u32>,
+	/// Number of leading matches to skip before applying `limit`.
 	pub offset:       Option<u32>,
+	/// When true, include meta-variable bindings per match.
 	#[napi(js_name = "includeMeta")]
 	pub include_meta: Option<bool>,
+	/// Reserved for contextual snippets; not used by the current native find
+	/// path.
 	pub context:      Option<u32>,
+	/// Optional cancellation handle (library-specific).
 	pub signal:       Option<Unknown<'env>>,
+	/// Wall-clock timeout for the worker task in milliseconds.
 	#[napi(js_name = "timeoutMs")]
 	pub timeout_ms:   Option<u32>,
 }
 
+/// One ast-grep match with source range and optional meta-variables.
 #[napi(object)]
 pub struct AstFindMatch {
+	/// Display path of the matching file.
 	pub path:           String,
+	/// Matched source text.
 	pub text:           String,
+	/// Start byte offset in the file (UTF-8 byte index).
 	#[napi(js_name = "byteStart")]
 	pub byte_start:     u32,
+	/// End byte offset in the file (exclusive UTF-8 byte index).
 	#[napi(js_name = "byteEnd")]
 	pub byte_end:       u32,
+	/// 1-based start line.
 	#[napi(js_name = "startLine")]
 	pub start_line:     u32,
+	/// 1-based start column.
 	#[napi(js_name = "startColumn")]
 	pub start_column:   u32,
+	/// 1-based end line.
 	#[napi(js_name = "endLine")]
 	pub end_line:       u32,
+	/// 1-based end column.
 	#[napi(js_name = "endColumn")]
 	pub end_column:     u32,
+	/// Meta-variable name to captured text, when `includeMeta` was enabled.
 	#[napi(js_name = "metaVariables")]
 	pub meta_variables: Option<HashMap<String, String>>,
 }
 
+/// Aggregated search statistics and any parse or compile diagnostics.
 #[napi(object)]
 pub struct AstFindResult {
+	/// Page of matches after sort, offset, and limit.
 	pub matches:            Vec<AstFindMatch>,
+	/// Total matches found before paging (can exceed `matches.length`).
 	#[napi(js_name = "totalMatches")]
 	pub total_matches:      u32,
+	/// Distinct files that contained at least one match.
 	#[napi(js_name = "filesWithMatches")]
 	pub files_with_matches: u32,
+	/// Files examined for the query.
 	#[napi(js_name = "filesSearched")]
 	pub files_searched:     u32,
+	/// True when results were truncated by `limit`.
 	#[napi(js_name = "limitReached")]
 	pub limit_reached:      bool,
+	/// Non-fatal parse or pattern errors collected during the run.
 	#[napi(js_name = "parseErrors")]
 	pub parse_errors:       Option<Vec<String>>,
 }
 
+/// Options for `astEdit`: rewrite rules, scan scope, safety limits, and
+/// dry-run.
 #[napi(object)]
 pub struct AstReplaceOptions<'env> {
+	/// Map of pattern string to replacement template.
 	pub rewrites:            Option<HashMap<String, String>>,
+	/// Language override; otherwise inferred from discovered files.
 	pub lang:                Option<String>,
+	/// Single file or directory to rewrite.
 	pub path:                Option<String>,
+	/// Optional glob filter within the search root.
 	pub glob:                Option<String>,
+	/// Rule selector for multi-rule configurations.
 	pub selector:            Option<String>,
+	/// Pattern strictness for rewrites.
 	pub strictness:          Option<String>,
+	/// When true (default), compute changes without writing files.
 	#[napi(js_name = "dryRun")]
 	pub dry_run:             Option<bool>,
+	/// Cap on replacement applications across all files.
 	#[napi(js_name = "maxReplacements")]
 	pub max_replacements:    Option<u32>,
+	/// Cap on distinct files that may be modified.
 	#[napi(js_name = "maxFiles")]
 	pub max_files:           Option<u32>,
+	/// Fail the operation when a file cannot be parsed for rewriting.
 	#[napi(js_name = "failOnParseError")]
 	pub fail_on_parse_error: Option<bool>,
+	/// Optional cancellation handle.
 	pub signal:              Option<Unknown<'env>>,
+	/// Wall-clock timeout for the worker task in milliseconds.
 	#[napi(js_name = "timeoutMs")]
 	pub timeout_ms:          Option<u32>,
 }
 
+/// One textual replacement applied to a file (before/after slice and
+/// coordinates).
 #[napi(object)]
 pub struct AstReplaceChange {
+	/// File path for this change.
 	pub path:           String,
+	/// Original matched text.
 	pub before:         String,
+	/// Replacement text.
 	pub after:          String,
+	/// Start byte offset of the replaced span.
 	#[napi(js_name = "byteStart")]
 	pub byte_start:     u32,
+	/// End byte offset of the replaced span (exclusive).
 	#[napi(js_name = "byteEnd")]
 	pub byte_end:       u32,
+	/// Length of deleted text in bytes (may differ from `byteEnd - byteStart`
+	/// for edge cases).
 	#[napi(js_name = "deletedLength")]
 	pub deleted_length: u32,
+	/// 1-based start line of the match.
 	#[napi(js_name = "startLine")]
 	pub start_line:     u32,
+	/// 1-based start column.
 	#[napi(js_name = "startColumn")]
 	pub start_column:   u32,
+	/// 1-based end line.
 	#[napi(js_name = "endLine")]
 	pub end_line:       u32,
+	/// 1-based end column.
 	#[napi(js_name = "endColumn")]
 	pub end_column:     u32,
 }
 
+/// Per-file replacement count after an `astEdit` run.
 #[napi(object)]
 pub struct AstReplaceFileChange {
+	/// File that had replacements.
 	pub path:  String,
+	/// Number of replacements in that file.
 	pub count: u32,
 }
 
+/// Summary of an ast-grep rewrite pass, including whether disk writes
+/// occurred.
 #[napi(object)]
 pub struct AstReplaceResult {
+	/// Individual replacement records (may be large).
 	pub changes:            Vec<AstReplaceChange>,
+	/// Replacement counts grouped by file.
 	#[napi(js_name = "fileChanges")]
 	pub file_changes:       Vec<AstReplaceFileChange>,
+	/// Total replacements applied or previewed.
 	#[napi(js_name = "totalReplacements")]
 	pub total_replacements: u32,
+	/// Files that had at least one replacement.
 	#[napi(js_name = "filesTouched")]
 	pub files_touched:      u32,
+	/// Files considered for rewriting.
 	#[napi(js_name = "filesSearched")]
 	pub files_searched:     u32,
+	/// False when `dryRun` prevented writing.
 	pub applied:            bool,
+	/// True when limits stopped further replacements.
 	#[napi(js_name = "limitReached")]
 	pub limit_reached:      bool,
+	/// Parse or pattern errors when not failing the whole operation.
 	#[napi(js_name = "parseErrors")]
 	pub parse_errors:       Option<Vec<String>>,
 }
@@ -309,6 +380,10 @@ mod native_impl {
 		})
 	}
 
+	/// Returns true if the file's extension resolves to a supported language.
+	/// When `lang` is explicitly provided, all files are considered candidates
+	/// (the user chose to treat them as that language). When `lang` is None,
+	/// only files with recognizable code extensions are included.
 	pub fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool {
 		if explicit_lang.is_some() {
 			return true;
@@ -1222,8 +1297,10 @@ use no_impl::*;
 #[cfg(all(not(feature = "structural-search-native"), feature = "structural-search-system"))]
 use system_impl::*;
 
+/// Search source files with ast-grep patterns; returns a promise resolved on a
+/// worker thread.
 #[napi(js_name = "astGrep")]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
+pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 	#[allow(unused_variables, reason = "required for config initialization")]
 	let AstFindOptions {
 		patterns,
@@ -1258,8 +1335,10 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
 	task::blocking("ast_grep", ct, move |ct| ast_grep_sync(config, ct))
 }
 
+/// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
+/// a promise.
 #[napi(js_name = "astEdit")]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Async<AstReplaceResult> {
+pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
 	#[allow(unused_variables, reason = "required for config initialization")]
 	let AstReplaceOptions {
 		rewrites,

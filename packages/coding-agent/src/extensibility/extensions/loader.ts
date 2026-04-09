@@ -6,7 +6,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
-import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
@@ -16,6 +15,7 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
+import * as runtimePi from "../../runtime-pi";
 import type { CustomMessage } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -102,7 +102,6 @@ export class ExtensionRuntime implements IExtensionRuntime {
 class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly logger = logger;
 	readonly typebox = TypeBox;
-	readonly pi = piCodingAgent;
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;
@@ -111,6 +110,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}> = [];
 
 	constructor(
+		public readonly pi: typeof import("@oh-my-pi/pi-coding-agent"),
 		private readonly extension: Extension,
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
@@ -265,7 +265,13 @@ async function loadExtension(
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(
+			runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
+			extension,
+			runtime,
+			cwd,
+			eventBus,
+		);
 		await factory(api);
 
 		return { extension, error: null };
@@ -286,7 +292,13 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(
+		runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
+		extension,
+		runtime,
+		cwd,
+		eventBus,
+	);
 	await factory(api);
 	return extension;
 }

@@ -1,11 +1,12 @@
 /**
  * CLI argument parsing and help display
  */
-import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
-import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
-import { parseEffort } from "../thinking";
-import { BUILTIN_TOOLS } from "../tools";
+import { APP_NAME, logger } from "@oh-my-pi/pi-utils";
+import { getExtraHelpText } from "./help-text";
+
+type Effort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const THINKING_EFFORTS: readonly Effort[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 export type Mode = "text" | "json" | "rpc" | "acp";
 
@@ -50,6 +51,50 @@ export interface Args {
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
 	unknownFlags: Map<string, boolean | string>;
+}
+
+const CLI_TOOL_NAMES = new Set([
+	"ask",
+	"ast_edit",
+	"ast_grep",
+	"await",
+	"bash",
+	"browser",
+	"calc",
+	"cancel_job",
+	"checkpoint",
+	"debug",
+	"edit",
+	"find",
+	"gh_issue_view",
+	"gh_pr_checkout",
+	"gh_pr_diff",
+	"gh_pr_push",
+	"gh_pr_view",
+	"gh_repo_view",
+	"gh_run_watch",
+	"gh_search_issues",
+	"gh_search_prs",
+	"grep",
+	"inspect_image",
+	"lsp",
+	"notebook",
+	"python",
+	"read",
+	"render_mermaid",
+	"rewind",
+	"search_tool_bm25",
+	"ssh",
+	"task",
+	"todo_write",
+	"web_search",
+	"write",
+]);
+
+function parseEffort(value: string | null | undefined): Effort | undefined {
+	return value !== undefined && value !== null && THINKING_EFFORTS.includes(value as Effort)
+		? (value as Effort)
+		: undefined;
 }
 
 export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "boolean" | "string" }>): Args {
@@ -121,12 +166,12 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 				.filter(Boolean);
 			const validTools: string[] = [];
 			for (const name of toolNames) {
-				if (name in BUILTIN_TOOLS) {
+				if (CLI_TOOL_NAMES.has(name)) {
 					validTools.push(name);
 				} else {
 					logger.warn("Unknown tool passed to --tools", {
 						tool: name,
-						validTools: Object.keys(BUILTIN_TOOLS),
+						validTools: Array.from(CLI_TOOL_NAMES).sort(),
 					});
 				}
 			}
@@ -195,87 +240,9 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 	return result;
 }
 
-export function getExtraHelpText(): string {
-	return `${chalk.bold("Environment Variables:")}
-  ${chalk.dim("# Core Providers")}
-  ANTHROPIC_API_KEY          - Anthropic Claude models
-  ANTHROPIC_OAUTH_TOKEN      - Anthropic OAuth (takes precedence over API key)
-  CLAUDE_CODE_USE_FOUNDRY    - Enable Anthropic Foundry mode (uses Foundry endpoint + mTLS)
-  FOUNDRY_BASE_URL           - Anthropic Foundry base URL (e.g., https://<foundry-host>)
-  ANTHROPIC_FOUNDRY_API_KEY  - Anthropic token used as Authorization: Bearer <token> in Foundry mode
-  ANTHROPIC_CUSTOM_HEADERS   - Extra Foundry headers (e.g., "user-id: USERNAME")
-  CLAUDE_CODE_CLIENT_CERT    - Client certificate (PEM path or inline PEM) for mTLS
-  CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS
-  NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation
-  OPENAI_API_KEY             - OpenAI GPT models
-  GEMINI_API_KEY             - Google Gemini models
-  GITHUB_TOKEN               - GitHub Copilot (or GH_TOKEN, COPILOT_GITHUB_TOKEN)
-
-  ${chalk.dim("# Additional LLM Providers")}
-  AZURE_OPENAI_API_KEY       - Azure OpenAI models
-  GROQ_API_KEY               - Groq models
-  CEREBRAS_API_KEY           - Cerebras models
-  XAI_API_KEY                - xAI Grok models
-  OPENROUTER_API_KEY         - OpenRouter aggregated models
-  KILO_API_KEY               - Kilo Gateway models
-  MISTRAL_API_KEY            - Mistral models
-  ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)
-  MINIMAX_API_KEY            - MiniMax models
-  OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
-  CURSOR_ACCESS_TOKEN        - Cursor AI models
-  AI_GATEWAY_API_KEY         - Vercel AI Gateway
-
-  ${chalk.dim("# Cloud Providers")}
-  AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
-  GOOGLE_CLOUD_PROJECT       - Google Vertex AI (requires GOOGLE_CLOUD_LOCATION)
-  GOOGLE_APPLICATION_CREDENTIALS - Service account for Vertex AI
-
-  ${chalk.dim("# Search & Tools")}
-  EXA_API_KEY                - Exa web search
-  BRAVE_API_KEY              - Brave web search
-  PERPLEXITY_API_KEY         - Perplexity web search (API)
-  PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
-  TAVILY_API_KEY             - Tavily web search
-  ANTHROPIC_SEARCH_API_KEY   - Anthropic search provider
-
-  ${chalk.dim("# Configuration")}
-  PI_CODING_AGENT_DIR        - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
-  PI_PACKAGE_DIR             - Override package directory (for Nix/Guix store paths)
-  PI_SMOL_MODEL              - Override smol/fast model (see --smol)
-  PI_SLOW_MODEL              - Override slow/reasoning model (see --slow)
-  PI_PLAN_MODEL              - Override planning model (see --plan)
-  PI_NO_PTY                  - Disable PTY-based interactive bash execution
-
-  For complete environment variable reference, see:
-  ${chalk.dim("docs/environment-variables.md")}
-${chalk.bold("Available Tools (default-enabled unless noted):")}
-  read          - Read file contents
-  bash          - Execute bash commands
-  edit          - Edit files with find/replace
-  write         - Write files (creates/overwrites)
-  grep          - Search file contents
-  find          - Find files by glob pattern
-  lsp           - Language server protocol (code intelligence)
-  python        - Execute Python code (requires: ${APP_NAME} setup python)
-  notebook      - Edit Jupyter notebooks
-  inspect_image - Analyze images with a vision model
-  browser       - Browser automation (Puppeteer)
-  task          - Launch sub-agents for parallel tasks
-  todo_write    - Manage todo/task lists
-  web_search    - Search the web
-  ask           - Ask user questions (interactive mode only)
-
-${chalk.bold("Plugin Options:")}
-  --plugin-dir <path>        Load plugin from directory (repeatable)
-
-${chalk.bold("Useful Commands:")}
-  omp agents unpack           - Export bundled subagents to ~/.omp/agent/agents (default)
-  omp agents unpack --project - Export bundled subagents to ./.omp/agents`;
-}
-
 export function printHelp(): void {
 	process.stdout.write(
-		`${chalk.bold(APP_NAME)} - AI coding assistant\n\n` +
+		`${APP_NAME} - AI coding assistant\n\n` +
 			`Run ${APP_NAME} --help for full command and option details.\n` +
 			`Run ${APP_NAME} <command> --help for command-specific help.\n\n` +
 			`${getExtraHelpText()}\n`,

@@ -358,6 +358,16 @@ mod implementation {
 			.or_else(|| ss.find_syntax_by_token(alias))
 	}
 
+	/// Highlight code and return ANSI-colored lines.
+	///
+	/// # Arguments
+	/// * `code` - The source code to highlight
+	/// * `lang` - Language identifier (e.g., "rust", "typescript", "python")
+	/// * `colors` - Theme colors as ANSI escape sequences
+	///
+	/// # Returns
+	/// Highlighted code with ANSI color codes, or the original code if
+	/// highlighting fails.
 	#[napi(js_name = "highlightCode")]
 	pub fn highlight_code(code: String, lang: Option<String>, colors: HighlightColors) -> String {
 		let inserted = colors.inserted.as_deref().unwrap_or("");
@@ -449,6 +459,9 @@ mod implementation {
 		result
 	}
 
+	/// Check if a language is supported for highlighting.
+	/// Returns true if the language has either direct support or a fallback
+	/// mapping.
 	#[napi(js_name = "supportsLanguage")]
 	pub fn supports_language(lang: String) -> bool {
 		if is_known_alias(&lang) {
@@ -460,6 +473,7 @@ mod implementation {
 		find_syntax(ss, &lang).is_some()
 	}
 
+	/// Get list of supported languages.
 	#[napi(js_name = "getSupportedLanguages")]
 	pub fn get_supported_languages() -> Vec<String> {
 		let ss = get_syntax_set();

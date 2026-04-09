@@ -6,12 +6,12 @@
 import path from "node:path";
 import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SearchDb } from "@oh-my-pi/pi-natives";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import Ajv, { type ValidateFunction } from "ajv";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverride } from "../config/model-resolver";
-import { type PromptTemplate, renderPromptTemplate } from "../config/prompt-templates";
+import type { PromptTemplate } from "../config/prompt-templates";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -20,11 +20,11 @@ import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import submitReminderTemplate from "../prompts/system/subagent-submit-reminder.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
-import { createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { type ContextFileEntry, truncateTail } from "../tools";
+import { truncateTail } from "../session/streaming-output";
+import type { ContextFileEntry, ToolSession } from "../tools";
 import { jtdToJsonSchema } from "../tools/jtd-to-json-schema";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
@@ -147,6 +147,7 @@ export interface ExecutorOptions {
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	mcpManager?: MCPManager;
+	createAgentSession?: ToolSession["createAgentSession"];
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	searchDb?: SearchDb;
@@ -926,7 +927,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 		try {
 			checkAbort();
-			const authStorage = options.authStorage ?? (await discoverAuthStorage());
+			const authStorage = options.authStorage;
+			if (!authStorage) {
+				throw new Error("Auth storage unavailable for subagent execution.");
+			}
 			checkAbort();
 			const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage);
 			await modelRegistry.refresh();
@@ -950,6 +954,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeOutputSchema(outputSchema);
 
+			const createAgentSession = options.createAgentSession;
+			if (!createAgentSession) {
+				throw new Error("Subagent session factory unavailable.");
+			}
 			const { session } = await createAgentSession({
 				cwd: worktree ?? cwd,
 				authStorage,
@@ -965,7 +973,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
 				systemPrompt: defaultPrompt =>
-					renderPromptTemplate(subagentSystemPromptTemplate, {
+					prompt.render(subagentSystemPromptTemplate, {
 						base: defaultPrompt,
 						agent: agent.systemPrompt,
 						worktree: worktree ?? "",
@@ -1106,7 +1114,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			while (!submitResultCalled && retryCount < MAX_SUBMIT_RESULT_RETRIES && !abortSignal.aborted) {
 				try {
 					retryCount++;
-					const reminder = renderPromptTemplate(submitReminderTemplate, {
+					const reminder = prompt.render(submitReminderTemplate, {
 						retryCount,
 						maxRetries: MAX_SUBMIT_RESULT_RETRIES,
 					});

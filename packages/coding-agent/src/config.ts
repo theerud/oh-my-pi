@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import * as url from "node:url";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
@@ -22,6 +22,7 @@ const priorityList = [
 	{ dir: ".codex" },
 	{ dir: ".gemini" },
 ];
+const MODULE_DIR = url.fileURLToPath(new URL(".", import.meta.url));
 
 // =============================================================================
 // Package Directory (for optional external docs/examples)
@@ -38,11 +39,8 @@ export function getPackageDir(): string {
 		return expandTilde(envDir);
 	}
 
-	let dir =
-		(import.meta as any).dir ||
-		(import.meta.url.startsWith("file:") ? path.dirname(fileURLToPath(import.meta.url)) : ".");
-
-	while (dir && dir !== path.dirname(dir)) {
+	let dir = MODULE_DIR;
+	while (dir !== path.dirname(dir)) {
 		if (fs.existsSync(path.join(dir, "package.json"))) {
 			return dir;
 		}

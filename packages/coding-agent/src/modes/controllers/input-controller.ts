@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { copyToClipboard, readImageFromClipboard, sanitizeText } from "@oh-my-pi/pi-natives";
+import { sanitizeText } from "@oh-my-pi/pi-natives";
 import type { AutocompleteProvider, SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -10,8 +10,9 @@ import type { InteractiveModeContext } from "../../modes/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-import { ensureSupportedImageInput } from "../../utils/image-input";
+import { ensureSupportedImageInput } from "../../utils/image-loading";
 import { resizeImage } from "../../utils/image-resize";
 import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -218,13 +219,16 @@ export class InputController {
 			if (!text) return;
 
 			// Handle built-in slash commands
-			if (
-				await executeBuiltinSlashCommand(text, {
-					ctx: this.ctx,
-					handleBackgroundCommand: () => this.handleBackgroundCommand(),
-				})
-			) {
+			const slashResult = await executeBuiltinSlashCommand(text, {
+				ctx: this.ctx,
+				handleBackgroundCommand: () => this.handleBackgroundCommand(),
+			});
+			if (slashResult === true) {
 				return;
+			}
+			if (typeof slashResult === "string") {
+				// Command handled but returned remaining text to use as prompt
+				text = slashResult;
 			}
 
 			// Handle skill commands (/skill:name [args])

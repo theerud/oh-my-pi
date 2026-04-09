@@ -949,12 +949,12 @@ export const SETTINGS_SCHEMA = {
 	// Edit tool
 	"edit.mode": {
 		type: "enum",
-		values: ["replace", "patch", "hashline"] as const,
+		values: ["replace", "patch", "hashline", "chunk"] as const,
 		default: "hashline",
 		ui: {
 			tab: "editing",
 			label: "Edit Mode",
-			description: "Select the edit tool variant (replace, patch, or hashline)",
+			description: "Select the edit tool variant (replace, patch, hashline, or chunk)",
 		},
 	},
 
@@ -1026,6 +1026,38 @@ export const SETTINGS_SCHEMA = {
 			tab: "editing",
 			label: "Default Read Limit",
 			description: "Default number of lines returned when agent calls read without a limit",
+			submenu: true,
+		},
+	},
+
+	"read.prosechunks": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "editing",
+			label: "Prose Chunks",
+			description: "Enable chunk rendering for prose files in chunk edit mode",
+		},
+	},
+
+	"read.explorechunks": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "editing",
+			label: "Explore Chunks",
+			description: "Show chunk tree without checksums for read-only agents like explore",
+		},
+	},
+
+	"read.anchorstyle": {
+		type: "enum",
+		values: ["full", "kind", "bare"],
+		default: "full",
+		ui: {
+			tab: "editing",
+			label: "Anchor Style",
+			description: "Render chunk anchors with full names, kind prefixes, or checksum-only tags",
 			submenu: true,
 		},
 	},
@@ -1211,6 +1243,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Render Mermaid",
 			description: "Enable the render_mermaid tool for Mermaid-to-ASCII rendering",
+		},
+	},
+
+	"debug.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Debug",
+			description: "Enable the debug tool for DAP-based debugging",
 		},
 	},
 
@@ -1641,6 +1683,16 @@ export const SETTINGS_SCHEMA = {
 	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
+
+	"dev.autoqa": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Auto QA",
+			description: "Enable automated tool issue reporting (report_tool_issue) for all agents",
+		},
+	},
 
 	"thinkingBudgets.minimal": { type: "number", default: 1024 },
 

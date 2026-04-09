@@ -15,16 +15,13 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-#[cfg(feature = "image")]
 use crate::task;
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
-#[cfg(feature = "image")]
 pub struct ClipboardImage {
 	/// PNG-encoded image bytes.
 	pub data:      Uint8Array,
-	#[napi(js_name = "mimeType")]
 	/// MIME type for the encoded image payload.
 	pub mime_type: String,
 }
@@ -53,7 +50,7 @@ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 ///
 /// # Errors
 /// Returns an error if clipboard access fails.
-#[napi(js_name = "copyToClipboard")]
+#[napi]
 pub fn copy_to_clipboard(text: String) -> Result<()> {
 	let mut clipboard = Clipboard::new()
 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
@@ -69,10 +66,16 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if clipboard access fails or image encoding fails.
-#[napi(js_name = "readImageFromClipboard")]
-#[cfg(feature = "image")]
-pub fn read_image_from_clipboard() -> task::Async<Option<ClipboardImage>> {
+#[napi]
+pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
+		#[cfg(not(feature = "image"))]
+		{
+			return Err(Error::from_reason("Clipboard image support is disabled in this build"));
+		}
+
+		#[cfg(feature = "image")]
+		{
 		let mut clipboard = Clipboard::new()
 			.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
 		match clipboard.get_image() {
@@ -86,11 +89,6 @@ pub fn read_image_from_clipboard() -> task::Async<Option<ClipboardImage>> {
 			Err(ClipboardError::ContentNotAvailable) => Ok(None),
 			Err(err) => Err(Error::from_reason(format!("Failed to read clipboard image: {err}"))),
 		}
+		}
 	})
-}
-
-#[napi(js_name = "readImageFromClipboard")]
-#[cfg(not(feature = "image"))]
-pub fn read_image_from_clipboard() -> Result<Option<Unknown<'static>>> {
-	Err(Error::from_reason("Image support is disabled in this build."))
 }

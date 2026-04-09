@@ -13,7 +13,7 @@ const pkgMap = {
     'pi-agent-core': 'packages/agent/src',
     'pi-tui': 'packages/tui/src',
     'omp-stats': 'packages/stats/src',
-    'pi-natives': 'packages/natives/src',
+    'pi-natives': 'packages/natives/native',
 };
 
 /**
@@ -31,15 +31,21 @@ const bunTextPlugin = {
             const subPath = parts.slice(2).join('/');
             const baseDir = path.join(root, pkgMap[pkgName]);
             
-            if (!subPath) {
-                return { path: path.join(baseDir, 'index.ts') };
+            const directCandidates = subPath
+                ? [`${subPath}.ts`, `${subPath}.tsx`, `${subPath}.js`, `${subPath}.json`]
+                : ['index.ts', 'index.tsx', 'index.js', 'index.json'];
+            for (const candidate of directCandidates) {
+                const candidatePath = path.join(baseDir, candidate);
+                if (fs.existsSync(candidatePath)) return { path: candidatePath };
             }
 
-            const tsPath = path.join(baseDir, `${subPath}.ts`);
-            if (fs.existsSync(tsPath)) return { path: tsPath };
-            
-            const indexTsPath = path.join(baseDir, subPath, 'index.ts');
-            if (fs.existsSync(indexTsPath)) return { path: indexTsPath };
+            if (subPath) {
+                const indexCandidates = ['index.ts', 'index.tsx', 'index.js', 'index.json'];
+                for (const candidate of indexCandidates) {
+                    const candidatePath = path.join(baseDir, subPath, candidate);
+                    if (fs.existsSync(candidatePath)) return { path: candidatePath };
+                }
+            }
         }
 
         return null;
@@ -63,13 +69,13 @@ const bunTextPlugin = {
             if (fs.statSync(absolutePath).isFile()) return { path: absolutePath };
         }
 
-        for (const ext of ['.ts', '.tsx', '.json']) {
+        for (const ext of ['.ts', '.tsx', '.js', '.json']) {
             if (fs.existsSync(absolutePath + ext)) return { path: absolutePath + ext };
         }
 
         try {
             if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isDirectory()) {
-                for (const ext of ['.ts', '.tsx', '.json']) {
+                for (const ext of ['.ts', '.tsx', '.js', '.json']) {
                     const index = path.join(absolutePath, 'index' + ext);
                     if (fs.existsSync(index)) return { path: index };
                 }
@@ -84,6 +90,7 @@ const bunTextPlugin = {
       return {
         contents: content,
         loader: 'text',
+        resolveDir: path.dirname(args.path),
       };
     });
 
@@ -100,17 +107,27 @@ const bunTextPlugin = {
         // Strip 'with { type: "text" }' and 'with { type: "json" }'
         contents = contents.replace(/\s+with\s*\{\s*type:\s*["'](text|json)["']\s*\}/g, '');
         
-        // Fix better-sqlite3 named import issue
+        // Rewrite bun:sqlite imports to namespace form for the shim-backed Node bundle.
         if (contents.includes('bun:sqlite')) {
-             contents = contents.replace(/import\s*{\s*([^}]+)\s*}\s*from\s*["']bun:sqlite["'];?/g, (match, imports) => {
-                 const runtimeImports = imports.split(',').map(s => s.trim()).filter(s => !s.startsWith('type ')).join(', ');
-                 return `import __betterSqlite3 from "bun:sqlite"; const { ${runtimeImports} } = typeof __betterSqlite3 === 'function' ? { Database: __betterSqlite3 } : (__betterSqlite3.default ? { Database: __betterSqlite3.default } : __betterSqlite3);`;
+             contents = contents.replace(/import\s*{\s*([^}]+)\s*}\s*from\s*["']bun:sqlite["'];?/g, (_match, imports) => {
+                 const allImports = imports.split(',').map(s => s.trim()).filter(Boolean);
+                 const runtimeImports = allImports.filter(s => !s.startsWith('type '));
+                 const typeImports = allImports.filter(s => s.startsWith('type '));
+                 const rewritten = [];
+                 if (runtimeImports.length > 0) {
+                     rewritten.push(`import * as __bunSqlite from "bun:sqlite"; const { ${runtimeImports.join(', ')} } = __bunSqlite;`);
+                 }
+                 if (typeImports.length > 0) {
+                     rewritten.push(`import { ${typeImports.join(', ')} } from "bun:sqlite";`);
+                 }
+                 return rewritten.join(' ');
              });
         }
 
         return {
             contents,
             loader: args.path.endsWith('.ts') ? 'ts' : (args.path.endsWith('.tsx') ? 'tsx' : 'js'),
+            resolveDir: path.dirname(args.path),
         };
     });
   },
@@ -134,13 +151,14 @@ async function build() {
       outfile: outfile,
       alias: {
         'bun': shimPath,
-        'bun:sqlite': 'better-sqlite3',
+        'bun:sqlite': shimPath,
         'bun:ffi': shimPath,
       },
       // Inject the shim at the top of the bundle to define Bun global
       inject: [shimPath],
       define: {
         'PI_COMPILED': 'false',
+        'globalThis.__OMP_NODE_BUNDLE__': 'true',
       },
       external: [
         'fsevents',

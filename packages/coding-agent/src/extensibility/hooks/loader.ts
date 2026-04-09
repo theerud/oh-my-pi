@@ -2,12 +2,12 @@
  * Hook loader - loads TypeScript hook modules using native Bun import.
  */
 import * as path from "node:path";
-import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as typebox from "@sinclair/typebox";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
+import * as runtimePi from "../../runtime-pi";
 import type { HookMessage } from "../../session/messages";
 import type { SessionManager } from "../../session/session-manager";
 import { resolvePath } from "../utils";
@@ -87,16 +87,16 @@ export interface LoadHooksResult {
  * Create a HookAPI instance that collects handlers, renderers, and commands.
  * Returns the API, maps, and functions to set handlers later.
  */
-function createHookAPI(
+async function createHookAPI(
 	handlers: Map<string, HandlerFn[]>,
 	cwd: string,
-): {
+): Promise<{
 	api: HookAPI;
 	messageRenderers: Map<string, HookMessageRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	setSendMessageHandler: (handler: SendMessageHandler) => void;
 	setAppendEntryHandler: (handler: AppendEntryHandler) => void;
-} {
+}> {
 	let sendMessageHandler: SendMessageHandler | null = null;
 	let appendEntryHandler: AppendEntryHandler | null = null;
 	const messageRenderers = new Map<string, HookMessageRenderer>();
@@ -137,7 +137,7 @@ function createHookAPI(
 		},
 		logger,
 		typebox,
-		pi: piCodingAgent,
+		pi: runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
 	} as HookAPI;
 
 	return {
@@ -170,7 +170,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 
 		// Create handlers map and API
 		const handlers = new Map<string, HandlerFn[]>();
-		const { api, messageRenderers, commands, setSendMessageHandler, setAppendEntryHandler } = createHookAPI(
+		const { api, messageRenderers, commands, setSendMessageHandler, setAppendEntryHandler } = await createHookAPI(
 			handlers,
 			cwd,
 		);
