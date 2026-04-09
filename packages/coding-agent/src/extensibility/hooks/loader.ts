@@ -7,6 +7,7 @@ import * as typebox from "@sinclair/typebox";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
+import * as runtimePi from "../../runtime-pi";
 import type { HookMessage } from "../../session/messages";
 import type { SessionManager } from "../../session/session-manager";
 import { resolvePath } from "../utils";
@@ -136,7 +137,7 @@ async function createHookAPI(
 		},
 		logger,
 		typebox,
-		pi: await import("@oh-my-pi/pi-coding-agent"),
+		pi: runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
 	} as HookAPI;
 
 	return {

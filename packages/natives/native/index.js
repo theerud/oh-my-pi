@@ -8,6 +8,9 @@ const { createRequire } = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
 
+const moduleFilename = typeof __filename === "string" ? __filename : process.argv[1] || path.join(process.cwd(), "omp.js");
+const moduleDir = typeof __dirname === "string" ? __dirname : path.dirname(moduleFilename);
+
 function getNativesDir() {
 	const xdgDataHome = process.env.XDG_DATA_HOME;
 	if (xdgDataHome && fs.existsSync(path.join(xdgDataHome, "omp"))) {
@@ -18,10 +21,9 @@ function getNativesDir() {
 const packageJson = require("../package.json");
 let embeddedAddon = null;
 
-const require_ = createRequire(__filename);
+const require_ = createRequire(moduleFilename);
 const platformTag = `${process.platform}-${process.arch}`;
 const packageVersion = packageJson.version;
-const nativeDir = path.join(__dirname, "..", "native");
 const execDir = path.dirname(process.execPath);
 const versionedDir = path.join(getNativesDir(), packageVersion);
 const userDataDir =
@@ -30,9 +32,9 @@ const userDataDir =
 		: path.join(os.homedir(), ".local", "bin");
 const isCompiledBinary =
 	process.env.PI_COMPILED ||
-	__filename.includes("$bunfs") ||
-	__filename.includes("~BUN") ||
-	__filename.includes("%7EBUN");
+	moduleFilename.includes("$bunfs") ||
+	moduleFilename.includes("~BUN") ||
+	moduleFilename.includes("%7EBUN");
 
 if (isCompiledBinary) {
 	try {
@@ -107,9 +109,14 @@ const variantOverride = getVariantOverride();
 const selectedVariant = resolveCpuVariant(variantOverride);
 const addonFilenames = getAddonFilenames(platformTag, selectedVariant);
 const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
+const nativeDirCandidates = [
+	path.join(moduleDir, "..", "native"),
+	path.join(moduleDir, "native"),
+	path.join(moduleDir, "..", "..", "natives", "native"),
+];
 
 const baseReleaseCandidates = addonFilenames.flatMap(filename => [
-	path.join(nativeDir, filename),
+	...nativeDirCandidates.map(dir => path.join(dir, filename)),
 	path.join(execDir, filename),
 ]);
 const compiledCandidates = addonFilenames.flatMap(filename => [
@@ -231,14 +238,6 @@ function loadNative() {
 module.exports = loadNative();
 
 // --- generated const enum exports (do not edit) ---
-exports.AstMatchStrictness = {
-  Cst: 'cst',
-  Smart: 'smart',
-  Ast: 'ast',
-  Relaxed: 'relaxed',
-  Signature: 'signature',
-  Template: 'template',
-};
 exports.ChunkAnchorStyle = {
   Full: 'full',
   Kind: 'kind',
@@ -285,12 +284,6 @@ exports.GrepOutputMode = {
   Content: 'content',
   Count: 'count',
   FilesWithMatches: 'filesWithMatches',
-};
-exports.ImageFormat = {
-  PNG: 0,
-  JPEG: 1,
-  WEBP: 2,
-  GIF: 3,
 };
 exports.KeyEventType = {
   Press: 1,

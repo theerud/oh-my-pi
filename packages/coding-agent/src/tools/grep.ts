@@ -7,7 +7,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { computeLineHash } from "../edit/line-hash";
-import { formatChunkedGrepLine } from "../edit/modes/chunk";
+import { formatChunkedGrepLine } from "../edit/modes/chunk-state";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
@@ -446,6 +446,7 @@ interface GrepRenderArgs {
 
 const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
+
 export const grepToolRenderer = {
 	inline: true,
 	renderCall(args: GrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
@@ -515,15 +516,15 @@ export const grepToolRenderer = {
 						},
 						uiTheme,
 					);
-					const result = [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
-					cached = { key, lines: result };
-					return result;
-				},
-				invalidate() {
-					cached = undefined;
-				},
-			};
-		}
+				const result = [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				cached = { key, lines: result };
+				return result;
+			},
+			invalidate() {
+				cached = undefined;
+			},
+		};
+	}
 
 		const matchCount = details?.matchCount ?? 0;
 		const fileCount = details?.fileCount ?? 0;

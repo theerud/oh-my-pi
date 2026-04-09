@@ -14,7 +14,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { $env, getConfigDirName, getProjectDir, logger, postmortem, setProjectDir, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { invalidate as invalidateFsCache } from "./capability/fs";
-import type { Args } from "./cli/args";
+import { parseArgs, type Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { listModels } from "./cli/list-models";
@@ -156,6 +156,7 @@ async function runInteractiveMode(
 		lspServers,
 		mcpManager,
 		eventBus,
+		createAgentSession,
 	);
 
 	await mode.init();
@@ -901,6 +902,6 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 }
 
 export async function main(args: string[]): Promise<void> {
-	const { runCli } = await import("./cli");
-	await runCli(args.length === 0 ? ["launch"] : args);
+	const parsedArgs = parseArgs(args);
+	await runRootCommand(parsedArgs, args);
 }

@@ -4,11 +4,8 @@
  * Provides diff string generation and the replace-mode edit logic
  * used when not in patch mode.
  */
-import { isEnoent } from "@oh-my-pi/pi-utils";
 import * as Diff from "diff";
-import { resolveToCwd } from "../tools/path-utils";
-import { DEFAULT_FUZZY_THRESHOLD, EditMatchError, findMatch } from "./modes/replace";
-import { adjustIndentation, normalizeToLF, stripBom } from "./normalize";
+import { normalizeToLF } from "./normalize";
 
 export interface DiffResult {
 	diff: string;
@@ -156,26 +153,6 @@ export function generateDiffString(oldContent: string, newContent: string, conte
 	return { diff: output.join("\n"), firstChangedLine };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Replace Mode Logic
-// ═══════════════════════════════════════════════════════════════════════════
-
-export interface ReplaceOptions {
-	/** Allow fuzzy matching */
-	fuzzy: boolean;
-	/** Replace all occurrences */
-	all: boolean;
-	/** Similarity threshold for fuzzy matching */
-	threshold?: number;
-}
-
-export interface ReplaceResult {
-	/** The new content after replacements */
-	content: string;
-	/** Number of replacements made */
-	count: number;
-}
-
 /**
  * Generate a unified diff string without file headers.
  * Returns both the diff string and the first changed line number (in the new file).
@@ -261,29 +238,6 @@ function matchesTrimmedPrefix(line: string, prefixes: string[]): boolean {
 
 function isPatchWrapperLine(line: string): boolean {
 	return line === "***" || matchesTrimmedPrefix(line, PATCH_WRAPPER_PREFIXES);
-}
-
-function formatOccurrenceMatchError(
-	occurrences: number,
-	occurrencePreviews: string[] | undefined,
-	path?: string,
-): string {
-	const previews = occurrencePreviews?.join("\n\n") ?? "";
-	const moreMsg =
-		occurrences > MAX_OCCURRENCE_PREVIEWS ? ` (showing first ${MAX_OCCURRENCE_PREVIEWS} of ${occurrences})` : "";
-	const pathSuffix = path ? ` in ${path}` : "";
-	return `Found ${occurrences} occurrences${pathSuffix}${moreMsg}:\n\n${previews}\n\nAdd more context lines to disambiguate.`;
-}
-
-async function readFileTextForDiff(path: string, absolutePath: string): Promise<string> {
-	try {
-		return await Bun.file(absolutePath).text();
-	} catch (error) {
-		if (isEnoent(error)) {
-			throw new Error(`File not found: ${path}`);
-		}
-		throw error;
-	}
 }
 
 export function normalizeDiff(diff: string): string {
@@ -661,158 +615,4 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
 	}
 
 	return hunks;
-}
-
-/**
- * Find and replace text in content using fuzzy matching.
- */
-export function replaceText(content: string, oldText: string, newText: string, options: ReplaceOptions): ReplaceResult {
-	if (oldText.length === 0) {
-		throw new Error("oldText must not be empty.");
-	}
-	const threshold = options.threshold ?? DEFAULT_FUZZY_THRESHOLD;
-	let normalizedContent = normalizeToLF(content);
-	const normalizedOldText = normalizeToLF(oldText);
-	const normalizedNewText = normalizeToLF(newText);
-	let count = 0;
-
-	if (options.all) {
-		// Check for exact matches first
-		const exactCount = normalizedContent.split(normalizedOldText).length - 1;
-		if (exactCount > 0) {
-			return {
-				content: normalizedContent.split(normalizedOldText).join(normalizedNewText),
-				count: exactCount,
-			};
-		}
-
-		// No exact matches - try fuzzy matching iteratively
-		while (true) {
-			const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
-				allowFuzzy: options.fuzzy,
-				threshold,
-			});
-
-			const shouldUseClosest =
-				options.fuzzy &&
-				matchOutcome.closest &&
-				matchOutcome.closest.confidence >= threshold &&
-				(matchOutcome.fuzzyMatches === undefined || matchOutcome.fuzzyMatches <= 1);
-			const match = matchOutcome.match || (shouldUseClosest ? matchOutcome.closest : undefined);
-			if (!match) {
-				break;
-			}
-
-			const adjustedNewText = adjustIndentation(normalizedOldText, match.actualText, normalizedNewText);
-			if (adjustedNewText === match.actualText) {
-				break;
-			}
-			normalizedContent =
-				normalizedContent.substring(0, match.startIndex) +
-				adjustedNewText +
-				normalizedContent.substring(match.startIndex + match.actualText.length);
-			count++;
-		}
-
-		return { content: normalizedContent, count };
-	}
-
-	// Single replacement mode
-	const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
-		allowFuzzy: options.fuzzy,
-		threshold,
-	});
-
-	if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
-		throw new Error(formatOccurrenceMatchError(matchOutcome.occurrences, matchOutcome.occurrencePreviews));
-	}
-
-	if (!matchOutcome.match) {
-		return { content: normalizedContent, count: 0 };
-	}
-
-	const match = matchOutcome.match;
-	const adjustedNewText = adjustIndentation(normalizedOldText, match.actualText, normalizedNewText);
-	normalizedContent =
-		normalizedContent.substring(0, match.startIndex) +
-		adjustedNewText +
-		normalizedContent.substring(match.startIndex + match.actualText.length);
-
-	return { content: normalizedContent, count: 1 };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Preview/Diff Computation
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Compute the diff for an edit operation without applying it.
- * Used for preview rendering in the TUI before the tool executes.
- */
-export async function computeEditDiff(
-	path: string,
-	oldText: string,
-	newText: string,
-	cwd: string,
-	fuzzy = true,
-	all = false,
-	threshold?: number,
-): Promise<DiffResult | DiffError> {
-	if (oldText.length === 0) {
-		return { error: "oldText must not be empty." };
-	}
-	const absolutePath = resolveToCwd(path, cwd);
-
-	try {
-		let rawContent: string;
-		try {
-			rawContent = await readFileTextForDiff(path, absolutePath);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return { error: message || `Unable to read ${path}` };
-		}
-
-		const { text: content } = stripBom(rawContent);
-		const normalizedContent = normalizeToLF(content);
-		const normalizedOldText = normalizeToLF(oldText);
-		const normalizedNewText = normalizeToLF(newText);
-
-		const result = replaceText(normalizedContent, normalizedOldText, normalizedNewText, {
-			fuzzy,
-			all,
-			threshold,
-		});
-
-		if (result.count === 0) {
-			// Get closest match for error message
-			const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
-				allowFuzzy: fuzzy,
-				threshold: threshold ?? DEFAULT_FUZZY_THRESHOLD,
-			});
-
-			if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
-				return {
-					error: formatOccurrenceMatchError(matchOutcome.occurrences, matchOutcome.occurrencePreviews, path),
-				};
-			}
-
-			return {
-				error: EditMatchError.formatMessage(path, normalizedOldText, matchOutcome.closest, {
-					allowFuzzy: fuzzy,
-					threshold: threshold ?? DEFAULT_FUZZY_THRESHOLD,
-					fuzzyMatches: matchOutcome.fuzzyMatches,
-				}),
-			};
-		}
-
-		if (normalizedContent === result.content) {
-			return {
-				error: `No changes would be made to ${path}. The replacement produces identical content.`,
-			};
-		}
-
-		return generateDiffString(normalizedContent, result.content);
-	} catch (err) {
-		return { error: err instanceof Error ? err.message : String(err) };
-	}
 }

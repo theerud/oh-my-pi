@@ -1,6 +1,5 @@
 #[macro_export]
 macro_rules! env_uint {
-	// With clamp range: ... => [$min, $max];
 	($( $vis:vis static $name:ident : $type:ty = $env:literal or $default:expr => [$min:expr, $max:expr];)*) => {
 		$(
 			$vis static $name: std::sync::LazyLock<$type> = std::sync::LazyLock::new(|| {
@@ -12,7 +11,6 @@ macro_rules! env_uint {
 			});
 		)*
 	};
-	// Without clamp range: ...; (no => [])
 	($( $vis:vis static $name:ident : $type:ty = $env:literal or $default:expr;)*) => {
 		$(
 			$vis static $name: std::sync::LazyLock<$type> = std::sync::LazyLock::new(|| {
@@ -32,4 +30,19 @@ pub const fn clamp_u32(value: u64) -> u32 {
 	} else {
 		value as u32
 	}
+}
+
+#[allow(dead_code, reason = "required for system implementations")]
+pub fn command_exists(cmd: &str) -> bool {
+	#[cfg(unix)]
+	let check_cmd = "which";
+	#[cfg(windows)]
+	let check_cmd = "where";
+
+	std::process::Command::new(check_cmd)
+		.arg(cmd)
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.status()
+		.is_ok_and(|s| s.success())
 }

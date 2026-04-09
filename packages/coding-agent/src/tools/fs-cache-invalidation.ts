@@ -1,5 +1,5 @@
 import { invalidateFsScanCache } from "@oh-my-pi/pi-natives";
-import { invalidateChunkCache } from "../edit/modes/chunk";
+import { invalidateChunkCache } from "../edit/modes/chunk-state";
 
 /**
  * Invalidate shared filesystem scan caches after a content write/update.

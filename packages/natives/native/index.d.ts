@@ -92,7 +92,10 @@ export declare class MacOSPowerAssertion {
   stop(): void
 }
 
-/** Image container for native interop. */
+/**
+ * Image container for native interop.
+ * Image container for native interop.
+ */
 export declare class PhotonImage {
   /**
    * Create a new `PhotonImage` from encoded image bytes (PNG, JPEG, WebP,
@@ -109,10 +112,16 @@ export declare class PhotonImage {
   /**
    * Encode the image to bytes in the specified format.
    *
+   * Format values (matching `ImageFormat` enum in TS):
+   * - 0: PNG (quality ignored)
+   * - 1: JPEG (quality 0-100)
+   * - 2: WebP (lossless, quality ignored)
+   * - 3: GIF (quality ignored)
+   *
    * # Errors
    * Returns an error if encoding fails or format is invalid.
    */
-  encode(format: ImageFormat, quality: number): Promise<Array<number>>
+  encode(format: number, quality: number): Promise<Array<number>>
   /**
    * Resize the image to the specified pixel dimensions using the filter.
    * Returns a new `PhotonImage` containing the resized image.
@@ -150,22 +159,22 @@ export declare class SearchDb {
   get path(): string
 }
 
-/** Persistent brush-core shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
    *
-   * The options set session-scoped environment variables and a snapshot path.
+   * The options set session-scoped environment variables and a snapshot
+   * path.
    */
   constructor(options?: ShellOptions | undefined | null)
   /**
    * Run a shell command using the provided options.
    *
-   * The `on_chunk` callback receives streamed stdout/stderr output. Returns
-   * the exit code when the command completes, or flags when cancelled or
-   * timed out.
+   * The `on_chunk` callback receives streamed stdout/stderr output.
+   * Returns the exit code when the command completes, or flags when
+   * cancelled or timed out.
    */
-  run(options: ShellRunOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
+  run(options: ShellRunOptions, onChunk?: ((chunk: string) => void) | undefined | null): Promise<ShellRunResult>
   /**
    * Abort all running commands for this shell session.
    *
@@ -215,7 +224,7 @@ export interface AstFindOptions {
   /** Rule selector for multi-rule ast-grep configurations. */
   selector?: string
   /** Pattern strictness; defaults to smart matching when omitted. */
-  strictness?: AstMatchStrictness
+  strictness?: string
   /** Maximum matches to return after `offset` (default applies when omitted). */
   limit?: number
   /** Number of leading matches to skip before applying `limit`. */
@@ -254,22 +263,6 @@ export interface AstFindResult {
  * worker thread.
  */
 export declare function astGrep(options: AstFindOptions): Promise<AstFindResult>
-
-/** ast-grep pattern strictness (controls how patterns match syntax). */
-export declare enum AstMatchStrictness {
-  /** Match at the concrete syntax tree level. */
-  Cst = 'cst',
-  /** Balanced default suitable for most searches. */
-  Smart = 'smart',
-  /** Match at the AST level. */
-  Ast = 'ast',
-  /** More permissive matching. */
-  Relaxed = 'relaxed',
-  /** Match structural signatures. */
-  Signature = 'signature',
-  /** Template-style pattern matching. */
-  Template = 'template'
-}
 
 /**
  * One textual replacement applied to a file (before/after slice and
@@ -325,7 +318,7 @@ export interface AstReplaceOptions {
   /** Rule selector for multi-rule configurations. */
   selector?: string
   /** Pattern strictness for rewrites. */
-  strictness?: AstMatchStrictness
+  strictness?: string
   /** When true (default), compute changes without writing files. */
   dryRun?: boolean
   /** Cap on replacement applications across all files. */
@@ -340,7 +333,10 @@ export interface AstReplaceOptions {
   timeoutMs?: number
 }
 
-/** Summary of an ast-grep rewrite pass, including whether disk writes occurred. */
+/**
+ * Summary of an ast-grep rewrite pass, including whether disk writes
+ * occurred.
+ */
 export interface AstReplaceResult {
   /** Individual replacement records (may be large). */
   changes: Array<AstReplaceChange>
@@ -575,13 +571,12 @@ export declare enum Ellipsis {
 export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
 
 /**
- * Execute a brush shell command.
+ * Execute a shell command.
  *
- * Creates a fresh session for each call. The `on_chunk` callback receives
- * streamed stdout/stderr output. Returns the exit code when the command
- * completes, or flags when cancelled or timed out.
+ * In native builds this uses the embedded brush shell. In slim/system builds
+ * it falls back to the external `bash` program.
  */
-export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellExecuteResult>
+export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((chunk: string) => void) | undefined | null): Promise<ShellExecuteResult>
 
 /**
  * Extract the before/after slices around an overlay region.
@@ -705,7 +700,7 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
  * directory, the glob pattern is invalid, or cancellation/timeout is
  * triggered.
  */
-export declare function glob(options: GlobOptions, onMatch?: ((error: Error | null, match: GlobMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GlobResult>
+export declare function glob(options: GlobOptions, onMatch?: ((match: GlobMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GlobResult>
 
 /** A single filesystem entry from a directory scan. */
 export interface GlobMatch {
@@ -772,7 +767,7 @@ export interface GlobResult {
  * # Returns
  * Aggregated results across matching files.
  */
-export declare function grep(options: GrepOptions, onMatch?: ((error: Error | null, match: GrepMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GrepResult>
+export declare function grep(options: GrepOptions, onMatch?: ((match: GrepMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GrepResult>
 
 /** A single match in a grep result. */
 export interface GrepMatch {
@@ -854,6 +849,8 @@ export interface GrepResult {
   filesSearched: number
   /** Whether the limit/offset stopped the search early. */
   limitReached?: boolean
+  /** Context lines requested. */
+  context?: number
 }
 
 /**
@@ -868,7 +865,7 @@ export interface GrepResult {
  * # Returns
  * True if any match exists; false on no match.
  */
-export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
+export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase: boolean, multiline: boolean): boolean
 
 /**
  * Highlight code and return ANSI-colored lines.
@@ -879,8 +876,8 @@ export declare function hasMatch(content: string | Uint8Array, pattern: string |
  * * `colors` - Theme colors as ANSI escape sequences
  *
  * # Returns
- * Highlighted code with ANSI color codes, or the original code if highlighting
- * fails.
+ * Highlighted code with ANSI color codes, or the original code if
+ * highlighting fails.
  */
 export declare function highlightCode(code: string, lang: string | undefined | null, colors: HighlightColors): string
 
@@ -927,18 +924,6 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
-}
-
-/** Output format for [`PhotonImage::encode`]. */
-export declare enum ImageFormat {
-  /** PNG encoded bytes. */
-  PNG = 0,
-  /** JPEG encoded bytes. */
-  JPEG = 1,
-  /** WebP encoded bytes. */
-  WEBP = 2,
-  /** GIF encoded bytes. */
-  GIF = 3
 }
 
 /**
@@ -1216,7 +1201,8 @@ export declare function sanitizeText(text: string): string
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
- * For repeated searches with the same pattern, use [`grep`] with file filters.
+ * For repeated searches with the same pattern, use [`grep`] with file
+ * filters.
  *
  * # Arguments
  * - `content`: `Uint8Array`/`Buffer` (zero-copy) or `string` (UTF-8).

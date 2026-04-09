@@ -29,6 +29,7 @@ import { sshToolRenderer } from "./ssh";
 import { todoWriteToolRenderer } from "./todo-write";
 import { writeToolRenderer } from "./write";
 
+
 type ToolRenderer = {
 	renderCall: (args: unknown, options: RenderResultOptions, theme: Theme) => Component;
 	renderResult: (

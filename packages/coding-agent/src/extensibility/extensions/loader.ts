@@ -15,6 +15,7 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
+import * as runtimePi from "../../runtime-pi";
 import type { CustomMessage } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -265,7 +266,7 @@ async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = new ConcreteExtensionAPI(
-			await import("@oh-my-pi/pi-coding-agent"),
+			runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
 			extension,
 			runtime,
 			cwd,
@@ -291,7 +292,13 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(await import("@oh-my-pi/pi-coding-agent"), extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(
+		runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
+		extension,
+		runtime,
+		cwd,
+		eventBus,
+	);
 	await factory(api);
 	return extension;
 }

@@ -20,11 +20,11 @@ import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import submitReminderTemplate from "../prompts/system/subagent-submit-reminder.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
-import { createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import { type ContextFileEntry, truncateTail } from "../tools";
+import { truncateTail } from "../session/streaming-output";
+import type { ContextFileEntry, ToolSession } from "../tools";
 import { jtdToJsonSchema } from "../tools/jtd-to-json-schema";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
@@ -147,6 +147,7 @@ export interface ExecutorOptions {
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	mcpManager?: MCPManager;
+	createAgentSession?: ToolSession["createAgentSession"];
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	searchDb?: SearchDb;
@@ -926,7 +927,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 		try {
 			checkAbort();
-			const authStorage = options.authStorage ?? (await discoverAuthStorage());
+			const authStorage = options.authStorage;
+			if (!authStorage) {
+				throw new Error("Auth storage unavailable for subagent execution.");
+			}
 			checkAbort();
 			const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage);
 			await modelRegistry.refresh();
@@ -950,6 +954,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeOutputSchema(outputSchema);
 
+			const createAgentSession = options.createAgentSession;
+			if (!createAgentSession) {
+				throw new Error("Subagent session factory unavailable.");
+			}
 			const { session } = await createAgentSession({
 				cwd: worktree ?? cwd,
 				authStorage,

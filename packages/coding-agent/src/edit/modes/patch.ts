@@ -1463,6 +1463,7 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 		};
 	}
 
+
 	// Handle DELETE operation
 	if (op === "delete") {
 		const oldContent = await readExistingPatchFile(fs, absolutePath, input.path);

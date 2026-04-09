@@ -6,13 +6,21 @@ import { $ } from "bun";
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
+const generatedDir = path.join(import.meta.dir, "../.generated");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
 
+const isDev = process.argv.includes("--dev");
+const isLean = process.argv.includes("--lean");
+const noHighlights = process.argv.includes("--no-highlights");
+const noImage = process.argv.includes("--no-image");
 const crossTarget = Bun.env.CROSS_TARGET;
 const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
 const targetArch = Bun.env.TARGET_ARCH || process.arch;
 const configuredVariantRaw = Bun.env.TARGET_VARIANT;
 const isCrossCompile = Boolean(crossTarget) || targetPlatform !== process.platform || targetArch !== process.arch;
+const buildFlavor = noImage && noHighlights ? "minimal" : isLean ? "lean" : "full";
+const bindingsDir =
+	buildFlavor === "full" ? nativeDir : path.join(generatedDir, buildFlavor);
 
 type X64Variant = "modern" | "baseline";
 
@@ -135,9 +143,20 @@ async function installBinary(src: string, dest: string): Promise<void> {
 		}
 	}
 }
-async function patchGeneratedIndexLoader(): Promise<void> {
-	const indexPath = path.join(nativeDir, "index.js");
+async function patchGeneratedIndexLoader(targetDir: string): Promise<void> {
+	const indexPath = path.join(targetDir, "index.js");
 	let content = await Bun.file(indexPath).text();
+	const modulePathPatch = [
+		'const moduleFilename = typeof __filename === "string" ? __filename : process.argv[1] || path.join(process.cwd(), "omp.js");',
+		'const moduleDir = typeof __dirname === "string" ? __dirname : path.dirname(moduleFilename);',
+		"",
+	].join("\n");
+	if (!content.includes(modulePathPatch)) {
+		content = content.replace(
+			'const path = require("node:path");\n',
+			`const path = require("node:path");\n\n${modulePathPatch}`,
+		);
+	}
 	const embeddedLoadPatch = "let embeddedAddon = null;\n";
 	if (!content.includes(embeddedLoadPatch)) {
 		content = content.replace(/const \{ embeddedAddon \} = require\("\.\/embedded-addon"\);\n/, embeddedLoadPatch);
@@ -158,10 +177,32 @@ async function patchGeneratedIndexLoader(): Promise<void> {
 			`$1\n${lazyLoadPatch}`,
 		);
 	}
+	content = content.replace('const require_ = createRequire(__filename);\n', "const require_ = createRequire(moduleFilename);\n");
+	content = content.replace('const nativeDir = path.join(__dirname, "..", "native");\n', "");
+	if (!content.includes("const nativeDirCandidates = [")) {
+		content = content.replace(
+			/(const addonLabel = selectedVariant \? `\$\{platformTag\} \(\$\{selectedVariant\}\)` : platformTag;\n)/,
+			`$1const nativeDirCandidates = [\n\tpath.join(moduleDir, "..", "native"),\n\tpath.join(moduleDir, "native"),\n\tpath.join(moduleDir, "..", "..", "natives", "native"),\n];\n`,
+		);
+	}
+	content = content.replace(
+		/const baseReleaseCandidates = addonFilenames\.flatMap\(filename => \[\n\tpath\.join\(nativeDir, filename\),\n\tpath\.join\(execDir, filename\),\n\]\);\n/,
+		'const baseReleaseCandidates = addonFilenames.flatMap(filename => [\n\t...nativeDirCandidates.map(dir => path.join(dir, filename)),\n\tpath.join(execDir, filename),\n]);\n',
+	);
+	content = content.replace(/__filename\.includes\(/g, "moduleFilename.includes(");
 	await Bun.write(indexPath, content);
 }
 
-async function resolveBuiltAddonPath(canonicalFilename: string): Promise<string> {
+async function hasGeneratedIndexJs(targetDir: string): Promise<boolean> {
+	try {
+		const stat = await fs.stat(path.join(targetDir, "index.js"));
+		return stat.isFile();
+	} catch {
+		return false;
+	}
+}
+
+async function resolveBuiltAddonPath(outputDir: string, canonicalFilename: string): Promise<string> {
 	// Variant-tagged files produced by previous invocations of this script that
 	// should NOT be treated as this build's output (unless they equal our target).
 	const siblingVariantFilenames = new Set([
@@ -170,10 +211,10 @@ async function resolveBuiltAddonPath(canonicalFilename: string): Promise<string>
 	]);
 	siblingVariantFilenames.delete(canonicalFilename);
 
-	const entries = await fs.readdir(nativeDir);
+	const entries = await fs.readdir(outputDir);
 
 	if (entries.includes(canonicalFilename)) {
-		return path.join(nativeDir, canonicalFilename);
+		return path.join(outputDir, canonicalFilename);
 	}
 
 	// napi-rs 3.x emits `${binaryName}.${platformArchABI}.node` where
@@ -188,12 +229,12 @@ async function resolveBuiltAddonPath(canonicalFilename: string): Promise<string>
 	});
 
 	if (generatedCandidates.length === 1) {
-		return path.join(nativeDir, generatedCandidates[0]);
+		return path.join(outputDir, generatedCandidates[0]);
 	}
 
 	if (generatedCandidates.length === 0) {
 		throw new Error(
-			`napi build succeeded but did not emit a native addon for ${targetPlatform}-${targetArch}. Expected ${canonicalFilename} or an environment-tagged variant in ${nativeDir}. Directory contents: ${entries.join(", ") || "(empty)"}.`,
+			`napi build succeeded but did not emit a native addon for ${targetPlatform}-${targetArch}. Expected ${canonicalFilename} or an environment-tagged variant in ${outputDir}. Directory contents: ${entries.join(", ") || "(empty)"}.`,
 		);
 	}
 
@@ -205,6 +246,38 @@ async function resolveBuiltAddonPath(canonicalFilename: string): Promise<string>
 
 const isCI = Boolean(Bun.env.CI);
 const useLocalProfile = !isCI && !isCrossCompile;
+const features = new Set<string>();
+
+if (isLean) {
+	features.add("structural-search-system");
+	features.add("text-search-system");
+	features.add("shell-system");
+	features.add("fuzzy-search-system");
+	features.add("discovery-system");
+} else {
+	features.add("structural-search-native");
+	features.add("text-search-native");
+	features.add("shell-native");
+	features.add("fuzzy-search-native");
+	features.add("discovery-native");
+}
+
+if (!noHighlights) {
+	features.add("syntax-highlighting");
+}
+
+if (!noImage) {
+	features.add("image");
+}
+
+if (Bun.env.PI_NATIVE_FEATURES) {
+	for (const feature of Bun.env.PI_NATIVE_FEATURES.split(",")) {
+		const trimmed = feature.trim();
+		if (trimmed) {
+			features.add(trimmed);
+		}
+	}
+}
 
 // Build napi args
 const napiArgs = [
@@ -218,8 +291,13 @@ const napiArgs = [
 	"--dts",
 	"index.d.ts",
 	"-o",
-	nativeDir,
+	bindingsDir,
+	"--no-default-features",
 ];
+
+if (features.size > 0) {
+	napiArgs.push("--features", Array.from(features).join(","));
+}
 
 if (useLocalProfile) {
 	napiArgs.push("--profile", "local");
@@ -234,8 +312,14 @@ const canonicalAddonFilename = `pi_natives.${targetPlatform}-${targetArch}${vari
 const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${profileLabel}…`);
+console.log(`Features: ${Array.from(features).join(", ")}`);
+if (buildFlavor !== "full") {
+	console.log(`Generated bindings dir: ${bindingsDir}`);
+}
 
+await fs.mkdir(bindingsDir, { recursive: true });
 await fs.mkdir(nativeDir, { recursive: true });
+await cleanupStaleTemps(bindingsDir);
 await cleanupStaleTemps(nativeDir);
 
 // Resolve napi bin directly: `bunx @napi-rs/cli` can pick up the wrong bin on
@@ -252,15 +336,23 @@ if (buildResult.exitCode !== 0) {
 	throw new Error(`napi build failed${stderr ? `:\n${stderr}` : ""}`);
 }
 
-const builtAddonPath = await resolveBuiltAddonPath(canonicalAddonFilename);
+const builtAddonPath = await resolveBuiltAddonPath(bindingsDir, canonicalAddonFilename);
 if (builtAddonPath !== canonicalAddonPath) {
 	console.log(`Normalizing native addon filename: ${path.basename(builtAddonPath)} → ${canonicalAddonFilename}`);
 	await installBinary(builtAddonPath, canonicalAddonPath);
-	await fs.unlink(builtAddonPath).catch(() => {});
 }
 
-// Generate runtime enum exports from const enums in index.d.ts
-await $`bun ${path.join(import.meta.dir, "gen-enums.ts")}`;
-await patchGeneratedIndexLoader();
+if (await hasGeneratedIndexJs(bindingsDir)) {
+	await patchGeneratedIndexLoader(bindingsDir);
+
+	// Generate runtime enum exports from const enums in index.d.ts
+	await $`bun ${path.join(import.meta.dir, "gen-enums.ts")}`.env({
+		...process.env,
+		PI_NATIVE_BINDINGS_DIR: bindingsDir,
+	});
+	await patchGeneratedIndexLoader(bindingsDir);
+} else if (buildFlavor !== "full") {
+	console.log("Skipping JS binding post-processing for non-full build output.");
+}
 
 console.log("Build complete.");

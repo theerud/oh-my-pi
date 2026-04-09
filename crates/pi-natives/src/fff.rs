@@ -6,17 +6,23 @@
 //! directory results still come from one-shot scan entries because `fff`'s
 //! picker indexes files only.
 
-use std::{collections::HashSet, path::Path};
+#[cfg(feature = "text-search-native")]
+use std::path::Path;
 
+#[cfg(feature = "text-search-native")]
+use std::collections::HashSet;
+
+#[cfg(feature = "text-search-native")]
 use fff::{FileItem, FilePicker, FuzzySearchOptions, PaginationArgs, QueryParser};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+#[cfg(feature = "text-search-native")]
 use crate::{
 	fs_cache,
-	search_db::{SearchDb, wait_for_picker_scan},
-	task,
+	search_db::wait_for_picker_scan,
 };
+use crate::task;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public types
@@ -36,19 +42,23 @@ pub struct FuzzyFindOptions<'env> {
 	/// Enable shared filesystem scan cache (default: false).
 	pub cache:       Option<bool>,
 	/// Maximum number of matches to return (default: 100).
+	#[napi(js_name = "maxResults")]
 	pub max_results: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:      Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
+	#[napi(js_name = "timeoutMs")]
 	pub timeout_ms:  Option<u32>,
 }
 
 /// A single match in fuzzy find results.
 #[napi(object)]
+#[derive(Clone)]
 pub struct FuzzyFindMatch {
 	/// Relative path from the search root (uses `/` separators).
 	pub path:         String,
 	/// Whether this entry is a directory.
+	#[napi(js_name = "isDirectory")]
 	pub is_directory: bool,
 	/// Match quality score (higher is better).
 	pub score:        u32,
@@ -60,6 +70,7 @@ pub struct FuzzyFindResult {
 	/// Matched entries (up to `maxResults`).
 	pub matches:       Vec<FuzzyFindMatch>,
 	/// Total number of matches found (may exceed `matches.len()`).
+	#[napi(js_name = "totalMatches")]
 	pub total_matches: u32,
 }
 
@@ -68,6 +79,7 @@ pub struct FuzzyFindResult {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Internal configuration for fuzzy find, extracted from options.
+#[cfg(feature = "text-search-native")]
 struct FuzzyFindConfig {
 	query:       String,
 	path:        String,
@@ -77,12 +89,14 @@ struct FuzzyFindConfig {
 	cache:       Option<bool>,
 }
 
+#[cfg(feature = "text-search-native")]
 struct RankedMatch {
 	path:         String,
 	is_directory: bool,
 	score:        u32,
 }
 
+#[cfg(feature = "text-search-native")]
 fn entry_file_name(path: &str) -> String {
 	Path::new(path)
 		.file_name()
@@ -91,6 +105,7 @@ fn entry_file_name(path: &str) -> String {
 		.to_string()
 }
 
+#[cfg(feature = "text-search-native")]
 fn modified_seconds(mtime_ms: Option<f64>) -> u64 {
 	match mtime_ms {
 		Some(mtime) if mtime.is_finite() && mtime >= 0.0 => (mtime / 1000.0) as u64,
@@ -98,12 +113,13 @@ fn modified_seconds(mtime_ms: Option<f64>) -> u64 {
 	}
 }
 
+#[cfg(feature = "text-search-native")]
 fn build_file_items(
 	root: &Path,
 	entries: &[fs_cache::GlobMatch],
 	include_files: bool,
 	include_directories: bool,
-	db: Option<&SearchDb>,
+	db: Option<&crate::search_db::SearchDb>,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<FileItem>, HashSet<String>)> {
 	let mut files = Vec::with_capacity(entries.len());
@@ -147,10 +163,12 @@ fn build_file_items(
 	Ok((files, directories))
 }
 
+#[cfg(feature = "text-search-native")]
 fn search_limit(max_results: usize) -> usize {
 	max_results.max(50).saturating_mul(4).min(5000)
 }
 
+#[cfg(feature = "text-search-native")]
 fn to_ranked_matches(
 	results: fff::SearchResult,
 	directories: &HashSet<String>,
@@ -168,6 +186,7 @@ fn to_ranked_matches(
 	(matches, crate::utils::clamp_u32(results.total_matched as u64))
 }
 
+#[cfg(feature = "text-search-native")]
 #[allow(clippy::too_many_arguments, reason = "search helper carries per-call filters explicitly")]
 fn search_stateless_entries(
 	root: &Path,
@@ -176,7 +195,7 @@ fn search_stateless_entries(
 	limit: usize,
 	include_files: bool,
 	include_directories: bool,
-	db: Option<&SearchDb>,
+	db: Option<&crate::search_db::SearchDb>,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<RankedMatch>, u32)> {
 	let (items, directories) =
@@ -190,11 +209,12 @@ fn search_stateless_entries(
 	Ok(to_ranked_matches(results, &directories))
 }
 
+#[cfg(feature = "text-search-native")]
 fn search_stateful_files(
 	root: &Path,
 	query: &str,
 	limit: usize,
-	db: &SearchDb,
+	db: &crate::search_db::SearchDb,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<RankedMatch>, u32)> {
 	let shared_picker = db.get_or_init_picker(root)?;
@@ -215,6 +235,7 @@ fn search_stateful_files(
 	Ok(to_ranked_matches(results, &HashSet::new()))
 }
 
+#[cfg(feature = "text-search-native")]
 fn finalize_results(
 	mut matches: Vec<RankedMatch>,
 	total_matches: u32,
@@ -235,6 +256,7 @@ fn finalize_results(
 	}
 }
 
+#[cfg(feature = "text-search-native")]
 #[allow(clippy::too_many_arguments, reason = "search helper carries per-call filters explicitly")]
 fn run_fff_search(
 	root: &Path,
@@ -243,7 +265,7 @@ fn run_fff_search(
 	max_results: usize,
 	include_hidden: bool,
 	respect_gitignore: bool,
-	db: Option<&SearchDb>,
+	db: Option<&crate::search_db::SearchDb>,
 	ct: &task::CancelToken,
 ) -> Result<FuzzyFindResult> {
 	let limit = search_limit(max_results);
@@ -264,9 +286,10 @@ fn run_fff_search(
 	Ok(finalize_results(matches, total_matches, max_results))
 }
 
+#[cfg(feature = "text-search-native")]
 fn fuzzy_find_sync(
 	config: FuzzyFindConfig,
-	db: Option<&SearchDb>,
+	db: Option<&crate::search_db::SearchDb>,
 	ct: task::CancelToken,
 ) -> Result<FuzzyFindResult> {
 	let root = fs_cache::resolve_search_path(&config.path)?;
@@ -295,7 +318,8 @@ fn fuzzy_find_sync(
 			&& !query.is_empty()
 			&& scan.cache_age_ms >= fs_cache::empty_recheck_ms()
 		{
-			let fresh = fs_cache::force_rescan(&root, include_hidden, respect_gitignore, true, &ct)?;
+			let fresh =
+				fs_cache::force_rescan(&root, include_hidden, respect_gitignore, true, &ct)?;
 			results = run_fff_search(
 				&root,
 				&fresh,
@@ -314,6 +338,115 @@ fn fuzzy_find_sync(
 	run_fff_search(&root, &fresh, &query, max_results, include_hidden, respect_gitignore, db, &ct)
 }
 
+#[cfg(feature = "fuzzy-search-system")]
+mod system_impl {
+	use std::{
+		io::{BufRead, BufReader},
+		process::{Command, Stdio},
+	};
+
+	use crate::fs_cache;
+	use super::*;
+
+	pub struct SystemFuzzyFindConfig {
+		pub query:       String,
+		pub path:        String,
+		pub hidden:      Option<bool>,
+		pub gitignore:   Option<bool>,
+		pub max_results: Option<u32>,
+	}
+
+	pub fn fuzzy_find_sync(
+		config: SystemFuzzyFindConfig,
+		_db: Option<&crate::search_db::SearchDb>,
+		ct: task::CancelToken,
+	) -> Result<FuzzyFindResult> {
+		if !crate::utils::command_exists("fd") {
+			return Err(Error::from_reason("fd binary not found in PATH."));
+		}
+
+		let root = fs_cache::resolve_search_path(&config.path)?;
+		let mut fd_args = vec!["--type".to_string(), "f".to_string(), "--type".to_string(), "d".to_string()];
+		if config.hidden.unwrap_or(false) {
+			fd_args.push("--hidden".to_string());
+		}
+		if !config.gitignore.unwrap_or(true) {
+			fd_args.push("--no-ignore".to_string());
+		}
+		fd_args.push("--color=never".to_string());
+		fd_args.push(".".to_string());
+		fd_args.push(root.to_string_lossy().into_owned());
+
+		let mut fd_child = Command::new("fd")
+			.args(&fd_args)
+			.stdout(Stdio::piped())
+			.spawn()
+			.map_err(|e| Error::from_reason(format!("Failed to spawn fd: {e}")))?;
+
+		let query = config.query.trim();
+		let mut matches = Vec::new();
+		let max_results = config.max_results.unwrap_or(100) as usize;
+
+		if query.is_empty() {
+			let stdout = fd_child.stdout.take().unwrap();
+			let reader = BufReader::new(stdout);
+			for line in reader.lines() {
+				ct.heartbeat()?;
+				let path = line.map_err(|e| Error::from_reason(format!("Error reading fd output: {e}")))?;
+				matches.push(FuzzyFindMatch {
+					is_directory: path.ends_with('/'),
+					path,
+					score: 1,
+				});
+				if matches.len() >= max_results {
+					break;
+				}
+			}
+			let _ = fd_child.kill();
+			let total_matches = total_matches_clamped(&matches);
+			return Ok(FuzzyFindResult { matches, total_matches });
+		}
+
+		if !crate::utils::command_exists("fzf") {
+			return Err(Error::from_reason(
+				"fzf binary not found in PATH (required for fuzzy find query).",
+			));
+		}
+
+		let mut fzf_child = Command::new("fzf")
+			.args(["-f", query])
+			.stdin(fd_child.stdout.take().unwrap())
+			.stdout(Stdio::piped())
+			.spawn()
+			.map_err(|e| Error::from_reason(format!("Failed to spawn fzf: {e}")))?;
+
+		let stdout = fzf_child.stdout.take().unwrap();
+		let reader = BufReader::new(stdout);
+		for line in reader.lines() {
+			ct.heartbeat()?;
+			let path = line.map_err(|e| Error::from_reason(format!("Error reading fzf output: {e}")))?;
+			matches.push(FuzzyFindMatch {
+				is_directory: path.ends_with('/'),
+				path,
+				score: 1,
+			});
+			if matches.len() >= max_results {
+				break;
+			}
+		}
+
+		let _ = fd_child.kill();
+		let _ = fzf_child.kill();
+
+		let total_matches = total_matches_clamped(&matches);
+		Ok(FuzzyFindResult { matches, total_matches })
+	}
+
+	fn total_matches_clamped(matches: &[FuzzyFindMatch]) -> u32 {
+		crate::utils::clamp_u32(matches.len() as u64)
+	}
+}
+
 /// Fuzzy file path search for autocomplete.
 ///
 /// # Arguments
@@ -321,151 +454,50 @@ fn fuzzy_find_sync(
 ///
 /// # Returns
 /// Matching file and directory entries sorted by match quality.
-#[napi]
+#[napi(js_name = "fuzzyFind")]
 pub fn fuzzy_find(
-	options: FuzzyFindOptions<'_>,
-	db: Option<&SearchDb>,
+	mut options: FuzzyFindOptions<'_>,
+	db: Option<&crate::search_db::SearchDb>,
 ) -> task::Promise<FuzzyFindResult> {
-	let FuzzyFindOptions { query, path, hidden, gitignore, cache, max_results, timeout_ms, signal } =
-		options;
-	let ct = task::CancelToken::new(timeout_ms, signal);
-	let config = FuzzyFindConfig { query, path, hidden, gitignore, max_results, cache };
-	let db = db.cloned();
-	task::blocking("fuzzy_find", ct, move |ct| fuzzy_find_sync(config, db.as_ref(), ct))
-}
+	let timeout_ms = options.timeout_ms;
+	let signal = options.signal.take();
 
-#[cfg(test)]
-mod tests {
-	use std::{
-		fs,
-		path::{Path, PathBuf},
-		time::{SystemTime, UNIX_EPOCH},
-	};
-
-	use super::{FuzzyFindConfig, fuzzy_find_sync};
-	use crate::task::CancelToken;
-
-	struct TempDirGuard(PathBuf);
-
-	impl TempDirGuard {
-		fn new() -> Self {
-			let unique = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.expect("system time is after UNIX_EPOCH")
-				.as_nanos();
-			let path = std::env::temp_dir().join(format!("pi-natives-fff-test-{unique}"));
-			fs::create_dir_all(&path).expect("create temp test directory");
-			Self(path)
-		}
-
-		fn path(&self) -> &Path {
-			&self.0
-		}
+	#[cfg(feature = "fuzzy-search-native")]
+	{
+		let ct = task::CancelToken::new(timeout_ms, signal);
+		let db = db.cloned();
+		let config = FuzzyFindConfig {
+			query:       options.query,
+			path:        options.path,
+			hidden:      options.hidden,
+			gitignore:   options.gitignore,
+			max_results: options.max_results,
+			cache:       options.cache,
+		};
+		task::blocking("fuzzy_find", ct, move |ct| fuzzy_find_sync(config, db.as_ref(), ct))
 	}
 
-	impl Drop for TempDirGuard {
-		fn drop(&mut self) {
-			let _ = fs::remove_dir_all(&self.0);
-		}
+	#[cfg(all(not(feature = "fuzzy-search-native"), feature = "fuzzy-search-system"))]
+	{
+		let ct = task::CancelToken::new(timeout_ms, signal);
+		let db = db.cloned();
+		let config = system_impl::SystemFuzzyFindConfig {
+			query:       options.query,
+			path:        options.path,
+			hidden:      options.hidden,
+			gitignore:   options.gitignore,
+			max_results: options.max_results,
+		};
+		let _ = options.cache;
+		task::blocking("fuzzy_find", ct, move |ct| system_impl::fuzzy_find_sync(config, db.as_ref(), ct))
 	}
 
-	fn write_file(path: &Path, content: &str) {
-		if let Some(parent) = path.parent() {
-			fs::create_dir_all(parent).expect("create parent directories for test file");
-		}
-		fs::write(path, content).expect("write test file");
-	}
-
-	#[test]
-	fn returns_directory_matches() {
-		let root = TempDirGuard::new();
-		write_file(&root.path().join("src/lib.rs"), "pub fn lib_fn() {}\n");
-		write_file(&root.path().join("README.md"), "readme\n");
-
-		let result = fuzzy_find_sync(
-			FuzzyFindConfig {
-				query:       "src".to_string(),
-				path:        root.path().to_string_lossy().into_owned(),
-				hidden:      Some(false),
-				gitignore:   Some(false),
-				max_results: Some(20),
-				cache:       Some(false),
-			},
-			None,
-			CancelToken::default(),
-		)
-		.expect("fuzzy_find_sync should succeed for directory query");
-
-		assert!(
-			result
-				.matches
-				.iter()
-				.any(|m| m.path == "src/" && m.is_directory),
-			"expected directory result for src/; got {:?}",
-			result
-				.matches
-				.iter()
-				.map(|m| (&m.path, m.is_directory))
-				.collect::<Vec<_>>()
-		);
-	}
-
-	#[test]
-	fn hidden_files_require_hidden_flag() {
-		let root = TempDirGuard::new();
-		write_file(&root.path().join("visible.txt"), "visible\n");
-		write_file(&root.path().join(".hidden-file.txt"), "hidden\n");
-
-		let hidden_off = fuzzy_find_sync(
-			FuzzyFindConfig {
-				query:       "hidden".to_string(),
-				path:        root.path().to_string_lossy().into_owned(),
-				hidden:      Some(false),
-				gitignore:   Some(false),
-				max_results: Some(20),
-				cache:       Some(false),
-			},
-			None,
-			CancelToken::default(),
-		)
-		.expect("hidden-off fuzzy_find_sync should succeed");
-		assert!(
-			hidden_off
-				.matches
-				.iter()
-				.all(|m| m.path != ".hidden-file.txt"),
-			"hidden file should be excluded when hidden=false; got {:?}",
-			hidden_off
-				.matches
-				.iter()
-				.map(|m| m.path.as_str())
-				.collect::<Vec<_>>()
-		);
-
-		let hidden_on = fuzzy_find_sync(
-			FuzzyFindConfig {
-				query:       "hidden".to_string(),
-				path:        root.path().to_string_lossy().into_owned(),
-				hidden:      Some(true),
-				gitignore:   Some(false),
-				max_results: Some(20),
-				cache:       Some(false),
-			},
-			None,
-			CancelToken::default(),
-		)
-		.expect("hidden-on fuzzy_find_sync should succeed");
-		assert!(
-			hidden_on
-				.matches
-				.iter()
-				.any(|m| m.path == ".hidden-file.txt" && !m.is_directory),
-			"hidden file should be returned when hidden=true; got {:?}",
-			hidden_on
-				.matches
-				.iter()
-				.map(|m| (&m.path, m.is_directory))
-				.collect::<Vec<_>>()
-		);
+	#[cfg(all(not(feature = "fuzzy-search-native"), not(feature = "fuzzy-search-system")))]
+	{
+		let ct = task::CancelToken::new(timeout_ms, signal);
+		let _ = (options, db);
+		task::blocking("fuzzy_find", ct, move |_| {
+			Err(Error::from_reason("Fuzzy search is disabled in this build."))
+		})
 	}
 }

@@ -10,8 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import type { Terminal as XtermTerminalType } from "@xterm/headless";
-import xterm from "@xterm/headless";
+import { Terminal as XtermTerminal } from "@xterm/headless";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
@@ -25,11 +24,9 @@ export interface BashInteractiveResult extends OutputSummary {
 }
 
 function normalizeCaptureChunk(chunk: string): string {
-	const normalized = chunk.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
+const normalized = chunk.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
 	return sanitizeWithOptionalSixelPassthrough(normalized, sanitizeText);
 }
-
-const XtermTerminal = xterm.Terminal;
 
 function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
 	const kitty = parseKittySequence(data);
@@ -92,7 +89,7 @@ function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean):
 	return data;
 }
 class BashInteractiveOverlayComponent implements Component {
-	#terminal: XtermTerminalType;
+	#terminal: XtermTerminal;
 	#state: "running" | "complete" | "timed_out" | "killed" = "running";
 	#exitCode: number | undefined;
 	#onInput: (data: string) => void = () => {};

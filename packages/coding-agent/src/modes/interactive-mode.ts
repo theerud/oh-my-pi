@@ -31,6 +31,7 @@ import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import { renameApprovedPlanFile } from "../plan-mode/approved-plan";
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
@@ -78,6 +79,10 @@ const EDITOR_MAX_HEIGHT_MIN = 6;
 const EDITOR_MAX_HEIGHT_MAX = 18;
 const EDITOR_RESERVED_ROWS = 12;
 const EDITOR_FALLBACK_ROWS = 24;
+
+type CreateAgentSessionFn = (
+	options?: CreateAgentSessionOptions,
+) => Promise<CreateAgentSessionResult>;
 
 /** Options for creating an InteractiveMode instance (for future API use) */
 export interface InteractiveModeOptions {
@@ -161,6 +166,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
+	readonly #createAgentSession: CreateAgentSessionFn;
 	#planModePreviousTools: string[] | undefined;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
@@ -196,6 +202,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: import("../mcp").MCPManager,
 		eventBus?: EventBus,
+		createAgentSession?: CreateAgentSessionFn,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -204,6 +211,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.agent = session.agent;
 		this.#version = version;
 		this.#changelogMarkdown = changelogMarkdown;
+		this.#createAgentSession = createAgentSession ?? (() => Promise.reject(new Error("createAgentSession unavailable")));
 		this.#toolUiContextSetter = setToolUIContext;
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
@@ -287,7 +295,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController = new ExtensionUiController(this);
 		this.#eventController = new EventController(this);
 		this.#commandController = new CommandController(this);
-		this.#selectorController = new SelectorController(this);
+		this.#selectorController = new SelectorController(this, this.#createAgentSession);
 		this.#inputController = new InputController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
 	}

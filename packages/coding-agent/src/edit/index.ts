@@ -25,6 +25,7 @@ import { executePatchMode, isPatchParams, type PatchParams, patchEditSchema } fr
 import { executeReplaceMode, isReplaceParams, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, getLspBatchRequest, type LspBatchRequest } from "./renderer";
 
+
 export { DEFAULT_EDIT_MODE, type EditMode, normalizeEditMode } from "../utils/edit-mode";
 export * from "./diff";
 export * from "./line-hash";
@@ -84,6 +85,7 @@ function resolveAllowFuzzy(session: ToolSession, rawValue: string): boolean {
 			throw new Error(`Invalid PI_EDIT_FUZZY: ${rawValue}`);
 	}
 }
+
 
 function resolveFuzzyThreshold(session: ToolSession, rawValue: string): number {
 	if (rawValue === "auto") {

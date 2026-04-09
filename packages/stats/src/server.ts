@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 import { $ } from "bun";
 import {
 	getDashboardStats,
@@ -18,8 +20,10 @@ const getEmbeddedClientArchive = (() => {
 	return () => Buffer.from(txt, "base64");
 })();
 
-const CLIENT_DIR = path.join(import.meta.dir, "client");
-const STATIC_DIR = path.join(import.meta.dir, "..", "dist", "client");
+const MODULE_DIR = url.fileURLToPath(new URL(".", import.meta.url));
+const CLIENT_DIR = path.join(MODULE_DIR, "client");
+const STATIC_DIR = path.join(MODULE_DIR, "..", "dist", "client");
+const STATIC_INDEX_PATH = path.join(STATIC_DIR, "index.html");
 const IS_BUN_COMPILED =
 	Bun.env.PI_COMPILED ||
 	import.meta.url.includes("$bunfs") ||
@@ -28,6 +32,11 @@ const IS_BUN_COMPILED =
 
 const COMPILED_CLIENT_DIR_ROOT = path.join(os.tmpdir(), "omp-stats-client");
 let compiledClientDirPromise: Promise<string> | null = null;
+
+function shouldUseEmbeddedClientAssets(): boolean {
+	if (IS_BUN_COMPILED) return true;
+	return getEmbeddedClientArchive !== null && !fsSync.existsSync(STATIC_INDEX_PATH);
+}
 
 function sanitizeArchivePath(archivePath: string): string | null {
 	const normalized = archivePath.replaceAll("\\", "/").replace(/^\.\//, "");
@@ -53,7 +62,7 @@ async function extractEmbeddedClientArchive(archiveBytes: Buffer, outputDir: str
 }
 
 async function getCompiledClientDir(): Promise<string> {
-	if (!IS_BUN_COMPILED) return STATIC_DIR;
+	if (!shouldUseEmbeddedClientAssets()) return STATIC_DIR;
 	if (compiledClientDirPromise) return compiledClientDirPromise;
 
 	const archiveBytes = getEmbeddedClientArchive?.();
@@ -104,11 +113,11 @@ async function getLatestMtime(dir: string): Promise<number> {
 }
 
 const ensureClientBuild = async () => {
-	if (IS_BUN_COMPILED) return;
-	const indexPath = path.join(STATIC_DIR, "index.html");
+	if (shouldUseEmbeddedClientAssets()) return;
+	const indexPath = STATIC_INDEX_PATH;
 	const cssPath = path.join(STATIC_DIR, "styles.css");
 	const clientSourceMtime = await getLatestMtime(CLIENT_DIR);
-	const tailwindConfigPath = path.join(import.meta.dir, "..", "tailwind.config.js");
+	const tailwindConfigPath = path.join(MODULE_DIR, "..", "tailwind.config.js");
 	let tailwindConfigMtime = 0;
 	try {
 		const tailwindConfigStats = await fs.stat(tailwindConfigPath);
@@ -135,7 +144,7 @@ const ensureClientBuild = async () => {
 	await fs.rm(STATIC_DIR, { recursive: true, force: true });
 
 	console.log("Building stats client...");
-	const packageRoot = path.join(import.meta.dir, "..");
+	const packageRoot = path.join(MODULE_DIR, "..");
 	const buildResult = await $`bun run build.ts`.cwd(packageRoot).quiet().nothrow();
 	if (buildResult.exitCode !== 0) {
 		const output = buildResult.text().trim();

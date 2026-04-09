@@ -948,6 +948,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		},
 		settings,
+		createAgentSession,
 		authStorage,
 		modelRegistry,
 		asyncJobManager,

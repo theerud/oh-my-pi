@@ -37,6 +37,7 @@ import { convertToPng } from "../../utils/image-convert";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
+
 function ensureInvalidate(component: unknown): Component {
 	const c = component as { render: Component["render"]; invalidate?: () => void };
 	if (!c.invalidate) {

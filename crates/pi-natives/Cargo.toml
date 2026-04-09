@@ -20,19 +20,19 @@ napi = { version = "3", features = ["napi10", "tokio_rt", "tokio_time"] }
 napi-derive = "3"
 bytes = "1.7"
 bytes-utils = "0.1"
-brush-core = { version = "0.4.0", path = "../brush-core-vendored" }
-brush-builtins = { version = "0.1.0", path = "../brush-builtins-vendored" }
+brush-core = { version = "0.4.0", path = "../brush-core-vendored", optional = true }
+brush-builtins = { version = "0.1.0", path = "../brush-builtins-vendored", optional = true }
 parking_lot = "0.12.5"
 dashmap = "6.1"
 clap = { version = "4", features = ["derive"] }
 os_pipe = "1"
 portable-pty = "0.9"
-grep-regex = "0.1"
-fff-grep = "0.4"
+grep-regex = { version = "0.1", optional = true }
+fff-grep = { version = "0.4", optional = true }
 fff = { package = "fff-search", version = "0.4.2", default-features = false, features = [
    "zlob",
-] }
-grep-matcher = "0.1"
+], optional = true }
+grep-matcher = { version = "0.1", optional = true }
 globset = "0.4"
 ignore = "0.4"
 rayon = "1.10"
@@ -101,16 +101,16 @@ image = { version = "0.25", default-features = false, features = [
    "jpeg",
    "gif",
    "webp",
-] }
+], optional = true }
 arboard = { version = "3.5.0", features = ["wayland-data-control"] }
-icy_sixel = "0.5"
+icy_sixel = { version = "0.5", optional = true }
 unicode-segmentation = "1.11"
 unicode-width = "0.2"
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
    "regex-fancy",
-] }
+], optional = true }
 html-to-markdown-rs = { version = "2.24", default-features = false }
 phf = { version = "0.13", features = ["macros"] }
 smallvec = { version = "1.15.1", features = [
@@ -126,8 +126,41 @@ regex = "1"
 similar = "3.0.0"
 path-clean = "1"
 pathdiff = "0.2"
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[features]
+default = ["full"]
+full = [
+   "syntax-highlighting",
+   "structural-search-native",
+   "image",
+   "shell-native",
+   "text-search-native",
+   "fuzzy-search-native",
+   "discovery-native",
+]
+
+syntax-highlighting = ["dep:syntect"]
+image = ["dep:image", "dep:icy_sixel"]
+
+# Current main still compiles the chunk/tree-sitter stack unconditionally, so
+# this flag only switches the AST search implementation between embedded and
+# external ast-grep for now.
+structural-search-native = []
+structural-search-system = []
+
+shell-native = ["dep:brush-core", "dep:brush-builtins"]
+shell-system = []
+
+text-search-native = ["dep:grep-regex", "dep:fff-grep", "dep:grep-matcher"]
+text-search-system = []
+
+fuzzy-search-native = ["dep:fff"]
+fuzzy-search-system = []
+
+discovery-native = []
+discovery-system = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -141,6 +174,7 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_Com",
    "Win32_System_LibraryLoader",
 ] }
+
 [build-dependencies]
 napi-build = "2"
 cc = "1"

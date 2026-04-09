@@ -19,6 +19,7 @@ import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { EventBus } from "../utils/event-bus";
 import { SearchTool } from "../web/search";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../sdk";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -162,6 +163,8 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManager;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Factory for spawning nested agent sessions without importing sdk.ts from task internals. */
+	createAgentSession?: (options?: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
 	searchDb?: SearchDb;
 	/** Plan mode state (if active) */

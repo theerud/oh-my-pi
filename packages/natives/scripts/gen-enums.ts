@@ -10,7 +10,9 @@
  */
 import * as path from "node:path";
 
-const nativeDir = path.resolve(import.meta.dir, "../native");
+const nativeDir = process.env.PI_NATIVE_BINDINGS_DIR
+	? path.resolve(process.env.PI_NATIVE_BINDINGS_DIR)
+	: path.resolve(import.meta.dir, "../native");
 const dtsPath = path.join(nativeDir, "index.d.ts");
 const jsPath = path.join(nativeDir, "index.js");
 

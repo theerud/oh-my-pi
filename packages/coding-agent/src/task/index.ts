@@ -785,6 +785,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 							});
 							emitProgress();
 						},
+						createAgentSession: this.session.createAgentSession,
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
 						searchDb: this.session.searchDb,
@@ -839,6 +840,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 							});
 							emitProgress();
 						},
+						createAgentSession: this.session.createAgentSession,
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
 						searchDb: this.session.searchDb,

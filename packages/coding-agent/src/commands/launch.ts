@@ -2,11 +2,10 @@
  * Root command for the coding agent CLI.
  */
 
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import { parseArgs } from "../cli/args";
-import { runRootCommand } from "../main";
+
+const THINKING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
 export default class Index extends Command {
 	static description = "AI coding assistant";
@@ -135,6 +134,7 @@ export default class Index extends Command {
 	static strict = false;
 
 	async run(): Promise<void> {
+		const [{ parseArgs }, { runRootCommand }] = await Promise.all([import("../cli/args"), import("../main")]);
 		const parsed = parseArgs(this.argv);
 		await runRootCommand(parsed, this.argv);
 	}

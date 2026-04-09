@@ -11,8 +11,9 @@ import type { WritethroughCallback, WritethroughDeferredHandle } from "../../lsp
 import type { ToolSession } from "../../tools";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
+import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
-import { generateDiffString, replaceText } from "../diff";
+import { type DiffError, type DiffResult, generateDiffString } from "../diff";
 import {
 	countLeadingWhitespace,
 	detectLineEnding,
@@ -23,6 +24,17 @@ import {
 	stripBom,
 } from "../normalize";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
+
+export interface ReplaceOptions {
+	fuzzy: boolean;
+	all: boolean;
+	threshold?: number;
+}
+
+export interface ReplaceResult {
+	content: string;
+	count: number;
+}
 
 export interface FuzzyMatch {
 	actualText: string;
@@ -138,6 +150,18 @@ function formatOccurrenceError(path: string, matchOutcome: MatchOutcome): string
 			? ` (showing first ${MAX_RECORDED_MATCHES} of ${matchOutcome.occurrences})`
 			: "";
 	return `Found ${matchOutcome.occurrences} occurrences in ${path}${moreMsg}:\n\n${previews}\n\nAdd more context lines to disambiguate.`;
+}
+
+function formatOccurrenceMatchError(
+	occurrences: number,
+	occurrencePreviews: string[] | undefined,
+	path?: string,
+): string {
+	const previews = occurrencePreviews?.join("\n\n") ?? "";
+	const moreMsg =
+		occurrences > MAX_RECORDED_MATCHES ? ` (showing first ${MAX_RECORDED_MATCHES} of ${occurrences})` : "";
+	const pathSuffix = path ? ` in ${path}` : "";
+	return `Found ${occurrences} occurrences${pathSuffix}${moreMsg}:\n\n${previews}\n\nAdd more context lines to disambiguate.`;
 }
 
 async function readReplaceFileContent(absolutePath: string, path: string): Promise<string> {
@@ -522,6 +546,78 @@ export function findMatch(
 	return { closest: best, fuzzyMatches: aboveThresholdCount };
 }
 
+export function replaceText(content: string, oldText: string, newText: string, options: ReplaceOptions): ReplaceResult {
+	if (oldText.length === 0) {
+		throw new Error("oldText must not be empty.");
+	}
+	const threshold = options.threshold ?? DEFAULT_FUZZY_THRESHOLD;
+	let normalizedContent = normalizeToLF(content);
+	const normalizedOldText = normalizeToLF(oldText);
+	const normalizedNewText = normalizeToLF(newText);
+	let count = 0;
+
+	if (options.all) {
+		const exactCount = normalizedContent.split(normalizedOldText).length - 1;
+		if (exactCount > 0) {
+			return {
+				content: normalizedContent.split(normalizedOldText).join(normalizedNewText),
+				count: exactCount,
+			};
+		}
+
+		while (true) {
+			const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
+				allowFuzzy: options.fuzzy,
+				threshold,
+			});
+
+			const shouldUseClosest =
+				options.fuzzy &&
+				matchOutcome.closest &&
+				matchOutcome.closest.confidence >= threshold &&
+				(matchOutcome.fuzzyMatches === undefined || matchOutcome.fuzzyMatches <= 1);
+			const match = matchOutcome.match || (shouldUseClosest ? matchOutcome.closest : undefined);
+			if (!match) {
+				break;
+			}
+
+			const adjustedNewText = adjustIndentation(normalizedOldText, match.actualText, normalizedNewText);
+			if (adjustedNewText === match.actualText) {
+				break;
+			}
+			normalizedContent =
+				normalizedContent.substring(0, match.startIndex) +
+				adjustedNewText +
+				normalizedContent.substring(match.startIndex + match.actualText.length);
+			count++;
+		}
+
+		return { content: normalizedContent, count };
+	}
+
+	const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
+		allowFuzzy: options.fuzzy,
+		threshold,
+	});
+
+	if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
+		throw new Error(formatOccurrenceMatchError(matchOutcome.occurrences, matchOutcome.occurrencePreviews));
+	}
+
+	if (!matchOutcome.match) {
+		return { content: normalizedContent, count: 0 };
+	}
+
+	const match = matchOutcome.match;
+	const adjustedNewText = adjustIndentation(normalizedOldText, match.actualText, normalizedNewText);
+	normalizedContent =
+		normalizedContent.substring(0, match.startIndex) +
+		adjustedNewText +
+		normalizedContent.substring(match.startIndex + match.actualText.length);
+
+	return { content: normalizedContent, count: 1 };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Line-Based Sequence Match (for patch mode)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -754,6 +850,7 @@ export function seekSequence(
 			strategy: "fuzzy",
 		};
 	}
+
 
 	// Pass 8: Character-based fuzzy matching via findMatch
 	// This is the final fallback for when line-based matching fails
@@ -1009,6 +1106,73 @@ interface ExecuteReplaceModeOptions {
 
 export function isReplaceParams(params: unknown): params is ReplaceParams {
 	return typeof params === "object" && params !== null && "old_text" in params && "new_text" in params;
+}
+
+export async function computeEditDiff(
+	path: string,
+	oldText: string,
+	newText: string,
+	cwd: string,
+	fuzzy = true,
+	all = false,
+	threshold?: number,
+): Promise<DiffResult | DiffError> {
+	if (oldText.length === 0) {
+		return { error: "oldText must not be empty." };
+	}
+	const absolutePath = resolveToCwd(path, cwd);
+
+	try {
+		let rawContent: string;
+		try {
+			rawContent = await readReplaceFileContent(absolutePath, path);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { error: message || `Unable to read ${path}` };
+		}
+
+		const { text: content } = stripBom(rawContent);
+		const normalizedContent = normalizeToLF(content);
+		const normalizedOldText = normalizeToLF(oldText);
+		const normalizedNewText = normalizeToLF(newText);
+
+		const result = replaceText(normalizedContent, normalizedOldText, normalizedNewText, {
+			fuzzy,
+			all,
+			threshold,
+		});
+
+		if (result.count === 0) {
+			const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
+				allowFuzzy: fuzzy,
+				threshold: threshold ?? DEFAULT_FUZZY_THRESHOLD,
+			});
+
+			if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
+				return {
+					error: formatOccurrenceMatchError(matchOutcome.occurrences, matchOutcome.occurrencePreviews, path),
+				};
+			}
+
+			return {
+				error: EditMatchError.formatMessage(path, normalizedOldText, matchOutcome.closest, {
+					allowFuzzy: fuzzy,
+					threshold: threshold ?? DEFAULT_FUZZY_THRESHOLD,
+					fuzzyMatches: matchOutcome.fuzzyMatches,
+				}),
+			};
+		}
+
+		if (normalizedContent === result.content) {
+			return {
+				error: `No changes would be made to ${path}. The replacement produces identical content.`,
+			};
+		}
+
+		return generateDiffString(normalizedContent, result.content);
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
 }
 
 export async function executeReplaceMode(

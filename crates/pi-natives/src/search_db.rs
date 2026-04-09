@@ -3,84 +3,107 @@
 //! This owns search-side shared state that should outlive individual native
 //! calls: frecency tracking plus a per-root cache of `fff` file pickers.
 
+use std::path::Path;
+use std::sync::Arc;
+
+#[cfg(feature = "text-search-native")]
 use std::{
 	collections::HashMap,
-	path::Path,
-	sync::{Arc, atomic::Ordering},
+	sync::atomic::Ordering,
 	time::Duration,
 };
 
+#[cfg(feature = "text-search-native")]
 use fff::{FFFMode, FileItem, FilePicker, FrecencyTracker, SharedFrecency, SharedPicker};
-use napi::{Error, bindgen_prelude::Result};
+use napi::bindgen_prelude::Result;
+#[cfg(feature = "text-search-native")]
+use napi::Error;
 use napi_derive::napi;
+#[cfg(feature = "text-search-native")]
 use parking_lot::Mutex;
 
 use crate::task;
 
 struct SearchDbInner {
 	path:            String,
+	#[cfg(feature = "text-search-native")]
 	shared_frecency: SharedFrecency,
+	#[cfg(feature = "text-search-native")]
 	pickers:         Mutex<HashMap<String, SharedPicker>>,
 }
 
 impl Drop for SearchDbInner {
 	fn drop(&mut self) {
-		for shared_picker in self.pickers.lock().values() {
-			let Ok(mut guard) = shared_picker.write() else {
-				continue;
-			};
-			if let Some(picker) = guard.as_mut() {
-				picker.cancel();
-				picker.stop_background_monitor();
+		#[cfg(feature = "text-search-native")]
+		{
+			for shared_picker in self.pickers.lock().values() {
+				let Ok(mut guard) = shared_picker.write() else {
+					continue;
+				};
+				if let Some(picker) = guard.as_mut() {
+					picker.cancel();
+					picker.stop_background_monitor();
+				}
 			}
 		}
 	}
 }
 
-/// Long-lived native search state: frecency persistence and per-workspace file
-/// picker caches.
 #[derive(Clone)]
 #[napi]
+/// Long-lived native search state: frecency persistence and per-workspace file
+/// picker caches.
 pub struct SearchDb {
 	inner: Arc<SearchDbInner>,
 }
 
 #[napi]
 impl SearchDb {
+	#[napi(constructor)]
 	/// Create search DB state rooted at `path` (trimmed). An empty path skips
 	/// frecency storage.
-	#[napi(constructor)]
 	pub fn new(path: String) -> Self {
 		let normalized = path.trim().to_string();
-		let shared_frecency: SharedFrecency = Default::default();
 
-		if !normalized.is_empty()
-			&& let Ok(tracker) = FrecencyTracker::new(&normalized, false)
+		#[cfg(feature = "text-search-native")]
 		{
-			if let Ok(mut guard) = shared_frecency.write() {
-				*guard = Some(tracker);
+			let shared_frecency: SharedFrecency = Default::default();
+
+			if !normalized.is_empty()
+				&& let Ok(tracker) = FrecencyTracker::new(&normalized, false)
+			{
+				if let Ok(mut guard) = shared_frecency.write() {
+					*guard = Some(tracker);
+				}
+				let _ =
+					FrecencyTracker::spawn_gc(Arc::clone(&shared_frecency), normalized.clone(), false);
 			}
-			let _ = FrecencyTracker::spawn_gc(Arc::clone(&shared_frecency), normalized.clone(), false);
+
+			Self {
+				inner: Arc::new(SearchDbInner {
+					path: normalized,
+					shared_frecency,
+					pickers: Mutex::new(HashMap::new()),
+				}),
+			}
 		}
 
-		Self {
-			inner: Arc::new(SearchDbInner {
-				path: normalized,
-				shared_frecency,
-				pickers: Mutex::new(HashMap::new()),
-			}),
+		#[cfg(not(feature = "text-search-native"))]
+		{
+			Self { inner: Arc::new(SearchDbInner { path: normalized }) }
 		}
 	}
 
+	#[napi(getter)]
 	/// Root path string associated with this instance (same as passed to the
 	/// constructor).
-	#[napi(getter)]
 	pub fn path(&self) -> String {
 		self.inner.path.clone()
 	}
 }
 
 impl SearchDb {
+	#[allow(dead_code)]
 	fn picker_key(root: &Path) -> String {
 		root
 			.canonicalize()
@@ -89,6 +112,7 @@ impl SearchDb {
 			.into_owned()
 	}
 
+	#[cfg(feature = "text-search-native")]
 	pub fn get_or_init_picker(&self, root: &Path) -> Result<SharedPicker> {
 		let key = Self::picker_key(root);
 		let mut pickers = self.inner.pickers.lock();
@@ -109,6 +133,7 @@ impl SearchDb {
 		Ok(shared_picker)
 	}
 
+	#[cfg(feature = "text-search-native")]
 	pub fn update_frecency_scores(&self, item: &mut FileItem) {
 		let Ok(guard) = self.inner.shared_frecency.read() else {
 			return;
@@ -120,22 +145,38 @@ impl SearchDb {
 	}
 }
 
-pub fn wait_for_picker_scan(shared_picker: &SharedPicker, ct: &task::CancelToken) -> Result<()> {
-	let signal = {
-		let guard = shared_picker
-			.read()
-			.map_err(|_| Error::from_reason("shared picker lock poisoned"))?;
-		let Some(picker) = guard.as_ref() else {
-			return Ok(());
-		};
-		picker.scan_signal()
-	};
-
-	while signal.load(Ordering::Acquire) {
-		ct.heartbeat()?;
-		std::thread::sleep(Duration::from_millis(10));
+pub fn wait_for_picker_scan(
+	#[cfg(feature = "text-search-native")] shared_picker: &SharedPicker,
+	#[cfg(not(feature = "text-search-native"))] _shared_picker: &SharedPicker,
+	#[cfg(feature = "text-search-native")] ct: &task::CancelToken,
+	#[cfg(not(feature = "text-search-native"))] _ct: &task::CancelToken,
+) -> Result<()> {
+	#[cfg(not(feature = "text-search-native"))]
+	{
+		Ok(())
 	}
 
-	ct.heartbeat()?;
-	Ok(())
+	#[cfg(feature = "text-search-native")]
+	{
+		let signal = {
+			let guard = shared_picker
+				.read()
+				.map_err(|_| Error::from_reason("shared picker lock poisoned"))?;
+			let Some(picker) = guard.as_ref() else {
+				return Ok(());
+			};
+			picker.scan_signal()
+		};
+
+		while signal.load(Ordering::Acquire) {
+			ct.heartbeat()?;
+			std::thread::sleep(Duration::from_millis(10));
+		}
+
+		ct.heartbeat()?;
+		Ok(())
+	}
 }
+
+#[cfg(not(feature = "text-search-native"))]
+pub type SharedPicker = ();

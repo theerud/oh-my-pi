@@ -14,6 +14,7 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+import * as runtimePi from "../../runtime-pi";
 import { createNoOpUIContext, resolvePath } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
 
@@ -171,7 +172,7 @@ export async function loadCustomTools(
 	}) => void,
 ) {
 	const loader = new CustomToolLoader(
-		await import("@oh-my-pi/pi-coding-agent"),
+		runtimePi as unknown as typeof import("@oh-my-pi/pi-coding-agent"),
 		cwd,
 		builtInToolNames,
 		pushPendingAction,

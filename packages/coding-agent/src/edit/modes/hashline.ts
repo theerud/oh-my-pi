@@ -1122,6 +1122,7 @@ export function buildCompactHashlineDiffPreview(
 		};
 	}
 
+
 	return { preview: out.join("\n"), addedLines, removedLines };
 }
 

@@ -337,6 +337,7 @@ interface WriteRenderArgs {
 	content?: string;
 }
 
+
 const WRITE_PREVIEW_LINES = 6;
 const WRITE_STREAMING_PREVIEW_LINES = 12;
 

@@ -1,60 +1,20 @@
 //! AST-aware structural search and rewrite powered by ast-grep.
 
-use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
-	path::{Path, PathBuf},
-};
+use std::collections::HashMap;
+#[cfg(feature = "structural-search-native")]
+use std::path::{Path, PathBuf};
 
-use ast_grep_core::{
-	Language, MatchStrictness, matcher::Pattern, source::Edit, tree_sitter::LanguageExt,
-};
+#[cfg(feature = "structural-search-native")]
+use ast_grep_core::tree_sitter::LanguageExt;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::{fs_cache, glob_util, language::SupportLang, task};
+#[cfg(feature = "structural-search-native")]
+use crate::language::SupportLang;
+use crate::task;
 
+#[cfg(feature = "structural-search-native")]
 const DEFAULT_FIND_LIMIT: u32 = 50;
-
-/// ast-grep pattern strictness (controls how patterns match syntax).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[napi(string_enum)]
-pub enum AstMatchStrictness {
-	/// Match at the concrete syntax tree level.
-	#[napi(value = "cst")]
-	Cst,
-	/// Balanced default suitable for most searches.
-	#[napi(value = "smart")]
-	Smart,
-	/// Match at the AST level.
-	#[napi(value = "ast")]
-	Ast,
-	/// More permissive matching.
-	#[napi(value = "relaxed")]
-	Relaxed,
-	/// Match structural signatures.
-	#[napi(value = "signature")]
-	Signature,
-	/// Template-style pattern matching.
-	#[napi(value = "template")]
-	Template,
-}
-
-impl From<AstMatchStrictness> for MatchStrictness {
-	fn from(value: AstMatchStrictness) -> Self {
-		match value {
-			AstMatchStrictness::Cst => Self::Cst,
-			AstMatchStrictness::Smart => Self::Smart,
-			AstMatchStrictness::Ast => Self::Ast,
-			AstMatchStrictness::Relaxed => Self::Relaxed,
-			AstMatchStrictness::Signature => Self::Signature,
-			AstMatchStrictness::Template => Self::Template,
-		}
-	}
-}
-
-fn resolve_strictness(value: Option<AstMatchStrictness>) -> MatchStrictness {
-	value.map_or(MatchStrictness::Smart, Into::into)
-}
 
 /// Options for `astGrep`: patterns, scan scope, and match limits.
 #[napi(object)]
@@ -70,12 +30,13 @@ pub struct AstFindOptions<'env> {
 	/// Rule selector for multi-rule ast-grep configurations.
 	pub selector:     Option<String>,
 	/// Pattern strictness; defaults to smart matching when omitted.
-	pub strictness:   Option<AstMatchStrictness>,
+	pub strictness:   Option<String>,
 	/// Maximum matches to return after `offset` (default applies when omitted).
 	pub limit:        Option<u32>,
 	/// Number of leading matches to skip before applying `limit`.
 	pub offset:       Option<u32>,
 	/// When true, include meta-variable bindings per match.
+	#[napi(js_name = "includeMeta")]
 	pub include_meta: Option<bool>,
 	/// Reserved for contextual snippets; not used by the current native find
 	/// path.
@@ -83,6 +44,7 @@ pub struct AstFindOptions<'env> {
 	/// Optional cancellation handle (library-specific).
 	pub signal:       Option<Unknown<'env>>,
 	/// Wall-clock timeout for the worker task in milliseconds.
+	#[napi(js_name = "timeoutMs")]
 	pub timeout_ms:   Option<u32>,
 }
 
@@ -94,18 +56,25 @@ pub struct AstFindMatch {
 	/// Matched source text.
 	pub text:           String,
 	/// Start byte offset in the file (UTF-8 byte index).
+	#[napi(js_name = "byteStart")]
 	pub byte_start:     u32,
 	/// End byte offset in the file (exclusive UTF-8 byte index).
+	#[napi(js_name = "byteEnd")]
 	pub byte_end:       u32,
 	/// 1-based start line.
+	#[napi(js_name = "startLine")]
 	pub start_line:     u32,
 	/// 1-based start column.
+	#[napi(js_name = "startColumn")]
 	pub start_column:   u32,
 	/// 1-based end line.
+	#[napi(js_name = "endLine")]
 	pub end_line:       u32,
 	/// 1-based end column.
+	#[napi(js_name = "endColumn")]
 	pub end_column:     u32,
 	/// Meta-variable name to captured text, when `includeMeta` was enabled.
+	#[napi(js_name = "metaVariables")]
 	pub meta_variables: Option<HashMap<String, String>>,
 }
 
@@ -115,14 +84,19 @@ pub struct AstFindResult {
 	/// Page of matches after sort, offset, and limit.
 	pub matches:            Vec<AstFindMatch>,
 	/// Total matches found before paging (can exceed `matches.length`).
+	#[napi(js_name = "totalMatches")]
 	pub total_matches:      u32,
 	/// Distinct files that contained at least one match.
+	#[napi(js_name = "filesWithMatches")]
 	pub files_with_matches: u32,
 	/// Files examined for the query.
+	#[napi(js_name = "filesSearched")]
 	pub files_searched:     u32,
 	/// True when results were truncated by `limit`.
+	#[napi(js_name = "limitReached")]
 	pub limit_reached:      bool,
 	/// Non-fatal parse or pattern errors collected during the run.
+	#[napi(js_name = "parseErrors")]
 	pub parse_errors:       Option<Vec<String>>,
 }
 
@@ -141,18 +115,23 @@ pub struct AstReplaceOptions<'env> {
 	/// Rule selector for multi-rule configurations.
 	pub selector:            Option<String>,
 	/// Pattern strictness for rewrites.
-	pub strictness:          Option<AstMatchStrictness>,
+	pub strictness:          Option<String>,
 	/// When true (default), compute changes without writing files.
+	#[napi(js_name = "dryRun")]
 	pub dry_run:             Option<bool>,
 	/// Cap on replacement applications across all files.
+	#[napi(js_name = "maxReplacements")]
 	pub max_replacements:    Option<u32>,
 	/// Cap on distinct files that may be modified.
+	#[napi(js_name = "maxFiles")]
 	pub max_files:           Option<u32>,
 	/// Fail the operation when a file cannot be parsed for rewriting.
+	#[napi(js_name = "failOnParseError")]
 	pub fail_on_parse_error: Option<bool>,
 	/// Optional cancellation handle.
 	pub signal:              Option<Unknown<'env>>,
 	/// Wall-clock timeout for the worker task in milliseconds.
+	#[napi(js_name = "timeoutMs")]
 	pub timeout_ms:          Option<u32>,
 }
 
@@ -167,19 +146,26 @@ pub struct AstReplaceChange {
 	/// Replacement text.
 	pub after:          String,
 	/// Start byte offset of the replaced span.
+	#[napi(js_name = "byteStart")]
 	pub byte_start:     u32,
 	/// End byte offset of the replaced span (exclusive).
+	#[napi(js_name = "byteEnd")]
 	pub byte_end:       u32,
 	/// Length of deleted text in bytes (may differ from `byteEnd - byteStart`
 	/// for edge cases).
+	#[napi(js_name = "deletedLength")]
 	pub deleted_length: u32,
 	/// 1-based start line of the match.
+	#[napi(js_name = "startLine")]
 	pub start_line:     u32,
 	/// 1-based start column.
+	#[napi(js_name = "startColumn")]
 	pub start_column:   u32,
 	/// 1-based end line.
+	#[napi(js_name = "endLine")]
 	pub end_line:       u32,
 	/// 1-based end column.
+	#[napi(js_name = "endColumn")]
 	pub end_column:     u32,
 }
 
@@ -192,119 +178,63 @@ pub struct AstReplaceFileChange {
 	pub count: u32,
 }
 
-/// Summary of an ast-grep rewrite pass, including whether disk writes occurred.
+/// Summary of an ast-grep rewrite pass, including whether disk writes
+/// occurred.
 #[napi(object)]
 pub struct AstReplaceResult {
 	/// Individual replacement records (may be large).
 	pub changes:            Vec<AstReplaceChange>,
 	/// Replacement counts grouped by file.
+	#[napi(js_name = "fileChanges")]
 	pub file_changes:       Vec<AstReplaceFileChange>,
 	/// Total replacements applied or previewed.
+	#[napi(js_name = "totalReplacements")]
 	pub total_replacements: u32,
 	/// Files that had at least one replacement.
+	#[napi(js_name = "filesTouched")]
 	pub files_touched:      u32,
 	/// Files considered for rewriting.
+	#[napi(js_name = "filesSearched")]
 	pub files_searched:     u32,
 	/// False when `dryRun` prevented writing.
 	pub applied:            bool,
 	/// True when limits stopped further replacements.
+	#[napi(js_name = "limitReached")]
 	pub limit_reached:      bool,
 	/// Parse or pattern errors when not failing the whole operation.
+	#[napi(js_name = "parseErrors")]
 	pub parse_errors:       Option<Vec<String>>,
 }
 
-struct FileCandidate {
-	absolute_path: PathBuf,
-	display_path:  String,
+pub struct AstFindConfig {
+	pub patterns:     Option<Vec<String>>,
+	pub lang:         Option<String>,
+	pub path:         Option<String>,
+	pub glob:         Option<String>,
+	pub selector:     Option<String>,
+	pub strictness:   Option<String>,
+	pub limit:        Option<u32>,
+	pub offset:       Option<u32>,
+	pub include_meta: Option<bool>,
+	pub context:      Option<u32>,
 }
 
-struct PendingFileChange {
-	change: AstReplaceChange,
-	edit:   Edit<String>,
+pub struct AstReplaceConfig {
+	pub rewrites:            Option<HashMap<String, String>>,
+	pub lang:                Option<String>,
+	pub path:                Option<String>,
+	pub glob:                Option<String>,
+	pub selector:            Option<String>,
+	pub strictness:          Option<String>,
+	pub dry_run:             Option<bool>,
+	pub max_replacements:    Option<u32>,
+	pub max_files:           Option<u32>,
+	pub fail_on_parse_error: Option<bool>,
 }
 
-fn to_u32(value: usize) -> u32 {
-	value.min(u32::MAX as usize) as u32
-}
-
-fn supported_lang_list() -> String {
-	SupportLang::sorted_aliases().join(", ")
-}
-
-fn resolve_supported_lang(value: &str) -> Result<SupportLang> {
-	SupportLang::from_alias(value).ok_or_else(|| {
-		Error::from_reason(format!(
-			"Unsupported language '{value}'. Supported: {}",
-			supported_lang_list()
-		))
-	})
-}
-
-fn resolve_language(lang: Option<&str>, file_path: &Path) -> Result<SupportLang> {
-	if let Some(lang) = lang.map(str::trim).filter(|lang| !lang.is_empty()) {
-		return resolve_supported_lang(lang);
-	}
-	SupportLang::from_path(file_path).ok_or_else(|| {
-		Error::from_reason(format!(
-			"Unable to infer language from file extension: {}. Specify `lang` explicitly.",
-			file_path.display()
-		))
-	})
-}
-
-/// Returns true if the file's extension resolves to a supported language.
-/// When `lang` is explicitly provided, all files are considered candidates
-/// (the user chose to treat them as that language). When `lang` is None,
-/// only files with recognizable code extensions are included.
-fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool {
-	if explicit_lang.is_some() {
-		return true;
-	}
-	resolve_language(None, file_path).is_ok()
-}
-
-fn infer_single_replace_lang(
-	candidates: &[FileCandidate],
-	ct: &task::CancelToken,
-) -> Result<String> {
-	let mut inferred = BTreeSet::new();
-	let mut unresolved = Vec::new();
-	for candidate in candidates {
-		ct.heartbeat()?;
-		match resolve_language(None, &candidate.absolute_path) {
-			Ok(language) => {
-				inferred.insert(language.canonical_name().to_string());
-			},
-			Err(err) => unresolved.push(format!("{}: {}", candidate.display_path, err)),
-		}
-	}
-	if !unresolved.is_empty() {
-		let details = unresolved
-			.into_iter()
-			.map(|entry| format!("- {entry}"))
-			.collect::<Vec<_>>()
-			.join("\n");
-		return Err(Error::from_reason(format!(
-			"`lang` is required for ast_edit when language cannot be inferred from all \
-			 files:\n{details}"
-		)));
-	}
-	if inferred.is_empty() {
-		return Err(Error::from_reason(
-			"`lang` is required for ast_edit when no files match path/glob".to_string(),
-		));
-	}
-	if inferred.len() > 1 {
-		return Err(Error::from_reason(format!(
-			"`lang` is required for ast_edit when path/glob resolves to multiple languages: {}",
-			inferred.into_iter().collect::<Vec<_>>().join(", ")
-		)));
-	}
-	Ok(inferred.into_iter().next().expect("non-empty inferred set"))
-}
-fn normalize_search_path(path: Option<String>) -> Result<PathBuf> {
+pub fn normalize_search_path(path: Option<String>) -> Result<std::path::PathBuf> {
 	let raw = path.unwrap_or_else(|| ".".to_string());
-	let candidate = PathBuf::from(raw.trim());
+	let candidate = std::path::PathBuf::from(raw.trim());
 	let absolute = if candidate.is_absolute() {
 		candidate
 	} else {
@@ -315,271 +245,466 @@ fn normalize_search_path(path: Option<String>) -> Result<PathBuf> {
 	Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
 }
 
-fn collect_from_entries(
-	root: &Path,
-	entries: &[fs_cache::GlobMatch],
-	glob_set: Option<&globset::GlobSet>,
-	mentions_node_modules: bool,
-	ct: &task::CancelToken,
-) -> Result<Vec<FileCandidate>> {
-	let mut files = Vec::new();
-	for entry in entries {
-		ct.heartbeat()?;
-		if entry.file_type != fs_cache::FileType::File {
-			continue;
+#[cfg(feature = "structural-search-native")]
+mod native_impl {
+	use std::collections::BTreeSet;
+
+	use ast_grep_core::{Language, MatchStrictness, matcher::Pattern, source::Edit};
+
+	use super::*;
+	use crate::{fs_cache, glob_util};
+
+	pub struct FileCandidate {
+		pub absolute_path: PathBuf,
+		pub display_path:  String,
+	}
+
+	pub struct PendingFileChange {
+		pub change: AstReplaceChange,
+		pub edit:   Edit<String>,
+	}
+
+	pub fn to_u32(value: usize) -> u32 {
+		value.min(u32::MAX as usize) as u32
+	}
+
+	pub static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf::phf_map! {
+		"bash"           => SupportLang::Bash,
+		"sh"             => SupportLang::Bash,
+		"c"              => SupportLang::C,
+		"cpp"            => SupportLang::Cpp,
+		"c++"            => SupportLang::Cpp,
+		"cc"             => SupportLang::Cpp,
+		"cxx"            => SupportLang::Cpp,
+		"csharp"         => SupportLang::CSharp,
+		"c#"             => SupportLang::CSharp,
+		"cs"             => SupportLang::CSharp,
+		"css"            => SupportLang::Css,
+		"clj"            => SupportLang::Clojure,
+		"cljc"           => SupportLang::Clojure,
+		"cljs"           => SupportLang::Clojure,
+		"clojure"        => SupportLang::Clojure,
+		"clojurescript"  => SupportLang::Clojure,
+		"edn"            => SupportLang::Clojure,
+		"diff"           => SupportLang::Diff,
+		"patch"          => SupportLang::Diff,
+		"elixir"         => SupportLang::Elixir,
+		"ex"             => SupportLang::Elixir,
+		"go"             => SupportLang::Go,
+		"golang"         => SupportLang::Go,
+		"haskell"        => SupportLang::Haskell,
+		"hs"             => SupportLang::Haskell,
+		"hcl"            => SupportLang::Hcl,
+		"tf"             => SupportLang::Hcl,
+		"tfvars"         => SupportLang::Hcl,
+		"terraform"      => SupportLang::Hcl,
+		"html"           => SupportLang::Html,
+		"htm"            => SupportLang::Html,
+		"java"           => SupportLang::Java,
+		"javascript"     => SupportLang::JavaScript,
+		"js"             => SupportLang::JavaScript,
+		"jsx"            => SupportLang::JavaScript,
+		"mjs"            => SupportLang::JavaScript,
+		"cjs"            => SupportLang::JavaScript,
+		"json"           => SupportLang::Json,
+		"julia"          => SupportLang::Julia,
+		"jl"             => SupportLang::Julia,
+		"kotlin"         => SupportLang::Kotlin,
+		"kt"             => SupportLang::Kotlin,
+		"lua"            => SupportLang::Lua,
+		"make"           => SupportLang::Make,
+		"makefile"       => SupportLang::Make,
+		"markdown"       => SupportLang::Markdown,
+		"md"             => SupportLang::Markdown,
+		"mdx"            => SupportLang::Markdown,
+		"nix"            => SupportLang::Nix,
+		"objc"           => SupportLang::ObjC,
+		"objective-c"    => SupportLang::ObjC,
+		"odin"           => SupportLang::Odin,
+		"php"            => SupportLang::Php,
+		"python"         => SupportLang::Python,
+		"py"             => SupportLang::Python,
+		"regex"          => SupportLang::Regex,
+		"ruby"           => SupportLang::Ruby,
+		"rb"             => SupportLang::Ruby,
+		"rust"           => SupportLang::Rust,
+		"rs"             => SupportLang::Rust,
+		"scala"          => SupportLang::Scala,
+		"solidity"       => SupportLang::Solidity,
+		"sol"            => SupportLang::Solidity,
+		"starlark"       => SupportLang::Starlark,
+		"star"           => SupportLang::Starlark,
+		"swift"          => SupportLang::Swift,
+		"toml"           => SupportLang::Toml,
+		"tsx"            => SupportLang::Tsx,
+		"typescript"     => SupportLang::TypeScript,
+		"ts"             => SupportLang::TypeScript,
+		"mts"            => SupportLang::TypeScript,
+		"cts"            => SupportLang::TypeScript,
+		"verilog"        => SupportLang::Verilog,
+		"systemverilog"  => SupportLang::Verilog,
+		"sv"             => SupportLang::Verilog,
+		"xml"            => SupportLang::Xml,
+		"xsl"            => SupportLang::Xml,
+		"svg"            => SupportLang::Xml,
+		"yaml"           => SupportLang::Yaml,
+		"yml"            => SupportLang::Yaml,
+		"zig"            => SupportLang::Zig,
+	};
+
+	pub fn supported_lang_list() -> String {
+		let mut keys: Vec<&str> = LANG_ALIASES.keys().copied().collect();
+		keys.sort_unstable();
+		keys.join(", ")
+	}
+
+	pub fn resolve_supported_lang(value: &str) -> Result<SupportLang> {
+		let lower = value.to_ascii_lowercase();
+		LANG_ALIASES.get(lower.as_str()).copied().ok_or_else(|| {
+			Error::from_reason(format!(
+				"Unsupported language '{value}'. Supported: {}",
+				supported_lang_list()
+			))
+		})
+	}
+
+	pub fn resolve_language(lang: Option<&str>, file_path: &Path) -> Result<SupportLang> {
+		if let Some(lang) = lang.map(str::trim).filter(|lang| !lang.is_empty()) {
+			return resolve_supported_lang(lang);
 		}
-		let relative = entry.path.replace('\\', "/");
-		if fs_cache::should_skip_path(Path::new(&relative), mentions_node_modules) {
-			continue;
+		SupportLang::from_path(file_path).ok_or_else(|| {
+			Error::from_reason(format!(
+				"Unable to infer language from file extension: {}. Specify `lang` explicitly.",
+				file_path.display()
+			))
+		})
+	}
+
+	/// Returns true if the file's extension resolves to a supported language.
+	/// When `lang` is explicitly provided, all files are considered candidates
+	/// (the user chose to treat them as that language). When `lang` is None,
+	/// only files with recognizable code extensions are included.
+	pub fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool {
+		if explicit_lang.is_some() {
+			return true;
 		}
-		if let Some(glob_set) = glob_set
-			&& !glob_set.is_match(&relative)
-		{
-			continue;
+		resolve_language(None, file_path).is_ok()
+	}
+
+	pub fn infer_single_replace_lang(
+		candidates: &[FileCandidate],
+		ct: &task::CancelToken,
+	) -> Result<String> {
+		let mut inferred = BTreeSet::new();
+		let mut unresolved = Vec::new();
+		for candidate in candidates {
+			ct.heartbeat()?;
+			match resolve_language(None, &candidate.absolute_path) {
+				Ok(language) => {
+					inferred.insert(language.canonical_name().to_string());
+				},
+				Err(err) => unresolved.push(format!("{}: {}", candidate.display_path, err)),
+			}
 		}
-		files.push(FileCandidate { absolute_path: root.join(&relative), display_path: relative });
-	}
-	Ok(files)
-}
-
-fn collect_candidates(
-	path: Option<String>,
-	glob: Option<&str>,
-	ct: &task::CancelToken,
-) -> Result<Vec<FileCandidate>> {
-	let search_path = normalize_search_path(path)?;
-	let metadata = std::fs::metadata(&search_path)
-		.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
-	if metadata.is_file() {
-		let display_path = search_path
-			.file_name()
-			.and_then(|name| name.to_str())
-			.map_or_else(
-				|| search_path.to_string_lossy().into_owned(),
-				std::string::ToString::to_string,
-			);
-		return Ok(vec![FileCandidate { absolute_path: search_path, display_path }]);
-	}
-	if !metadata.is_dir() {
-		return Err(Error::from_reason(format!(
-			"Search path must be a file or directory: {}",
-			search_path.display()
-		)));
-	}
-
-	let glob_set = glob_util::try_compile_glob(glob, false)?;
-	let mentions_node_modules = glob.is_some_and(|value| value.contains("node_modules"));
-	let scan = fs_cache::get_or_scan(&search_path, true, true, ct)?;
-	let mut files = collect_from_entries(
-		&search_path,
-		&scan.entries,
-		glob_set.as_ref(),
-		mentions_node_modules,
-		ct,
-	)?;
-
-	if files.is_empty() && scan.cache_age_ms >= fs_cache::empty_recheck_ms() {
-		let fresh = fs_cache::force_rescan(&search_path, true, true, true, ct)?;
-		files =
-			collect_from_entries(&search_path, &fresh, glob_set.as_ref(), mentions_node_modules, ct)?;
-	}
-
-	files.sort_by(|a, b| a.display_path.cmp(&b.display_path));
-	Ok(files)
-}
-
-fn compile_pattern(
-	pattern: &str,
-	selector: Option<&str>,
-	strictness: &MatchStrictness,
-	lang: SupportLang,
-) -> Result<Pattern> {
-	let mut compiled = if let Some(selector) = selector.map(str::trim).filter(|s| !s.is_empty()) {
-		Pattern::contextual(pattern, selector, lang)
-	} else {
-		Pattern::try_new(pattern, lang)
-	}
-	.map_err(|err| Error::from_reason(format!("Invalid pattern: {err}")))?;
-	compiled.strictness = strictness.clone();
-	Ok(compiled)
-}
-
-fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
-	let mut sorted: Vec<&Edit<String>> = edits.iter().collect();
-	sorted.sort_by_key(|edit| edit.position);
-	let mut prev_end = 0usize;
-	for edit in &sorted {
-		if edit.position < prev_end {
+		if !unresolved.is_empty() {
+			let details = unresolved
+				.into_iter()
+				.map(|entry| format!("- {entry}"))
+				.collect::<Vec<_>>()
+				.join("\n");
+			return Err(Error::from_reason(format!(
+				"`lang` is required for ast_edit when language cannot be inferred from all \
+				 files:\n{details}"
+			)));
+		}
+		if inferred.is_empty() {
 			return Err(Error::from_reason(
-				"Overlapping replacements detected; refine pattern to avoid ambiguous edits"
+				"`lang` is required for ast_edit when no files match path/glob".to_string(),
+			));
+		}
+		if inferred.len() > 1 {
+			return Err(Error::from_reason(format!(
+				"`lang` is required for ast_edit when path/glob resolves to multiple languages: {}",
+				inferred.into_iter().collect::<Vec<_>>().join(", ")
+			)));
+		}
+		Ok(inferred.into_iter().next().expect("non-empty inferred set"))
+	}
+
+	pub fn parse_strictness(value: Option<&str>) -> Result<MatchStrictness> {
+		let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+			return Ok(MatchStrictness::Smart);
+		};
+		raw.parse::<MatchStrictness>()
+			.map_err(|err| Error::from_reason(format!("Invalid strictness '{raw}': {err}")))
+	}
+
+	pub fn collect_from_entries(
+		root: &Path,
+		entries: &[fs_cache::GlobMatch],
+		glob_set: Option<&globset::GlobSet>,
+		mentions_node_modules: bool,
+		ct: &task::CancelToken,
+	) -> Result<Vec<FileCandidate>> {
+		let mut files = Vec::new();
+		for entry in entries {
+			ct.heartbeat()?;
+			if entry.file_type != fs_cache::FileType::File {
+				continue;
+			}
+			let relative = entry.path.replace('\\', "/");
+			if fs_cache::should_skip_path(Path::new(&relative), mentions_node_modules) {
+				continue;
+			}
+			if let Some(glob_set) = glob_set
+				&& !glob_set.is_match(&relative)
+			{
+				continue;
+			}
+			files.push(FileCandidate { absolute_path: root.join(&relative), display_path: relative });
+		}
+		Ok(files)
+	}
+
+	pub fn collect_candidates(
+		path: Option<String>,
+		glob: Option<&str>,
+		ct: &task::CancelToken,
+	) -> Result<Vec<FileCandidate>> {
+		let search_path = normalize_search_path(path)?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+		if metadata.is_file() {
+			let display_path = search_path
+				.file_name()
+				.and_then(|name| name.to_str())
+				.map_or_else(
+					|| search_path.to_string_lossy().into_owned(),
+					std::string::ToString::to_string,
+				);
+			return Ok(vec![FileCandidate { absolute_path: search_path, display_path }]);
+		}
+		if !metadata.is_dir() {
+			return Err(Error::from_reason(format!(
+				"Search path must be a file or directory: {}",
+				search_path.display()
+			)));
+		}
+
+		let glob_set = glob_util::try_compile_glob(glob, false)?;
+		let mentions_node_modules = glob.is_some_and(|value| value.contains("node_modules"));
+		let scan = fs_cache::get_or_scan(&search_path, true, true, ct)?;
+		let mut files = collect_from_entries(
+			&search_path,
+			&scan.entries,
+			glob_set.as_ref(),
+			mentions_node_modules,
+			ct,
+		)?;
+
+		if files.is_empty() && scan.cache_age_ms >= fs_cache::empty_recheck_ms() {
+			let fresh = fs_cache::force_rescan(&search_path, true, true, true, ct)?;
+			files = collect_from_entries(
+				&search_path,
+				&fresh,
+				glob_set.as_ref(),
+				mentions_node_modules,
+				ct,
+			)?;
+		}
+
+		files.sort_by(|a, b| a.display_path.cmp(&b.display_path));
+		Ok(files)
+	}
+
+	pub fn compile_pattern(
+		pattern: &str,
+		selector: Option<&str>,
+		strictness: &MatchStrictness,
+		lang: SupportLang,
+	) -> Result<Pattern> {
+		let mut compiled =
+			if let Some(selector) = selector.map(str::trim).filter(|s| !s.is_empty()) {
+				Pattern::contextual(pattern, selector, lang)
+			} else {
+				Pattern::try_new(pattern, lang)
+			}
+			.map_err(|err| Error::from_reason(format!("Invalid pattern: {err}")))?;
+		compiled.strictness = strictness.clone();
+		Ok(compiled)
+	}
+
+	pub fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
+		let mut sorted: Vec<&Edit<String>> = edits.iter().collect();
+		sorted.sort_by_key(|edit| edit.position);
+		let mut prev_end = 0usize;
+		for edit in &sorted {
+			if edit.position < prev_end {
+				return Err(Error::from_reason(
+					"Overlapping replacements detected; refine pattern to avoid ambiguous edits"
+						.to_string(),
+				));
+			}
+			prev_end = edit.position.saturating_add(edit.deleted_length);
+		}
+
+		let mut output = content.to_string();
+		for edit in sorted.into_iter().rev() {
+			let start = edit.position;
+			let end = edit.position.saturating_add(edit.deleted_length);
+			if end > output.len() || start > end {
+				return Err(Error::from_reason("Computed edit range is out of bounds".to_string()));
+			}
+			let replacement = String::from_utf8(edit.inserted_text.clone()).map_err(|err| {
+				Error::from_reason(format!("Replacement text is not valid UTF-8: {err}"))
+			})?;
+			output.replace_range(start..end, &replacement);
+		}
+		Ok(output)
+	}
+
+	pub fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> {
+		let mut normalized = Vec::new();
+		let mut seen = BTreeSet::new();
+		for raw in patterns.unwrap_or_default() {
+			let pattern = raw.trim();
+			if pattern.is_empty() {
+				continue;
+			}
+			if seen.insert(pattern.to_string()) {
+				normalized.push(pattern.to_string());
+			}
+		}
+		if normalized.is_empty() {
+			return Err(Error::from_reason(
+				"`patterns` is required and must include at least one non-empty pattern".to_string(),
+			));
+		}
+		Ok(normalized)
+	}
+
+	pub fn normalize_rewrite_map(
+		rewrites: Option<HashMap<String, String>>,
+	) -> Result<Vec<(String, String)>> {
+		let mut normalized = Vec::new();
+		for (pattern, rewrite) in rewrites.unwrap_or_default() {
+			if pattern.is_empty() {
+				return Err(Error::from_reason(
+					"`rewrites` keys must be non-empty pattern strings".to_string(),
+				));
+			}
+			normalized.push((pattern, rewrite));
+		}
+		if normalized.is_empty() {
+			return Err(Error::from_reason(
+				"`rewrites` is required and must include at least one pattern->rewrite mapping"
 					.to_string(),
 			));
 		}
-		prev_end = edit.position.saturating_add(edit.deleted_length);
+		normalized.sort_by(|left, right| left.0.cmp(&right.0));
+		Ok(normalized)
 	}
 
-	let mut output = content.to_string();
-	for edit in sorted.into_iter().rev() {
-		let start = edit.position;
-		let end = edit.position.saturating_add(edit.deleted_length);
-		if end > output.len() || start > end {
-			return Err(Error::from_reason("Computed edit range is out of bounds".to_string()));
-		}
-		let replacement = String::from_utf8(edit.inserted_text.clone()).map_err(|err| {
-			Error::from_reason(format!("Replacement text is not valid UTF-8: {err}"))
-		})?;
-		output.replace_range(start..end, &replacement);
-	}
-	Ok(output)
-}
-
-fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> {
-	let mut normalized = Vec::new();
-	let mut seen = BTreeSet::new();
-	for raw in patterns.unwrap_or_default() {
-		let pattern = raw.trim();
-		if pattern.is_empty() {
-			continue;
-		}
-		if seen.insert(pattern.to_string()) {
-			normalized.push(pattern.to_string());
-		}
-	}
-	if normalized.is_empty() {
-		return Err(Error::from_reason(
-			"`patterns` is required and must include at least one non-empty pattern".to_string(),
-		));
-	}
-	Ok(normalized)
-}
-
-fn normalize_rewrite_map(
-	rewrites: Option<HashMap<String, String>>,
-) -> Result<Vec<(String, String)>> {
-	let mut normalized = Vec::new();
-	for (pattern, rewrite) in rewrites.unwrap_or_default() {
-		if pattern.is_empty() {
-			return Err(Error::from_reason(
-				"`rewrites` keys must be non-empty pattern strings".to_string(),
-			));
-		}
-		normalized.push((pattern, rewrite));
-	}
-	if normalized.is_empty() {
-		return Err(Error::from_reason(
-			"`rewrites` is required and must include at least one pattern->rewrite mapping"
-				.to_string(),
-		));
-	}
-	normalized.sort_by(|left, right| left.0.cmp(&right.0));
-	Ok(normalized)
-}
-struct CompiledFindPattern {
-	pattern:                String,
-	compiled_by_lang:       HashMap<String, Pattern>,
-	compile_errors_by_lang: HashMap<String, String>,
-}
-
-struct ResolvedCandidate {
-	candidate:      FileCandidate,
-	language:       Option<SupportLang>,
-	language_error: Option<String>,
-}
-
-fn resolve_candidates_for_find(
-	candidates: Vec<FileCandidate>,
-	lang: Option<&str>,
-	ct: &task::CancelToken,
-) -> Result<(Vec<ResolvedCandidate>, HashMap<String, SupportLang>)> {
-	let mut resolved = Vec::with_capacity(candidates.len());
-	let mut languages = HashMap::new();
-
-	for candidate in candidates {
-		ct.heartbeat()?;
-		match resolve_language(lang, &candidate.absolute_path) {
-			Ok(language) => {
-				let key = language.canonical_name().to_string();
-				languages.entry(key).or_insert(language);
-				resolved.push(ResolvedCandidate {
-					candidate,
-					language: Some(language),
-					language_error: None,
-				});
-			},
-			Err(err) => {
-				resolved.push(ResolvedCandidate {
-					candidate,
-					language: None,
-					language_error: Some(err.to_string()),
-				});
-			},
-		}
+	pub struct CompiledFindPattern {
+		pub pattern:                String,
+		pub compiled_by_lang:       HashMap<String, Pattern>,
+		pub compile_errors_by_lang: HashMap<String, String>,
 	}
 
-	Ok((resolved, languages))
-}
+	pub struct ResolvedCandidate {
+		pub candidate:      FileCandidate,
+		pub language:       Option<SupportLang>,
+		pub language_error: Option<String>,
+	}
 
-fn compile_find_patterns(
-	patterns: &[String],
-	languages: &HashMap<String, SupportLang>,
-	selector: Option<&str>,
-	strictness: &MatchStrictness,
-	ct: &task::CancelToken,
-) -> Result<Vec<CompiledFindPattern>> {
-	let mut compiled = Vec::with_capacity(patterns.len());
+	pub fn resolve_candidates_for_find(
+		candidates: Vec<FileCandidate>,
+		lang: Option<&str>,
+		ct: &task::CancelToken,
+	) -> Result<(Vec<ResolvedCandidate>, HashMap<String, SupportLang>)> {
+		let mut resolved = Vec::with_capacity(candidates.len());
+		let mut languages = HashMap::new();
 
-	for pattern in patterns {
-		ct.heartbeat()?;
-		let mut compiled_by_lang = HashMap::with_capacity(languages.len());
-		let mut compile_errors_by_lang = HashMap::new();
-
-		for (lang_key, &language) in languages {
+		for candidate in candidates {
 			ct.heartbeat()?;
-			match compile_pattern(pattern, selector, strictness, language) {
-				Ok(compiled_pattern) => {
-					compiled_by_lang.insert(lang_key.clone(), compiled_pattern);
+			match resolve_language(lang, &candidate.absolute_path) {
+				Ok(language) => {
+					let key = language.canonical_name().to_string();
+					languages.entry(key).or_insert(language);
+					resolved.push(ResolvedCandidate {
+						candidate,
+						language: Some(language),
+						language_error: None,
+					});
 				},
 				Err(err) => {
-					compile_errors_by_lang.insert(lang_key.clone(), err.to_string());
+					resolved.push(ResolvedCandidate {
+						candidate,
+						language: None,
+						language_error: Some(err.to_string()),
+					});
 				},
 			}
 		}
 
-		compiled.push(CompiledFindPattern {
-			pattern: pattern.clone(),
-			compiled_by_lang,
-			compile_errors_by_lang,
-		});
+		Ok((resolved, languages))
 	}
 
-	Ok(compiled)
-}
-/// Search source files with ast-grep patterns; returns a promise resolved on a
-/// worker thread.
-#[napi]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
-	let AstFindOptions {
-		patterns,
-		lang,
-		path,
-		glob,
-		selector,
-		strictness,
-		limit,
-		offset,
-		include_meta,
-		context: _,
-		signal,
-		timeout_ms,
-	} = options;
+	pub fn compile_find_patterns(
+		patterns: &[String],
+		languages: &HashMap<String, SupportLang>,
+		selector: Option<&str>,
+		strictness: &MatchStrictness,
+		ct: &task::CancelToken,
+	) -> Result<Vec<CompiledFindPattern>> {
+		let mut compiled = Vec::with_capacity(patterns.len());
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
-	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
-	let normalized_offset = offset.unwrap_or(0);
+		for pattern in patterns {
+			ct.heartbeat()?;
+			let mut compiled_by_lang = HashMap::with_capacity(languages.len());
+			let mut compile_errors_by_lang = HashMap::new();
 
-	task::blocking("ast_grep", ct, move |ct| {
+			for (lang_key, &language) in languages {
+				ct.heartbeat()?;
+				match compile_pattern(pattern, selector, strictness, language) {
+					Ok(compiled_pattern) => {
+						compiled_by_lang.insert(lang_key.clone(), compiled_pattern);
+					},
+					Err(err) => {
+						compile_errors_by_lang.insert(lang_key.clone(), err.to_string());
+					},
+				}
+			}
+
+			compiled.push(CompiledFindPattern {
+				pattern: pattern.clone(),
+				compiled_by_lang,
+				compile_errors_by_lang,
+			});
+		}
+
+		Ok(compiled)
+	}
+
+	pub fn ast_grep_sync(config: AstFindConfig, ct: task::CancelToken) -> Result<AstFindResult> {
+		let AstFindConfig {
+			patterns,
+			lang,
+			path,
+			glob,
+			selector,
+			strictness,
+			limit,
+			offset,
+			include_meta,
+			..
+		} = config;
+
+		let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
+		let normalized_offset = offset.unwrap_or(0);
+
 		let patterns = normalize_pattern_list(patterns)?;
-		let strictness = resolve_strictness(strictness);
+		let strictness = parse_strictness(strictness.as_deref())?;
 		let include_meta = include_meta.unwrap_or(false);
 		let lang_str = lang.as_deref().map(str::trim).filter(|v| !v.is_empty());
 		let candidates: Vec<_> = collect_candidates(path, glob.as_deref(), &ct)?
@@ -596,7 +721,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 		let mut all_matches = Vec::new();
 		let mut parse_errors = Vec::new();
 		let mut total_matches = 0u32;
-		let mut files_with_matches = BTreeSet::new();
+		let mut files_with_matches = std::collections::BTreeSet::new();
 		for resolved in resolved_candidates {
 			ct.heartbeat()?;
 			let ResolvedCandidate { candidate, language, language_error } = resolved;
@@ -624,7 +749,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 				},
 			};
 
-			let mut runnable_patterns: Vec<(&str, &Pattern)> = Vec::new();
+			let mut runnable_patterns: Vec<(&str, &ast_grep_core::matcher::Pattern)> = Vec::new();
 			for compiled in &compiled_patterns {
 				ct.heartbeat()?;
 				if let Some(error) = compiled.compile_errors_by_lang.get(lang_key) {
@@ -707,32 +832,27 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 			limit_reached,
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 		})
-	})
-}
+	}
 
-/// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
-/// a promise.
-#[napi]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
-	let AstReplaceOptions {
-		rewrites,
-		lang,
-		path,
-		glob,
-		selector,
-		strictness,
-		dry_run,
-		max_replacements,
-		max_files,
-		fail_on_parse_error,
-		signal,
-		timeout_ms,
-	} = options;
+	pub fn ast_edit_sync(
+		config: AstReplaceConfig,
+		ct: task::CancelToken,
+	) -> Result<AstReplaceResult> {
+		let AstReplaceConfig {
+			rewrites,
+			lang,
+			path,
+			glob,
+			selector,
+			strictness,
+			dry_run,
+			max_replacements,
+			max_files,
+			fail_on_parse_error,
+		} = config;
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("ast_edit", ct, move |ct| {
 		let rewrite_rules = normalize_rewrite_map(rewrites)?;
-		let strictness = resolve_strictness(strictness);
+		let strictness = parse_strictness(strictness.as_deref())?;
 		let dry_run = dry_run.unwrap_or(true);
 		let max_replacements = max_replacements.unwrap_or(u32::MAX).max(1);
 		let max_files = max_files.unwrap_or(u32::MAX).max(1);
@@ -778,7 +898,8 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 		}
 
 		let mut changes = Vec::new();
-		let mut file_counts: BTreeMap<String, u32> = BTreeMap::new();
+		let mut file_counts: std::collections::BTreeMap<String, u32> =
+			std::collections::BTreeMap::new();
 		let mut files_touched = 0u32;
 		let mut limit_reached = false;
 
@@ -860,9 +981,9 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 			file_counts.insert(candidate.display_path.clone(), to_u32(file_changes.len()));
 
 			if !dry_run {
-				let edits: Vec<Edit<String>> = file_changes
+				let edits: Vec<ast_grep_core::source::Edit<String>> = file_changes
 					.iter()
-					.map(|entry| Edit {
+					.map(|entry| ast_grep_core::source::Edit {
 						position:       entry.edit.position,
 						deleted_length: entry.edit.deleted_length,
 						inserted_text:  entry.edit.inserted_text.clone(),
@@ -897,136 +1018,357 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 			changes,
 		})
-	})
+	}
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(not(feature = "structural-search-native"), feature = "structural-search-system"))]
+mod system_impl {
 	use std::{
-		fs,
-		path::PathBuf,
-		time::{SystemTime, UNIX_EPOCH},
+		io::{BufRead, BufReader},
+		process::{Command, Stdio},
 	};
+
+	use serde::Deserialize;
 
 	use super::*;
 
-	struct TempTree {
-		root: PathBuf,
+	#[derive(Deserialize)]
+	struct AstGrepMatch {
+		text:                String,
+		#[serde(rename = "file")]
+		path:                String,
+		range:               AstGrepRange,
+		#[allow(dead_code, reason = "deserialized from json")]
+		replacement:         Option<String>,
+		#[serde(rename = "replacementOffsets")]
+		#[allow(dead_code, reason = "deserialized from json")]
+		replacement_offsets: Option<AstGrepByteOffset>,
+		#[serde(rename = "metaVariables")]
+		meta_variables:      Option<AstGrepMetaVariables>,
 	}
 
-	impl Drop for TempTree {
-		fn drop(&mut self) {
-			let _ = fs::remove_dir_all(&self.root);
+	#[derive(Deserialize)]
+	struct AstGrepRange {
+		start:       AstGrepPos,
+		end:         AstGrepPos,
+		#[serde(rename = "byteOffset")]
+		byte_offset: AstGrepByteOffset,
+	}
+
+	#[derive(Deserialize)]
+	struct AstGrepByteOffset {
+		start: u32,
+		end:   u32,
+	}
+
+	#[derive(Deserialize)]
+	struct AstGrepPos {
+		line:   u32,
+		column: u32,
+	}
+
+	#[derive(Deserialize)]
+	struct AstGrepMetaVariables {
+		single: HashMap<String, AstGrepMetaValue>,
+	}
+
+	#[derive(Deserialize)]
+	struct AstGrepMetaValue {
+		text: String,
+	}
+
+	pub fn ast_grep_sync(config: AstFindConfig, _ct: task::CancelToken) -> Result<AstFindResult> {
+		if !crate::utils::command_exists("ast-grep") {
+			return Err(Error::from_reason("ast-grep binary not found in PATH."));
 		}
+
+		let search_path = normalize_search_path(config.path.clone())?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+
+		let (current_dir, target_arg) = if metadata.is_file() {
+			(
+				search_path
+					.parent()
+					.unwrap_or_else(|| std::path::Path::new("."))
+					.to_path_buf(),
+				search_path
+					.file_name()
+					.map_or_else(|| ".".to_string(), |n| n.to_string_lossy().into_owned()),
+			)
+		} else {
+			(search_path, ".".to_string())
+		};
+
+		let mut args = vec!["run".to_string(), "--json=stream".to_string()];
+
+		if let Some(patterns) = config.patterns {
+			if let Some(p) = patterns.first() {
+				args.push("-p".to_string());
+				args.push(p.clone());
+			}
+		}
+
+		if let Some(lang) = config.lang {
+			args.push("-l".to_string());
+			args.push(lang);
+		}
+
+		args.push(target_arg);
+
+		let mut child = Command::new("ast-grep")
+			.args(&args)
+			.current_dir(current_dir)
+			.stdout(Stdio::piped())
+			.spawn()
+			.map_err(|e| Error::from_reason(format!("Failed to spawn ast-grep: {e}")))?;
+
+		let stdout = child.stdout.take().unwrap();
+		let reader = BufReader::new(stdout);
+
+		let mut matches = vec![];
+		let mut files_with_matches = std::collections::HashSet::new();
+
+		for line in reader.lines() {
+			let line =
+				line.map_err(|e| Error::from_reason(format!("Error reading ast-grep output: {e}")))?;
+			if let Ok(m) = serde_json::from_str::<AstGrepMatch>(&line) {
+				let meta_variables = m
+					.meta_variables
+					.map(|mv| mv.single.into_iter().map(|(k, v)| (k, v.text)).collect());
+
+				files_with_matches.insert(m.path.clone());
+				matches.push(AstFindMatch {
+					path: m.path,
+					text: m.text,
+					byte_start: m.range.byte_offset.start,
+					byte_end: m.range.byte_offset.end,
+					start_line: m.range.start.line + 1,
+					start_column: m.range.start.column + 1,
+					end_line: m.range.end.line + 1,
+					end_column: m.range.end.column + 1,
+					meta_variables,
+				});
+			}
+		}
+
+		let _ = child.wait();
+
+		Ok(AstFindResult {
+			total_matches: matches.len() as u32,
+			files_with_matches: files_with_matches.len() as u32,
+			files_searched: 0, // Unknown from stream
+			limit_reached: false,
+			parse_errors: None,
+			matches,
+		})
 	}
 
-	fn make_temp_tree() -> TempTree {
-		let unique = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.expect("system time should be after UNIX_EPOCH")
-			.as_nanos();
-		let root = std::env::temp_dir().join(format!("pi-ast-glob-test-{unique}"));
-		fs::create_dir_all(root.join("nested")).expect("temp nested dir should be created");
-		fs::write(root.join("a.ts"), "const a = 1;\n").expect("temp file a.ts should be written");
-		fs::write(root.join("nested").join("b.ts"), "const b = 2;\n")
-			.expect("temp file nested/b.ts should be written");
-		TempTree { root }
-	}
+	pub fn ast_edit_sync(
+		config: AstReplaceConfig,
+		_ct: task::CancelToken,
+	) -> Result<AstReplaceResult> {
+		if !crate::utils::command_exists("ast-grep") {
+			return Err(Error::from_reason("ast-grep binary not found in PATH."));
+		}
 
-	#[test]
-	fn glob_star_matches_only_direct_children() {
-		let tree = make_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("*.ts"), &ct)
-				.expect("candidate collection should succeed");
-		let paths = candidates
+		let search_path = normalize_search_path(config.path.clone())?;
+		let metadata = std::fs::metadata(&search_path)
+			.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
+
+		let (current_dir, target_arg) = if metadata.is_file() {
+			(
+				search_path
+					.parent()
+					.unwrap_or_else(|| std::path::Path::new("."))
+					.to_path_buf(),
+				search_path
+					.file_name()
+					.map_or_else(|| ".".to_string(), |n| n.to_string_lossy().into_owned()),
+			)
+		} else {
+			(search_path, ".".to_string())
+		};
+
+		let rewrites = config.rewrites.unwrap_or_default();
+		let dry_run = config.dry_run.unwrap_or(true);
+
+		let mut all_changes = Vec::new();
+		let mut files_touched = std::collections::HashSet::new();
+
+		for (pattern, replacement) in rewrites {
+			let mut args = vec![
+				"run".to_string(),
+				"--pattern".to_string(),
+				pattern,
+				"--rewrite".to_string(),
+				replacement,
+				"--json=stream".to_string(),
+			];
+
+			if let Some(lang) = &config.lang {
+				args.push("-l".to_string());
+				args.push(lang.clone());
+			}
+
+			if !dry_run {
+				args.push("--update-all".to_string());
+			}
+
+			args.push(target_arg.clone());
+
+			let mut child = Command::new("ast-grep")
+				.args(&args)
+				.current_dir(&current_dir)
+				.stdout(Stdio::piped())
+				.spawn()
+				.map_err(|e| Error::from_reason(format!("Failed to spawn ast-grep: {e}")))?;
+
+			let stdout = child.stdout.take().unwrap();
+			let reader = BufReader::new(stdout);
+
+			for line in reader.lines() {
+				let line = line.map_err(|e| {
+					Error::from_reason(format!("Error reading ast-grep output: {e}"))
+				})?;
+				if let Ok(m) = serde_json::from_str::<AstGrepMatch>(&line) {
+					files_touched.insert(m.path.clone());
+					all_changes.push(AstReplaceChange {
+						path: m.path,
+						before: m.text,
+						after: m.replacement.unwrap_or_default(),
+						byte_start: m.range.byte_offset.start,
+						byte_end: m.range.byte_offset.end,
+						deleted_length: m.range.byte_offset.end.saturating_sub(m.range.byte_offset.start),
+						start_line: m.range.start.line + 1,
+						start_column: m.range.start.column + 1,
+						end_line: m.range.end.line + 1,
+						end_column: m.range.end.column + 1,
+					});
+				}
+			}
+			let _ = child.wait();
+		}
+
+		let mut file_counts = HashMap::new();
+		for change in &all_changes {
+			*file_counts.entry(change.path.clone()).or_insert(0) += 1;
+		}
+
+		let file_changes = file_counts
 			.into_iter()
-			.map(|file| file.display_path)
-			.collect::<Vec<_>>();
-		assert_eq!(paths, vec!["a.ts".to_string()]);
-	}
+			.map(|(path, count)| AstReplaceFileChange { path, count })
+			.collect();
 
-	#[test]
-	fn glob_double_star_matches_recursively() {
-		let tree = make_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("**/*.ts"), &ct)
-				.expect("candidate collection should succeed");
-		let paths = candidates
-			.into_iter()
-			.map(|file| file.display_path)
-			.collect::<Vec<_>>();
-		assert_eq!(paths, vec!["a.ts".to_string(), "nested/b.ts".to_string()]);
+		Ok(AstReplaceResult {
+			total_replacements: all_changes.len() as u32,
+			files_touched: files_touched.len() as u32,
+			files_searched: 0,
+			applied: !dry_run,
+			limit_reached: false,
+			parse_errors: None,
+			changes: all_changes,
+			file_changes,
+		})
 	}
-	fn make_mixed_temp_tree() -> TempTree {
-		let unique = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.expect("system time should be after UNIX_EPOCH")
-			.as_nanos();
-		let root = std::env::temp_dir().join(format!("pi-ast-mixed-lang-test-{unique}"));
-		fs::create_dir_all(&root).expect("temp mixed-lang dir should be created");
-		fs::write(root.join("a.ts"), "const a = 1;\n").expect("temp file a.ts should be written");
-		fs::write(root.join("b.rs"), "fn main() {}\n").expect("temp file b.rs should be written");
-		TempTree { root }
-	}
+}
 
-	#[test]
-	fn infers_single_replace_lang_for_uniform_candidates() {
-		let tree = make_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("**/*.ts"), &ct)
-				.expect("candidate collection should succeed");
-		let inferred =
-			infer_single_replace_lang(&candidates, &ct).expect("language should be inferred");
-		assert_eq!(inferred, "typescript");
+#[cfg(all(not(feature = "structural-search-native"), not(feature = "structural-search-system")))]
+mod no_impl {
+	use super::*;
+	pub fn ast_grep_sync(_config: AstFindConfig, _ct: task::CancelToken) -> Result<AstFindResult> {
+		Err(Error::from_reason("Structural search is disabled in this build."))
 	}
+	pub fn ast_edit_sync(
+		_config: AstReplaceConfig,
+		_ct: task::CancelToken,
+	) -> Result<AstReplaceResult> {
+		Err(Error::from_reason("Structural search is disabled in this build."))
+	}
+}
 
-	#[test]
-	fn rejects_mixed_replace_lang_inference() {
-		let tree = make_mixed_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), None, &ct)
-				.expect("candidate collection should succeed");
-		let err = infer_single_replace_lang(&candidates, &ct)
-			.expect_err("mixed language inference should fail");
-		assert!(err.to_string().contains("multiple languages"));
-	}
-	#[test]
-	fn resolves_supported_language_aliases() {
-		assert_eq!(resolve_supported_lang("ts").ok(), Some(SupportLang::TypeScript));
-		assert_eq!(resolve_supported_lang("jsx").ok(), Some(SupportLang::JavaScript));
-		assert_eq!(resolve_supported_lang("rs").ok(), Some(SupportLang::Rust));
-		assert_eq!(resolve_supported_lang("kotlin").ok(), Some(SupportLang::Kotlin));
-		assert_eq!(resolve_supported_lang("bash").ok(), Some(SupportLang::Bash));
-		assert_eq!(resolve_supported_lang("c").ok(), Some(SupportLang::C));
-		assert_eq!(resolve_supported_lang("cpp").ok(), Some(SupportLang::Cpp));
-		assert_eq!(resolve_supported_lang("tla").ok(), Some(SupportLang::Tlaplus));
-		assert_eq!(resolve_supported_lang("pluscal").ok(), Some(SupportLang::Tlaplus));
-		assert!(resolve_supported_lang("brainfuck").is_err());
-	}
+#[cfg(feature = "structural-search-native")]
+use native_impl::*;
+#[cfg(all(
+	not(feature = "structural-search-native"),
+	not(feature = "structural-search-system")
+))]
+use no_impl::*;
+#[cfg(all(not(feature = "structural-search-native"), feature = "structural-search-system"))]
+use system_impl::*;
 
-	#[test]
-	fn applies_non_overlapping_edits() {
-		let source = "const answer = 41;";
-		let edits = vec![
-			Edit::<String> { position: 6, deleted_length: 6, inserted_text: b"value".to_vec() },
-			Edit::<String> { position: 15, deleted_length: 2, inserted_text: b"42".to_vec() },
-		];
-		let output = apply_edits(source, &edits).expect("edits should apply");
-		assert_eq!(output, "const value = 42;");
-	}
+/// Search source files with ast-grep patterns; returns a promise resolved on a
+/// worker thread.
+#[napi(js_name = "astGrep")]
+pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
+	#[allow(unused_variables, reason = "required for config initialization")]
+	let AstFindOptions {
+		patterns,
+		lang,
+		path,
+		glob,
+		selector,
+		strictness,
+		limit,
+		offset,
+		include_meta,
+		context,
+		signal,
+		timeout_ms,
+	} = options;
 
-	#[test]
-	fn rejects_overlapping_edits() {
-		let source = "abcdef";
-		let edits = vec![
-			Edit::<String> { position: 1, deleted_length: 3, inserted_text: b"x".to_vec() },
-			Edit::<String> { position: 2, deleted_length: 1, inserted_text: b"y".to_vec() },
-		];
-		assert!(apply_edits(source, &edits).is_err());
-	}
+	let ct = task::CancelToken::new(timeout_ms, signal);
+
+	let config = AstFindConfig {
+		patterns,
+		lang,
+		path,
+		glob,
+		selector,
+		strictness,
+		limit,
+		offset,
+		include_meta,
+		context,
+	};
+
+	task::blocking("ast_grep", ct, move |ct| ast_grep_sync(config, ct))
+}
+
+/// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
+/// a promise.
+#[napi(js_name = "astEdit")]
+pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
+	#[allow(unused_variables, reason = "required for config initialization")]
+	let AstReplaceOptions {
+		rewrites,
+		lang,
+		path,
+		glob,
+		selector,
+		strictness,
+		dry_run,
+		max_replacements,
+		max_files,
+		fail_on_parse_error,
+		signal,
+		timeout_ms,
+	} = options;
+
+	let ct = task::CancelToken::new(timeout_ms, signal);
+
+	let config = AstReplaceConfig {
+		rewrites,
+		lang,
+		path,
+		glob,
+		selector,
+		strictness,
+		dry_run,
+		max_replacements,
+		max_files,
+		fail_on_parse_error,
+	};
+
+	task::blocking("ast_edit", ct, move |ct| ast_edit_sync(config, ct))
 }

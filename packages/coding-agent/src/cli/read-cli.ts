@@ -7,7 +7,7 @@
 import * as path from "node:path";
 import chalk from "chalk";
 import { Settings } from "../config/settings";
-import { formatChunkedRead, resolveAnchorStyle } from "../edit/modes/chunk";
+import { formatChunkedRead, resolveAnchorStyle } from "../edit/modes/chunk-state";
 import { getLanguageFromPath } from "../modes/theme/theme";
 import type { ToolSession } from "../tools";
 import { parseReadUrlTarget } from "../tools/fetch";

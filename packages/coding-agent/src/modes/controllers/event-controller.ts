@@ -13,6 +13,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { calculatePromptTokens } from "../../session/compaction/compaction";
 import type { ExitPlanModeDetails } from "../../tools";
 
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	#lastThinkingCount = 0;

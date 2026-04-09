@@ -30,8 +30,9 @@ import {
 import type { InteractiveModeContext } from "../../modes/types";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
-import { isSearchProviderPreference, setPreferredImageProvider, setPreferredSearchProvider } from "../../tools";
+import { setPreferredImageProvider } from "../../tools/gemini-image";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { isSearchProviderPreference, setPreferredSearchProvider } from "../../web/search";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { ExtensionDashboard } from "../components/extensions";
@@ -46,6 +47,8 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../sdk";
+
 
 const CALLBACK_SERVER_PROVIDERS = new Set<OAuthProvider>([
 	"anthropic",
@@ -57,8 +60,16 @@ const CALLBACK_SERVER_PROVIDERS = new Set<OAuthProvider>([
 
 const MANUAL_LOGIN_TIP = "Tip: You can complete pairing with /login <redirect URL>.";
 
+type CreateAgentSessionFn = (
+	options?: CreateAgentSessionOptions,
+) => Promise<CreateAgentSessionResult>;
+
 export class SelectorController {
-	constructor(private ctx: InteractiveModeContext) {}
+	constructor(
+		private ctx: InteractiveModeContext,
+		private readonly createAgentSession: CreateAgentSessionFn = () =>
+			Promise.reject(new Error("createAgentSession unavailable")),
+	) {}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
 		const oauthProviders = getOAuthProviders();
@@ -196,7 +207,7 @@ export class SelectorController {
 			modelRegistry: this.ctx.session.modelRegistry,
 			activeModelPattern,
 			defaultModelPattern,
-		});
+		}, this.createAgentSession);
 		this.showSelector(done => {
 			dashboard.onClose = () => {
 				done();
