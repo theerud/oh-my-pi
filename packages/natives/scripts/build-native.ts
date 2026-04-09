@@ -21,6 +21,7 @@ const isCrossCompile = Boolean(crossTarget) || targetPlatform !== process.platfo
 const buildFlavor = noImage && noHighlights ? "minimal" : isLean ? "lean" : "full";
 const bindingsDir =
 	buildFlavor === "full" ? nativeDir : path.join(generatedDir, buildFlavor);
+const runtimeAddonDir = bindingsDir;
 
 type X64Variant = "modern" | "baseline";
 
@@ -105,6 +106,19 @@ async function cleanupStaleTemps(dir: string): Promise<void> {
 		const entries = await fs.readdir(dir);
 		for (const entry of entries) {
 			if (entry.includes(".tmp.") || entry.includes(".old.") || entry.includes(".new.")) {
+				await fs.unlink(path.join(dir, entry)).catch(() => {});
+			}
+		}
+	} catch {
+		// Directory might not exist yet
+	}
+}
+
+async function cleanupNativeAddons(dir: string): Promise<void> {
+	try {
+		const entries = await fs.readdir(dir);
+		for (const entry of entries) {
+			if (entry.startsWith("pi_natives.") && entry.endsWith(".node")) {
 				await fs.unlink(path.join(dir, entry)).catch(() => {});
 			}
 		}
@@ -309,7 +323,7 @@ if (crossTarget) napiArgs.push("--target", crossTarget);
 
 const profileLabel = useLocalProfile ? " (local)" : "";
 const canonicalAddonFilename = `pi_natives.${targetPlatform}-${targetArch}${variantSuffix}.node`;
-const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
+const canonicalAddonPath = path.join(runtimeAddonDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${profileLabel}…`);
 console.log(`Features: ${Array.from(features).join(", ")}`);
@@ -321,6 +335,7 @@ await fs.mkdir(bindingsDir, { recursive: true });
 await fs.mkdir(nativeDir, { recursive: true });
 await cleanupStaleTemps(bindingsDir);
 await cleanupStaleTemps(nativeDir);
+await cleanupNativeAddons(runtimeAddonDir);
 
 // Resolve napi bin directly: `bunx @napi-rs/cli` can pick up the wrong bin on
 // systems where `cli` exists on PATH (e.g. Mono's /usr/bin/cli on Ubuntu).
@@ -340,6 +355,7 @@ const builtAddonPath = await resolveBuiltAddonPath(bindingsDir, canonicalAddonFi
 if (builtAddonPath !== canonicalAddonPath) {
 	console.log(`Normalizing native addon filename: ${path.basename(builtAddonPath)} → ${canonicalAddonFilename}`);
 	await installBinary(builtAddonPath, canonicalAddonPath);
+	await fs.unlink(builtAddonPath).catch(() => {});
 }
 
 if (await hasGeneratedIndexJs(bindingsDir)) {

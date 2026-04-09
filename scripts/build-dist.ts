@@ -9,6 +9,7 @@ const distDir = path.join(repoRoot, "dist");
 const stagingDir = path.join(distDir, "omp");
 const isLean = process.argv.includes("--lean");
 const isMinimal = process.argv.includes("--minimal");
+const nativeFlavor = isMinimal ? "minimal" : isLean ? "lean" : "full";
 
 function pickSystemBinary(name: string): string {
 	const candidates = childProcess.execSync(`which -a ${name}`).toString().trim().split("\n").filter(Boolean);
@@ -28,6 +29,13 @@ function buildSystemNodePath(nodePath: string): string {
 function findLockedPackageVersion(lockText: string, packageName: string): string | null {
 	const match = lockText.match(new RegExp(`"${packageName}": \\["${packageName}@([^"]+)"`));
 	return match?.[1] ?? null;
+}
+
+function getNativeBuildOutputDir(repoRoot: string, flavor: "full" | "lean" | "minimal"): string {
+	if (flavor === "full") {
+		return path.join(repoRoot, "packages/natives/native");
+	}
+	return path.join(repoRoot, "packages/natives/.generated", flavor);
 }
 
 async function main() {
@@ -65,7 +73,7 @@ async function main() {
 	// Copy our custom native modules
 	const nativeTargetDir = path.join(stagingDir, "native");
 	await fs.mkdir(nativeTargetDir, { recursive: true });
-	const sourceNativeDir = path.join(repoRoot, "packages/natives/native");
+	const sourceNativeDir = getNativeBuildOutputDir(repoRoot, nativeFlavor);
 	const nativeFiles = await fs.readdir(sourceNativeDir);
 	for (const file of nativeFiles) {
 		if (file.endsWith(".node")) {
