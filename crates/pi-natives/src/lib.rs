@@ -32,6 +32,10 @@ pub mod chunk;
 #[cfg(not(feature = "chunk-native"))]
 #[path = "chunk_disabled.rs"]
 pub mod chunk;
+#[cfg(feature = "clipboard-native")]
+pub mod clipboard;
+#[cfg(not(feature = "clipboard-native"))]
+#[path = "clipboard_disabled.rs"]
 pub mod clipboard;
 pub mod fff;
 pub mod fs_cache;
@@ -39,6 +43,10 @@ pub mod glob;
 pub mod glob_util;
 pub mod grep;
 pub mod highlight;
+#[cfg(feature = "html-to-markdown-native")]
+pub mod html;
+#[cfg(not(feature = "html-to-markdown-native"))]
+#[path = "html_disabled.rs"]
 pub mod html;
 pub mod image;
 pub mod indent;

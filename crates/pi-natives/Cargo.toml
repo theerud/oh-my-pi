@@ -24,8 +24,8 @@ brush-core = { version = "0.4.0", path = "../brush-core-vendored", optional = tr
 brush-builtins = { version = "0.1.0", path = "../brush-builtins-vendored", optional = true }
 parking_lot = "0.12.5"
 dashmap = "6.1"
-clap = { version = "4", features = ["derive"] }
-os_pipe = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+os_pipe = { version = "1", optional = true }
 portable-pty = "0.9"
 grep-regex = { version = "0.1", optional = true }
 fff-grep = { version = "0.4", optional = true }
@@ -102,7 +102,7 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ], optional = true }
-arboard = { version = "3.5.0", features = ["wayland-data-control"] }
+arboard = { version = "3.5.0", features = ["wayland-data-control"], optional = true }
 icy_sixel = { version = "0.5", optional = true }
 unicode-segmentation = "1.11"
 unicode-width = "0.2"
@@ -111,7 +111,7 @@ syntect = { version = "5.3", default-features = false, features = [
    "default-themes",
    "regex-fancy",
 ], optional = true }
-html-to-markdown-rs = { version = "2.24", default-features = false }
+html-to-markdown-rs = { version = "2.24", default-features = false, optional = true }
 phf = { version = "0.13", features = ["macros"] }
 smallvec = { version = "1.15.1", features = [
    "serde",
@@ -133,6 +133,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 default = ["full"]
 full = [
    "chunk-native",
+   "clipboard-native",
+   "html-to-markdown-native",
    "syntax-highlighting",
    "structural-search-native",
    "image",
@@ -144,6 +146,8 @@ full = [
 
 syntax-highlighting = ["dep:syntect"]
 image = ["dep:image", "dep:icy_sixel"]
+clipboard-native = ["dep:arboard"]
+html-to-markdown-native = ["dep:html-to-markdown-rs"]
 
 tree-sitter-support = [
    "dep:tree-sitter",
@@ -211,7 +215,7 @@ chunk-native = ["tree-sitter-support"]
 structural-search-native = ["dep:ast-grep-core", "tree-sitter-support"]
 structural-search-system = []
 
-shell-native = ["dep:brush-core", "dep:brush-builtins"]
+shell-native = ["dep:brush-core", "dep:brush-builtins", "dep:clap", "dep:os_pipe"]
 shell-system = []
 
 text-search-native = ["dep:grep-regex", "dep:fff-grep", "dep:grep-matcher"]

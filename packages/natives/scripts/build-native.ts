@@ -286,6 +286,14 @@ if (!noImage) {
 	features.add("image");
 }
 
+if (buildFlavor === "full") {
+	features.add("clipboard-native");
+}
+
+if (buildFlavor !== "minimal") {
+	features.add("html-to-markdown-native");
+}
+
 if (Bun.env.PI_NATIVE_FEATURES) {
 	for (const feature of Bun.env.PI_NATIVE_FEATURES.split(",")) {
 		const trimmed = feature.trim();
