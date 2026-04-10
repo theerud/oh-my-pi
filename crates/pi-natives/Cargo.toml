@@ -145,8 +145,7 @@ full = [
 syntax-highlighting = ["dep:syntect"]
 image = ["dep:image", "dep:icy_sixel"]
 
-language-support = [
-   "dep:ast-grep-core",
+tree-sitter-support = [
    "dep:tree-sitter",
    "dep:tree-sitter-astro",
    "dep:tree-sitter-bash",
@@ -205,11 +204,11 @@ language-support = [
    "dep:tree-sitter-zig",
 ]
 
-chunk-native = ["language-support"]
+chunk-native = ["tree-sitter-support"]
 
 # Embedded ast-grep implementation; lean/minimal builds use the external
 # `ast-grep` command instead.
-structural-search-native = ["language-support"]
+structural-search-native = ["dep:ast-grep-core", "tree-sitter-support"]
 structural-search-system = []
 
 shell-native = ["dep:brush-core", "dep:brush-builtins"]

@@ -58,7 +58,6 @@ mod ast_vue;
 
 use std::collections::HashMap;
 
-use ast_grep_core::tree_sitter::LanguageExt;
 use napi::{Error, Result};
 use napi_derive::napi;
 use tree_sitter::{Node, Parser, Tree};
@@ -189,7 +188,7 @@ pub(crate) fn line_to_chunk_path(tree: &ChunkTree, line: u32) -> Option<String> 
 
 fn parse_tree(source: &str, language: SupportLang) -> Result<Tree> {
 	let mut parser = Parser::new();
-	let ts_language = language.get_ts_language();
+	let ts_language = language.ts_language();
 	parser
 		.set_language(&ts_language)
 		.map_err(|err| Error::from_reason(format!("Failed to set parser language: {err}")))?;

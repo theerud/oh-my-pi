@@ -1,6 +1,6 @@
 //! Tree-sitter parser functions for all supported languages.
 
-use ast_grep_core::tree_sitter::TSLanguage;
+use tree_sitter::Language as TSLanguage;
 
 pub fn language_astro() -> TSLanguage {
 	tree_sitter_astro::LANGUAGE.into()
